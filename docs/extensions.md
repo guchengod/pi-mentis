@@ -1,8 +1,8 @@
 # Extensions
 
-`@pi-mentis/pi-mentis-knowledge` registers `commit_knowledge` and `search_knowledge`
-only when no memory provider wins. `@pi-mentis/pi-mentis-memory` registers
-`commit_memory` and `search_memory`. The integrated `@pi-mentis/pi-mentis` also exposes
+`@galvinsan/pi-mentis-knowledge` registers `commit_knowledge` and `search_knowledge`
+only when no memory provider wins. `@galvinsan/pi-mentis-memory` registers
+`commit_memory` and `search_memory`. The integrated `@galvinsan/pi-mentis` also exposes
 only memory tools, but `search_memory` performs knowledge-first retrieval. All three
 declare providers before session start and register dynamic tools after arbitration.
 

@@ -1,11 +1,11 @@
-# @pi-mentis/pi-mentis-memory
+# @galvinsan/pi-mentis-memory
 
 Standalone persistent personal memory for Pi v0.83.0, backed by Zvec and SiliconFlow embeddings.
 
 ## Install
 
 ```bash
-pi install @pi-mentis/pi-mentis-memory
+pi install @galvinsan/pi-mentis-memory
 ```
 
 Set `SILICONFLOW_API_KEY`, then start Pi. The extension registers `commit_memory` and

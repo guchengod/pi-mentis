@@ -5,13 +5,21 @@ const root = path.resolve(import.meta.dirname, "..");
 const workspace = JSON.parse(await readFile(path.join(root, "mentis.workspace.json"), "utf8"));
 const packageDirs = await readdir(path.join(root, "packages"), { withFileTypes: true });
 const failures = [];
+const publishedExtensions = new Set([
+  "pi-context-extension",
+  "pi-knowledge-extension",
+  "pi-memory-extension",
+]);
 
 for (const entry of packageDirs) {
   if (!entry.isDirectory()) continue;
   const manifestPath = path.join(root, "packages", entry.name, "package.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (!manifest.name.startsWith(`${workspace.packageScope}/`)) {
-    failures.push(`${entry.name}: package name is outside ${workspace.packageScope}`);
+  const expectedScope = publishedExtensions.has(entry.name)
+    ? workspace.publishScope
+    : workspace.packageScope;
+  if (!manifest.name.startsWith(`${expectedScope}/`)) {
+    failures.push(`${entry.name}: package name is outside ${expectedScope}`);
   }
   for (const section of ["dependencies", "peerDependencies", "devDependencies"]) {
     const dependencies = manifest[section] ?? {};
