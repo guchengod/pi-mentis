@@ -1,0 +1,30 @@
+{
+  "name": "@pi-mentis/pi-mentis-zvec",
+  "version": "0.1.0",
+  "description": "Zvec-only durable storage, generations, write serialization, and process locking",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --external @zvec/zvec",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pi-mentis/pi-mentis-core": "workspace:*",
+    "@zvec/zvec": "0.6.0",
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "4.1.4"
+  }
+}

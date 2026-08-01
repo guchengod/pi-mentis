@@ -1,0 +1,25 @@
+{
+  "name": "@pi-mentis/pi-mentis-inference",
+  "version": "0.1.0",
+  "description": "Provider-neutral Embedding and Rerank contracts, batching, caches, and budget planning",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pi-mentis/pi-mentis-core": "workspace:*"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "fixture-pi-package",
+  "version": "1.0.0",
+  "pi": {
+    "extensions": [
+      "extension.ts"
+    ]
+  }
+}

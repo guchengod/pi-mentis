@@ -1,0 +1,37 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "useUnknownInCatchVariables": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@pi-mentis/pi-mentis-core": ["packages/core/src/index.ts"],
+      "@pi-mentis/pi-mentis-inference": ["packages/inference/src/index.ts"],
+      "@pi-mentis/pi-mentis-siliconflow": ["packages/siliconflow-provider/src/index.ts"],
+      "@pi-mentis/pi-mentis-observability": ["packages/observability/src/index.ts"],
+      "@pi-mentis/pi-mentis-zvec": ["packages/zvec-storage/src/index.ts"],
+      "@pi-mentis/pi-mentis-file-parsers": ["packages/file-parsers/src/index.ts"],
+      "@pi-mentis/pi-mentis-knowledge-core": ["packages/knowledge/src/index.ts"],
+      "@pi-mentis/pi-mentis-memory-core": ["packages/memory/src/index.ts"],
+      "@pi-mentis/pi-mentis-retrieval": ["packages/retrieval/src/index.ts"],
+      "@pi-mentis/pi-mentis-pi-capabilities": ["packages/pi-capabilities/src/index.ts"]
+    },
+    "types": ["node"]
+  }
+}

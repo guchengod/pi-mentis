@@ -1,0 +1,26 @@
+{
+  "name": "@pi-mentis/pi-mentis-siliconflow",
+  "version": "0.1.0",
+  "description": "Validated SiliconFlow Embedding and Rerank provider",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pi-mentis/pi-mentis-core": "workspace:*",
+    "@pi-mentis/pi-mentis-inference": "workspace:*"
+  }
+}

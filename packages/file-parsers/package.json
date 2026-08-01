@@ -1,0 +1,31 @@
+{
+  "name": "@pi-mentis/pi-mentis-file-parsers",
+  "version": "0.1.0",
+  "description": "Registry-based structured parsers and symbol-aware chunking",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pi-mentis/pi-mentis-core": "workspace:*",
+    "csv-parse": "6.1.0",
+    "fast-xml-parser": "5.3.3",
+    "fflate": "0.8.2",
+    "pdfjs-dist": "5.4.530",
+    "smol-toml": "1.6.0",
+    "yaml": "2.8.1"
+  }
+}

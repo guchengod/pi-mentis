@@ -1,0 +1,74 @@
+{
+  "name": "pi-mentis-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pi-aware personal long-term memory with coding-agent work as the first-priority scenario",
+  "license": "MIT",
+  "author": "guchengod",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guchengod/pi-mentis.git"
+  },
+  "homepage": "https://github.com/guchengod/pi-mentis#readme",
+  "bugs": {
+    "url": "https://github.com/guchengod/pi-mentis/issues"
+  },
+  "type": "module",
+  "packageManager": "pnpm@10.20.0",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "benchmark": "vitest bench --run --project benchmark --outputJson benchmark-results/full.json",
+    "benchmark:smoke": "vitest run --project benchmark",
+    "clean": "turbo run clean",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0 && node scripts/check-workspace.mjs",
+    "pack:extensions": "node scripts/pack-extensions.mjs",
+    "pretest:integration": "pnpm build",
+    "test": "vitest run --project unit",
+    "test:e2e": "vitest run --project integration",
+    "test:fault-injection": "vitest run --project integration -t \"degrades on rerank failure\"",
+    "test:e2e:live": "node scripts/live-e2e.mjs all",
+    "test:e2e:live:knowledge": "node scripts/live-e2e.mjs knowledge",
+    "test:e2e:live:memory": "node scripts/live-e2e.mjs memory",
+    "test:e2e:live:combined": "node scripts/live-e2e.mjs combined",
+    "test:e2e:live:pi": "node scripts/live-e2e.mjs pi",
+    "test:e2e:live:restart": "node scripts/live-e2e.mjs restart",
+    "test:e2e:live:inference": "node scripts/live-e2e.mjs inference",
+    "test:e2e:live:performance": "node scripts/live-e2e.mjs performance",
+    "test:e2e:live:formats": "node scripts/live-e2e.mjs formats",
+    "test:integration": "vitest run --project integration",
+    "test:live": "SILICONFLOW_LIVE_TEST=1 vitest run --project live",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@earendil-works/pi-agent-core": "0.83.0",
+    "@earendil-works/pi-ai": "0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "@earendil-works/pi-tui": "0.83.0",
+    "@types/node": "26.1.2",
+    "eslint": "10.8.0",
+    "prettier": "3.9.6",
+    "tsup": "8.5.1",
+    "turbo": "2.10.7",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.65.0",
+    "vitest": "4.1.10"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@zvec/zvec"
+    ],
+    "peerDependencyRules": {
+      "allowedVersions": {
+        "@emnapi/core": "1.11.1",
+        "@emnapi/runtime": "1.11.1"
+      }
+    }
+  }
+}

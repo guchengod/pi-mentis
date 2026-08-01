@@ -1,0 +1,6 @@
+{
+  "packageScope": "@pi-mentis",
+  "supportedPiVersion": "0.83.0",
+  "piSourceTag": "v0.83.0",
+  "piSourceCommit": "845d6ff1f6643aba440341cce877ce1c43ebbc39"
+}

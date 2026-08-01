@@ -1,0 +1,74 @@
+{
+  "name": "@pi-mentis/pi-mentis",
+  "version": "0.1.0",
+  "description": "Integrated Pi Mentis knowledge-first memory extension for Pi v0.83.0",
+  "license": "MIT",
+  "author": "guchengod",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/guchengod/pi-mentis.git",
+    "directory": "packages/pi-context-extension"
+  },
+  "homepage": "https://github.com/guchengod/pi-mentis#readme",
+  "bugs": {
+    "url": "https://github.com/guchengod/pi-mentis/issues"
+  },
+  "keywords": [
+    "pi",
+    "memory",
+    "agent",
+    "coding-agent",
+    "zvec",
+    "long-term-memory"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec --external csv-parse --external fast-xml-parser --external fflate --external pdfjs-dist --external smol-toml --external yaml",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@zvec/zvec": "0.6.0",
+    "csv-parse": "6.1.0",
+    "fast-xml-parser": "5.3.3",
+    "fflate": "0.8.2",
+    "pdfjs-dist": "5.4.530",
+    "smol-toml": "1.6.0",
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "@pi-mentis/pi-mentis-core": "workspace:*",
+    "@pi-mentis/pi-mentis-file-parsers": "workspace:*",
+    "@pi-mentis/pi-mentis-inference": "workspace:*",
+    "@pi-mentis/pi-mentis-knowledge-core": "workspace:*",
+    "@pi-mentis/pi-mentis-memory-core": "workspace:*",
+    "@pi-mentis/pi-mentis-observability": "workspace:*",
+    "@pi-mentis/pi-mentis-pi-capabilities": "workspace:*",
+    "@pi-mentis/pi-mentis-retrieval": "workspace:*",
+    "@pi-mentis/pi-mentis-siliconflow": "workspace:*",
+    "@pi-mentis/pi-mentis-zvec": "workspace:*"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "0.83.0",
+    "typebox": "1.3.7"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
