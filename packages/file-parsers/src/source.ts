@@ -13,6 +13,7 @@ import {
 
 import { detectMediaType } from "./detection.js";
 import type { KnowledgeSourceRef, ParserInput } from "./types.js";
+import { resolveWebSource } from "./web-source.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -102,77 +103,6 @@ async function* walkDirectory(
   }
 }
 
-function isPrivateHostname(hostname: string): boolean {
-  const normalized = hostname.toLowerCase();
-  if (["localhost", "::1", "0.0.0.0"].includes(normalized)) return true;
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized);
-  if (ipv4 === null) return normalized.endsWith(".local");
-  const first = Number(ipv4[1]);
-  const second = Number(ipv4[2]);
-  return (
-    first === 10 ||
-    first === 127 ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 168)
-  );
-}
-
-async function urlInput(
-  rawUrl: string,
-  namespace: string,
-  limits: ResourceLimits,
-  signal?: AbortSignal,
-): Promise<ResolvedParserInput> {
-  const url = new URL(rawUrl);
-  if (!["http:", "https:"].includes(url.protocol) || isPrivateHostname(url.hostname)) {
-    throw new UnsupportedKnowledgeSourceError(`URL source is not allowed: ${url.href}`, {
-      operation: "url-resolve",
-      retryable: false,
-    });
-  }
-  const response = await fetch(url, {
-    headers: { accept: "text/*, application/json, application/xml;q=0.9" },
-    redirect: "error",
-    ...(signal === undefined ? {} : { signal }),
-  });
-  if (!response.ok) {
-    throw new UnsupportedKnowledgeSourceError(
-      `URL source returned HTTP ${response.status}: ${url.href}`,
-      { operation: "url-resolve", retryable: response.status >= 500 },
-    );
-  }
-  const declaredLength = Number(response.headers.get("content-length") ?? 0);
-  if (declaredLength > limits.maxFileBytes) {
-    throw new UnsupportedKnowledgeSourceError("URL source exceeds the configured size limit", {
-      operation: "url-resolve",
-      retryable: false,
-    });
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  assertFileSize(bytes, limits);
-  const canonicalUri = response.url;
-  const source = {
-    id: sourceId(namespace, canonicalUri),
-    canonicalUri,
-    namespace,
-  };
-  return {
-    source,
-    input: {
-      source,
-      filename: path.posix.basename(url.pathname) || url.hostname,
-      mediaType: detectMediaType(
-        bytes,
-        url.pathname,
-        response.headers.get("content-type") ?? undefined,
-      ),
-      bytes,
-    },
-    fingerprint: contentHash(bytes),
-  };
-}
-
 async function* gitInputs(
   root: string,
   namespace: string,
@@ -207,7 +137,7 @@ export async function* resolveSource(
     return;
   }
   if (sourceInput.kind === "url") {
-    yield await urlInput(sourceInput.url, options.namespace, options.limits, options.signal);
+    yield* resolveWebSource(sourceInput.url, options.namespace, options.limits, options.signal);
     return;
   }
   if (sourceInput.kind === "text" || sourceInput.kind === "buffer") {

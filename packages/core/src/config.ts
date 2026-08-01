@@ -98,6 +98,8 @@ export interface InferenceConfig {
 
 export interface ResourceLimits {
   readonly maxFileBytes: number;
+  readonly maxWebPages: number;
+  readonly maxWebBytes: number;
   readonly maxArchiveBytes: number;
   readonly maxArchiveEntries: number;
   readonly maxExpandedBytes: number;
@@ -257,6 +259,8 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
       },
       resources: {
         maxFileBytes: 128 * 1024 * 1024,
+        maxWebPages: 1_000,
+        maxWebBytes: 512 * 1024 * 1024,
         maxArchiveBytes: 512 * 1024 * 1024,
         maxArchiveEntries: 10_000,
         maxExpandedBytes: 2 * 1024 * 1024 * 1024,
@@ -329,6 +333,18 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
     1e9,
   );
   requireRange("memory.offload.previewBytes", config.memory.offload.previewBytes, 128, 1e7);
+  requireRange(
+    "performance.resources.maxWebPages",
+    config.performance.resources.maxWebPages,
+    1,
+    10_000,
+  );
+  requireRange(
+    "performance.resources.maxWebBytes",
+    config.performance.resources.maxWebBytes,
+    config.performance.resources.maxFileBytes,
+    config.performance.resources.maxExpandedBytes,
+  );
   if (
     config.retrieval.knowledgeTokens + config.retrieval.memoryTokens >
     config.retrieval.contextTokens

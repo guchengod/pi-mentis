@@ -19,6 +19,7 @@ export interface KnowledgeSource {
   readonly createdAt: number;
   readonly updatedAt: number;
   readonly fingerprint: string;
+  readonly attributes?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface KnowledgeDocument {
@@ -36,6 +37,7 @@ export interface KnowledgeDocument {
   readonly activeRevision: number;
   readonly status: "preparing" | "active" | "stale" | "failed" | "tombstoned";
   readonly indexedAt: number;
+  readonly attributes?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface CodeSymbolRef {
@@ -64,6 +66,7 @@ export interface KnowledgeChunk {
   readonly namespace: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly sourceAttributes?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface IngestKnowledgeCommand {

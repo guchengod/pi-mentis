@@ -18,6 +18,9 @@ Create `.pi-mentis/config.json`; omitted fields inherit safe defaults:
       "previewBytes": 4096
     }
   },
+  "performance": {
+    "resources": { "maxWebPages": 1000, "maxWebBytes": 536870912 }
+  },
   "storage": { "rootDir": ".pi-mentis/zvec" }
 }
 ```
