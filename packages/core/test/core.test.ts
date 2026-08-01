@@ -1,3 +1,8 @@
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,6 +16,8 @@ import {
   assertPiCompatibility,
   computeToolPlan,
   contextAffinity,
+  detectInstalledPackageVersion,
+  findInstalledPackageRoot,
   getOrCreateRuntime,
   inferInteractionMode,
   loadConfig,
@@ -168,6 +175,39 @@ describe("Pi compatibility and tool surface", () => {
           initializationStopped: true,
         },
       });
+    }
+  });
+
+  it("resolves a globally installed Pi package through the running CLI symlink", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-compatibility-"));
+    try {
+      const packageRoot = path.join(
+        root,
+        "lib",
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+      );
+      await mkdir(path.join(packageRoot, "dist"), { recursive: true });
+      await writeFile(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "0.83.0" }),
+      );
+      await writeFile(path.join(packageRoot, "dist", "cli.js"), "export {};\n");
+      const binDirectory = path.join(root, "bin");
+      await mkdir(binDirectory, { recursive: true });
+      const cliLink = path.join(binDirectory, "pi");
+      await symlink(path.relative(binDirectory, path.join(packageRoot, "dist", "cli.js")), cliLink);
+      const extensionUrl = pathToFileURL(path.join(root, "extension", "dist", "index.js")).href;
+
+      await expect(
+        detectInstalledPackageVersion("@earendil-works/pi-coding-agent", extensionUrl, cliLink),
+      ).resolves.toBe("0.83.0");
+      await expect(
+        findInstalledPackageRoot("@earendil-works/pi-coding-agent", extensionUrl, cliLink),
+      ).resolves.toBe(await realpath(packageRoot));
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 
