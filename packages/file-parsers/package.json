@@ -22,10 +22,10 @@
   "dependencies": {
     "@pi-mentis/pi-mentis-core": "workspace:*",
     "csv-parse": "6.1.0",
-    "fast-xml-parser": "5.3.3",
+    "fast-xml-parser": "5.10.1",
     "fflate": "0.8.2",
     "pdfjs-dist": "5.4.530",
-    "smol-toml": "1.6.0",
-    "yaml": "2.8.1"
+    "smol-toml": "1.7.1",
+    "yaml": "2.9.0"
   }
 }
