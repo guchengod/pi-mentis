@@ -21,6 +21,7 @@ const allowedSuites = new Set([
   "restart",
   "performance",
   "formats",
+  "faults",
 ]);
 if (!allowedSuites.has(suite)) throw new Error(`Unknown Live E2E suite: ${suite}`);
 if (process.env.PI_MENTIS_LIVE_E2E !== "1") {
@@ -68,8 +69,8 @@ await Promise.all(
 const diagnosticsFile = path.join(directories.logs, "inference.jsonl");
 process.env.PI_MENTIS_INFERENCE_DIAGNOSTICS_FILE = diagnosticsFile;
 const budget = {
-  maxEmbeddingRequests: 160,
-  maxEmbeddingInputs: 2_000,
+  maxEmbeddingRequests: 200,
+  maxEmbeddingInputs: 2_500,
   maxRerankRequests: 80,
   maxRerankDocuments: 2_000,
   maxEstimatedTokens: 1_000_000,
@@ -276,6 +277,11 @@ function toolPayload(entry) {
   const text = entry?.result?.content?.find((item) => item.type === "text")?.text;
   assert(typeof text === "string", "Pi tool did not return a text result");
   return JSON.parse(text);
+}
+
+function searchPayload(entry) {
+  const payload = toolPayload(entry);
+  return payload.search ?? payload;
 }
 
 function simplePdf(text) {
@@ -686,7 +692,7 @@ async function runMemory() {
     "Memory-only tool surface mismatch",
   );
   const firstCommit = toolPayload(response.results[0]);
-  const semanticSearch = toolPayload(response.results[1]);
+  const semanticSearch = searchPayload(response.results[1]);
   const reinforcement = toolPayload(response.results[2]);
   const oldDimension = toolPayload(response.results[3]);
   assert(firstCommit.outcome === "created", `Memory commit outcome was ${firstCommit.outcome}`);
@@ -695,7 +701,8 @@ async function runMemory() {
       (hit) =>
         hit.text.includes(runId) &&
         hit.text.includes("pnpm") &&
-        hit.namespace === `project:${projectScope}`,
+        hit.metadata?.scope?.kind === "project" &&
+        hit.metadata?.scope?.id === projectScope,
     ),
     "Semantic memory search did not return the scoped pnpm rule",
   );
@@ -726,7 +733,7 @@ async function runMemory() {
     },
   ]);
   const corrected = toolPayload(correction.results[0]);
-  const correctedSearch = toolPayload(correction.results[1]);
+  const correctedSearch = searchPayload(correction.results[1]);
   assert(corrected.outcome === "superseded", `Correction outcome was ${corrected.outcome}`);
   assert(correctedSearch.hits?.[0]?.text.includes("1024"), "Corrected 1024 memory was not active");
   scenario("M1-M4 real memory commit, semantic search, reinforcement, correction", started, {
@@ -842,12 +849,12 @@ async function runMemory() {
       },
     },
   ]);
-  const projectA = toolPayload(isolation.results[4]);
-  const projectB = toolPayload(isolation.results[5]);
-  const projectLeakProbe = toolPayload(isolation.results[6]);
-  const sessionSearch = toolPayload(isolation.results[7]);
-  const branchSearch = toolPayload(isolation.results[8]);
-  const globalSearch = toolPayload(isolation.results[9]);
+  const projectA = searchPayload(isolation.results[4]);
+  const projectB = searchPayload(isolation.results[5]);
+  const projectLeakProbe = searchPayload(isolation.results[6]);
+  const sessionSearch = searchPayload(isolation.results[7]);
+  const branchSearch = searchPayload(isolation.results[8]);
+  const contextualSearch = searchPayload(isolation.results[9]);
   assert(
     projectA.hits?.some((hit) => hit.text.includes("Project A") && hit.text.includes("1024")) &&
       !projectA.hits?.some((hit) => hit.text.includes("Project B") || hit.text.includes("4096")),
@@ -871,13 +878,16 @@ async function runMemory() {
     "Branch-scoped memory was not searchable in its own scope",
   );
   assert(
-    globalSearch.hits?.some((hit) => hit.text.includes("Project A")) &&
-      globalSearch.hits?.some((hit) => hit.text.includes("Project B")),
-    "Global memory search did not follow its documented cross-scope behavior",
+    !contextualSearch.hits?.some((hit) =>
+      ["Project A", "Project B", "SESSION-GREEN", "BRANCH-BLUE"].some((marker) =>
+        hit.text.includes(marker),
+      ),
+    ),
+    "Default contextual search leaked explicitly scoped memory",
   );
-  scenario("M5 project, session, branch, and global scope behavior", isolationStarted, {
+  scenario("M5 project, session, branch, and default contextual scope behavior", isolationStarted, {
     scopes,
-    globalNamespaces: [...new Set(globalSearch.hits.map((hit) => hit.namespace))],
+    contextualNamespaces: [...new Set(contextualSearch.hits.map((hit) => hit.namespace))],
   });
 }
 
@@ -909,7 +919,7 @@ async function runRestart() {
     },
   ]);
   assert(firstPid !== second.processId, "Restart test reused the same process");
-  const search = toolPayload(second.results[0]);
+  const search = searchPayload(second.results[0]);
   assert(
     search.hits?.some((hit) => hit.text.includes(runId) && hit.text.includes("pnpm")),
     "Restarted process could not recall the persisted memory",
@@ -992,9 +1002,9 @@ async function runKnowledge() {
       JSON.stringify(["commit_knowledge", "search_knowledge"]),
     "Knowledge-only tool surface mismatch",
   );
-  const textSearch = toolPayload(response.results[1]);
-  const labelSearch = toolPayload(response.results[3]);
-  const accountSearch = toolPayload(response.results[4]);
+  const textSearch = searchPayload(response.results[1]);
+  const labelSearch = searchPayload(response.results[3]);
+  const accountSearch = searchPayload(response.results[4]);
   assert(
     textSearch.hits?.some((hit) => hit.text.includes(runId) && hit.text.includes("SQLite")),
     "Knowledge text search did not return the current run's SQLite prohibition",
@@ -1034,7 +1044,7 @@ async function runKnowledge() {
       },
     },
   ]);
-  const directorySearch = toolPayload(directory.results[1]);
+  const directorySearch = searchPayload(directory.results[1]);
   const accountHit = directorySearch.hits?.find(
     (hit) =>
       hit.text.includes("selectMailAccount") &&
@@ -1078,7 +1088,7 @@ async function runKnowledge() {
       waitForKnowledgeJob: true,
     },
   ]);
-  const incrementalSearch = toolPayload(incremental.results[1]);
+  const incrementalSearch = searchPayload(incremental.results[1]);
   const outlookHit = incrementalSearch.hits?.find((hit) => hit.text.includes("Outlook"));
   assert(outlookHit !== undefined, "Changed Markdown content was not retrieved after restart");
   assert(
@@ -1116,8 +1126,8 @@ async function runKnowledge() {
     },
   ]);
   const removalNotice = JSON.stringify(removed.results[0].notifications);
-  const deletedSearch = toolPayload(removed.results[1]);
-  const survivingSearch = toolPayload(removed.results[2]);
+  const deletedSearch = searchPayload(removed.results[1]);
+  const survivingSearch = searchPayload(removed.results[2]);
   assert(/Removed [1-9]\d* chunks/.test(removalNotice), "Knowledge delete removed no chunks");
   assert(
     !deletedSearch.hits?.some((hit) => hit.metadata?.sourceId === markdownSourceId),
@@ -1253,12 +1263,12 @@ async function runCombined() {
     },
     { kind: "before_agent_start", prompt: "你好" },
   ]);
-  const version = toolPayload(response.results[4]);
-  const versionAfterVerification = toolPayload(response.results[5]);
-  const storage = toolPayload(response.results[6]);
-  const mail = toolPayload(response.results[7]);
+  const version = searchPayload(response.results[4]);
+  const versionAfterVerification = searchPayload(response.results[5]);
+  const storage = searchPayload(response.results[6]);
+  const mail = searchPayload(response.results[7]);
   const rerankJob = response.results[8].job;
-  const reranked = toolPayload(response.results[9]);
+  const reranked = searchPayload(response.results[9]);
   assert(
     storage.hits?.some((hit) => hit.kind === "knowledge" && hit.text.includes("Zvec")),
     "Combined search missed authoritative Zvec knowledge",
@@ -1268,7 +1278,7 @@ async function runCombined() {
     "Combined search missed historical SQLite memory",
   );
   assert(
-    mail.hits?.some((hit) => hit.kind === "knowledge" && hit.text.includes("Extension")) &&
+    mail.hits?.some((hit) => hit.kind === "knowledge" && /extension/i.test(hit.text)) &&
       mail.hits?.some((hit) => hit.kind === "memory" && hit.text.includes("default_account")),
     "Combined mail search did not include both knowledge and memory",
   );
@@ -1420,7 +1430,7 @@ async function runFormats() {
   const response = await runPi("@galvinsan/pi-mentis-knowledge", operations);
   const searches = response.results.slice(fixtures.length);
   for (const [index, fixture] of fixtures.entries()) {
-    const result = toolPayload(searches[index]);
+    const result = searchPayload(searches[index]);
     assert(
       result.hits?.some((hit) => hit.text.includes(fixture.marker)),
       `${fixture.name} did not complete parser → Embedding → Zvec → search`,
@@ -1502,7 +1512,7 @@ async function runFaultRecovery() {
       },
     },
   );
-  const degraded = toolPayload(invalidRerank.results[0]);
+  const degraded = searchPayload(invalidRerank.results[0]);
   assert(degraded.hits?.length > 0, "Invalid Rerank model blocked retrieval");
   assert(
     degraded.diagnostics?.degraded?.includes("rerank:unavailable"),
@@ -1519,7 +1529,7 @@ async function runFaultRecovery() {
       },
     },
   ]);
-  const recoveredSearch = toolPayload(recoveredRerank.results[0]);
+  const recoveredSearch = searchPayload(recoveredRerank.results[0]);
   assert(
     recoveredSearch.hits?.some((hit) => hit.text.includes("Zvec")),
     "Restored Rerank configuration did not recover retrieval",

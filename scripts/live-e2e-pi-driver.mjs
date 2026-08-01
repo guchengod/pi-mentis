@@ -127,6 +127,7 @@ runner.bindCore(
   },
   {
     getModel: () => undefined,
+    getScopedModels: () => [],
     isIdle: () => true,
     isProjectTrusted: () => true,
     getSignal: () => undefined,
