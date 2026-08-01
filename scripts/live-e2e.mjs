@@ -615,9 +615,9 @@ async function runInference() {
 async function runPiSurfaces() {
   const started = performance.now();
   const modes = [
-    ["@pi-mentis/pi-mentis-knowledge", ["commit_knowledge", "search_knowledge"], ["kb"]],
-    ["@pi-mentis/pi-mentis-memory", ["commit_memory", "search_memory"], []],
-    ["@pi-mentis/pi-mentis", ["commit_memory", "search_memory"], ["kb"]],
+    ["@galvinsan/pi-mentis-knowledge", ["commit_knowledge", "search_knowledge"], ["kb"]],
+    ["@galvinsan/pi-mentis-memory", ["commit_memory", "search_memory"], []],
+    ["@galvinsan/pi-mentis", ["commit_memory", "search_memory"], ["kb"]],
   ];
   for (const [packageName, expectedTools, expectedCommands] of modes) {
     const response = await runPi(packageName, []);
@@ -640,7 +640,7 @@ async function runPiSurfaces() {
 async function runMemory() {
   const started = performance.now();
   const projectScope = `project:e2e:${runId}`;
-  const response = await runPi("@pi-mentis/pi-mentis-memory", [
+  const response = await runPi("@galvinsan/pi-mentis-memory", [
     {
       kind: "tool",
       name: "commit_memory",
@@ -703,7 +703,7 @@ async function runMemory() {
     reinforcement.outcome === "reinforced" && reinforcement.record.reinforceCount >= 1,
     `Memory duplicate was not reinforced: ${reinforcement.outcome}`,
   );
-  const correction = await runPi("@pi-mentis/pi-mentis-memory", [
+  const correction = await runPi("@galvinsan/pi-mentis-memory", [
     {
       kind: "tool",
       name: "commit_memory",
@@ -742,7 +742,7 @@ async function runMemory() {
     session: `session:e2e:${runId}:isolated`,
     branch: `branch:e2e:${runId}:isolated`,
   };
-  const isolation = await runPi("@pi-mentis/pi-mentis-memory", [
+  const isolation = await runPi("@galvinsan/pi-mentis-memory", [
     {
       kind: "tool",
       name: "commit_memory",
@@ -884,7 +884,7 @@ async function runMemory() {
 async function runRestart() {
   const started = performance.now();
   const scopeId = `project:e2e:${runId}:restart`;
-  const first = await runPi("@pi-mentis/pi-mentis-memory", [
+  const first = await runPi("@galvinsan/pi-mentis-memory", [
     {
       kind: "tool",
       name: "commit_memory",
@@ -897,7 +897,7 @@ async function runRestart() {
     },
   ]);
   const firstPid = first.processId;
-  const second = await runPi("@pi-mentis/pi-mentis-memory", [
+  const second = await runPi("@galvinsan/pi-mentis-memory", [
     {
       kind: "tool",
       name: "search_memory",
@@ -958,7 +958,7 @@ async function runKnowledge() {
     `# 邮件扩展规范\n\n## 账户\n\n系统必须支持 Gmail、QQ 邮箱和新浪邮箱。\n\n## 默认账户\n\n默认账户由 \`default_account\` 文件决定。\n\n## 标签规则\n\n标签名称必须匹配 \`[a-zA-Z0-9._-]+\`。\n\n## 附件\n\n必须支持附件列表和下载。\n`,
   );
   const text = `Pi Mentis E2E 规范 ${runId}：\n\n本项目的唯一持久化数据库是 Zvec。禁止使用 SQLite。\n\n知识搜索必须先执行混合检索，再进行重排序。\n\n${Array.from({ length: 8 }, (_, index) => `验证段落 ${index + 1}：${runId} 的 Zvec 规则是当前权威规范。`).join("\n\n")}`;
-  const response = await runPi("@pi-mentis/pi-mentis-knowledge", [
+  const response = await runPi("@galvinsan/pi-mentis-knowledge", [
     {
       kind: "tool",
       name: "commit_knowledge",
@@ -1017,7 +1017,7 @@ async function runKnowledge() {
   });
 
   const directoryStarted = performance.now();
-  const directory = await runPi("@pi-mentis/pi-mentis-knowledge", [
+  const directory = await runPi("@galvinsan/pi-mentis-knowledge", [
     {
       kind: "tool",
       name: "commit_knowledge",
@@ -1059,7 +1059,7 @@ async function runKnowledge() {
     markdownPath,
     `# 邮件扩展规范\n\n## 账户\n\n系统必须支持 Gmail、QQ 邮箱、新浪邮箱和 Outlook。\n\n## 默认账户\n\n默认账户由 \`default_account\` 文件决定。\n\n## 标签规则\n\n标签名称必须匹配 \`[a-zA-Z0-9._-]+\`。\n\n## 附件\n\n必须支持附件列表和下载。\n`,
   );
-  const incremental = await runPi("@pi-mentis/pi-mentis-knowledge", [
+  const incremental = await runPi("@galvinsan/pi-mentis-knowledge", [
     {
       kind: "tool",
       name: "commit_knowledge",
@@ -1098,7 +1098,7 @@ async function runKnowledge() {
   const deleteStarted = performance.now();
   const markdownSourceId = response.results[2].job?.result?.sourceIds?.[0];
   assert(typeof markdownSourceId === "string", "Markdown ingest returned no source ID");
-  const removed = await runPi("@pi-mentis/pi-mentis-knowledge", [
+  const removed = await runPi("@galvinsan/pi-mentis-knowledge", [
     { kind: "command", name: "kb", arguments: `remove ${markdownSourceId}` },
     {
       kind: "tool",
@@ -1165,7 +1165,7 @@ async function runCombined() {
       )
       .join("\n\n")}\n`,
   );
-  const response = await runPi("@pi-mentis/pi-mentis", [
+  const response = await runPi("@galvinsan/pi-mentis", [
     {
       kind: "command",
       name: "kb",
@@ -1417,7 +1417,7 @@ async function runFormats() {
       },
     })),
   ];
-  const response = await runPi("@pi-mentis/pi-mentis-knowledge", operations);
+  const response = await runPi("@galvinsan/pi-mentis-knowledge", operations);
   const searches = response.results.slice(fixtures.length);
   for (const [index, fixture] of fixtures.entries()) {
     const result = toolPayload(searches[index]);
@@ -1484,7 +1484,7 @@ async function runFaultRecovery() {
 
   const namespace = `e2e:${runId}`;
   const invalidRerank = await runPi(
-    "@pi-mentis/pi-mentis",
+    "@galvinsan/pi-mentis",
     [
       {
         kind: "tool",
@@ -1508,7 +1508,7 @@ async function runFaultRecovery() {
     degraded.diagnostics?.degraded?.includes("rerank:unavailable"),
     "Rerank fallback was not recorded",
   );
-  const recoveredRerank = await runPi("@pi-mentis/pi-mentis", [
+  const recoveredRerank = await runPi("@galvinsan/pi-mentis", [
     {
       kind: "tool",
       name: "search_memory",

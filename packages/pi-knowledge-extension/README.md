@@ -1,4 +1,4 @@
-# @pi-mentis/pi-mentis-knowledge
+# @galvinsan/pi-mentis-knowledge
 
 Standalone persistent knowledge ingestion and retrieval for Pi v0.83.0, backed by Zvec and
 SiliconFlow embeddings.
@@ -6,7 +6,7 @@ SiliconFlow embeddings.
 ## Install
 
 ```bash
-pi install @pi-mentis/pi-mentis-knowledge
+pi install @galvinsan/pi-mentis-knowledge
 ```
 
 Set `SILICONFLOW_API_KEY`, then start Pi. The extension registers `commit_knowledge` and

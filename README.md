@@ -24,9 +24,9 @@ pnpm build
 Install exactly one extension product into Pi v0.83.0:
 
 ```bash
-pi install @pi-mentis/pi-mentis
-# or @pi-mentis/pi-mentis-knowledge
-# or @pi-mentis/pi-mentis-memory
+pi install @galvinsan/pi-mentis
+# or @galvinsan/pi-mentis-knowledge
+# or @galvinsan/pi-mentis-memory
 ```
 
 Set the provider credential and start Pi:

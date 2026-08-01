@@ -1,4 +1,4 @@
-# @pi-mentis/pi-mentis
+# @galvinsan/pi-mentis
 
 Integrated knowledge-first persistent memory for Pi v0.83.0. It combines durable personal memory,
 knowledge retrieval, Pi-native session provenance, and Zvec storage.
@@ -6,7 +6,7 @@ knowledge retrieval, Pi-native session provenance, and Zvec storage.
 ## Install
 
 ```bash
-pi install @pi-mentis/pi-mentis
+pi install @galvinsan/pi-mentis
 ```
 
 Set `SILICONFLOW_API_KEY`, then start Pi. This integrated product registers `commit_memory` and
