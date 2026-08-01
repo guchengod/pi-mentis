@@ -24,9 +24,9 @@ pnpm build
 Install exactly one extension product into Pi v0.83.0:
 
 ```bash
-pi install @galvinsan/pi-mentis
-# or @galvinsan/pi-mentis-knowledge
-# or @galvinsan/pi-mentis-memory
+pi install npm:@galvinsan/pi-mentis
+# or npm:@galvinsan/pi-mentis-knowledge
+# or npm:@galvinsan/pi-mentis-memory
 ```
 
 Set the provider credential and start Pi:
@@ -67,3 +67,8 @@ The API key is never printed or stored in Zvec, manifests, diagnostics, or logs.
 
 Configuration, operations, migrations, package boundaries, parsers, retrieval,
 and performance methodology are documented in [`docs/`](docs/architecture.md).
+
+The npm README for the integrated product contains a complete Chinese quick start,
+configuration reference, memory examples, ordered documentation-site ingestion guide,
+command table, storage rules, security boundaries, backup procedure, and troubleshooting:
+[`@galvinsan/pi-mentis`](packages/pi-context-extension/README.md).
