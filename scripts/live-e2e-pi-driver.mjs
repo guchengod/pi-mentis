@@ -183,7 +183,9 @@ function queuedJobId(notifications) {
   for (const notification of notifications.toReversed()) {
     const match =
       typeof notification.message === "string"
-        ? /Knowledge job ([A-Za-z0-9:_-]+) queued/.exec(notification.message)
+        ? /(?:Knowledge|Embedding migration) job ([A-Za-z0-9:_-]+) queued/.exec(
+            notification.message,
+          )
         : null;
     if (match?.[1] !== undefined) return match[1];
   }

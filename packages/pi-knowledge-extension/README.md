@@ -84,6 +84,26 @@ HTML URL 会自动识别 sidebar/TOC、mdBook `toc.js`/`toc.html`、`rel=next` �
 
 API Key 不要写入 JSON。环境变量 `SILICONFLOW_EMBEDDING_MODEL`、`SILICONFLOW_EMBEDDING_DIMENSIONS`、`SILICONFLOW_RERANKER_MODEL` 和 `SILICONFLOW_RERANK_MAX_INPUT_TOKENS` 可覆盖模型配置。
 
+## Embedding 维度迁移与回滚
+
+`BAAI/bge-m3` 固定为 1024 维，不能执行跨维度迁移。需要可选维度时使用已验证的 `Qwen/Qwen3-Embedding-8B`，并先备份完整 `storage.rootDir`：
+
+```bash
+export SILICONFLOW_EMBEDDING_MODEL="Qwen/Qwen3-Embedding-8B"
+export SILICONFLOW_EMBEDDING_DIMENSIONS="768"
+pi
+```
+
+在 Pi 中启动迁移，并用返回的任务 ID 查询持久化状态：
+
+```text
+/kb migrate-embedding 1024
+/kb jobs <job-id>
+/kb migration-status
+```
+
+任务显示 `completed` 后，把配置或 `SILICONFLOW_EMBEDDING_DIMENSIONS` 改为目标维度并立即重启 Pi，再执行搜索验证。迁移会保留旧 generation；需要回滚时执行 `/kb rollback-embedding <generation-id>`，把维度恢复为旧值并再次重启。不要在迁移、切换配置或回滚期间启动另一个写入进程。
+
 ## 支持的来源与格式
 
 - 文件、目录、Workspace、Git tracked files、HTTPS URL
@@ -94,17 +114,20 @@ API Key 不要写入 JSON。环境变量 `SILICONFLOW_EMBEDDING_MODEL`、`SILICO
 
 ## `/kb` 命令
 
-| 命令                        | 用途               |
-| --------------------------- | ------------------ |
-| `/kb add <path-or-url>`     | 添加来源           |
-| `/kb sync <path-or-url>`    | 增量同步           |
-| `/kb rebuild <path-or-url>` | 重新构建           |
-| `/kb jobs <job-id>`         | 查看任务           |
-| `/kb cancel <job-id>`       | 取消任务           |
-| `/kb inspect <document-id>` | 查看文档 chunks    |
-| `/kb remove <source-id>`    | 删除来源           |
-| `/kb status`                | 查看 Provider 状态 |
-| `/kb models`                | 查看生效模型       |
+| 命令                                     | 用途                        |
+| ---------------------------------------- | --------------------------- |
+| `/kb add <path-or-url>`                  | 添加来源                    |
+| `/kb sync <path-or-url>`                 | 增量同步                    |
+| `/kb rebuild <path-or-url>`              | 重新构建                    |
+| `/kb jobs <job-id>`                      | 查看任务                    |
+| `/kb cancel <job-id>`                    | 取消任务                    |
+| `/kb inspect <document-id>`              | 查看文档 chunks             |
+| `/kb remove <source-id>`                 | 删除来源                    |
+| `/kb status`                             | 查看 Provider 状态          |
+| `/kb models`                             | 查看生效模型                |
+| `/kb migrate-embedding <dimensions>`     | 迁移并激活新维度 generation |
+| `/kb migration-status`                   | 查看 generation 状态        |
+| `/kb rollback-embedding <generation-id>` | 回滚旧 generation           |
 
 ## 存储与安全
 

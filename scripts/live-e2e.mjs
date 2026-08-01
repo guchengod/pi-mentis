@@ -22,6 +22,7 @@ const allowedSuites = new Set([
   "performance",
   "formats",
   "faults",
+  "migration",
 ]);
 if (!allowedSuites.has(suite)) throw new Error(`Unknown Live E2E suite: ${suite}`);
 if (process.env.PI_MENTIS_LIVE_E2E !== "1") {
@@ -616,6 +617,195 @@ async function runInference() {
       reason: `${embeddingModel.value} exposes only ${capability.supportedDimensions.join(", ")} dimensions; the configured model was not replaced`,
     });
   }
+}
+
+async function readKnowledgeGeneration() {
+  const manifest = JSON.parse(
+    await readFile(path.join(directories.zvec, "active-index-manifest.json"), "utf8"),
+  );
+  const generation = manifest.generations?.find(
+    (candidate) => candidate.generationId === manifest.knowledgeGeneration,
+  );
+  assert(generation !== undefined, "Active knowledge generation is missing from the manifest");
+  return { manifest, generation };
+}
+
+async function runEmbeddingMigration() {
+  const started = performance.now();
+  const { inference } = await loadInferenceModules();
+  const capability = inference.getVerifiedEmbeddingModel(embeddingModel.value);
+  const targets = capability.supportedDimensions.filter(
+    (candidate) => candidate >= 768 && candidate <= 4_096 && candidate !== dimensions,
+  );
+  assert(
+    targets.length >= 2,
+    `Embedding migration E2E requires two alternate production dimensions; ${embeddingModel.value} exposes ${capability.supportedDimensions.join(", ")}`,
+  );
+  const firstTarget = targets[0];
+  const secondTarget = targets[1];
+  assert(firstTarget !== undefined && secondTarget !== undefined, "Migration targets are missing");
+  const namespace = `migration:${runId}`;
+  const marker = `MIGRATION_MARKER_${runId}`;
+  const initial = await runPi("@galvinsan/pi-mentis-knowledge", [
+    {
+      kind: "tool",
+      name: "commit_knowledge",
+      parameters: {
+        kind: "text",
+        value: `${marker}: Zvec generation migration must preserve searchable knowledge.`,
+        namespace,
+      },
+      waitForKnowledgeJob: true,
+    },
+    {
+      kind: "tool",
+      name: "search_knowledge",
+      parameters: { query: `Find ${marker}`, namespace, limit: 10 },
+    },
+  ]);
+  assert(
+    searchPayload(initial.results[1]).hits?.some((hit) => hit.text.includes(marker)),
+    "Initial generation could not retrieve the migration marker",
+  );
+  const initialState = await readKnowledgeGeneration();
+  assert(
+    initialState.generation.embeddingSpace.dimensions === dimensions,
+    "Initial generation dimension does not match the configured model",
+  );
+
+  const firstMigration = await runPi("@galvinsan/pi-mentis-knowledge", [
+    {
+      kind: "command",
+      name: "kb",
+      arguments: `migrate-embedding ${firstTarget}`,
+      waitForKnowledgeJob: true,
+    },
+  ]);
+  const firstJob = firstMigration.results[0].job;
+  assert(
+    firstJob?.result?.activated === true && firstJob.result.migrated >= 1,
+    "First embedding migration did not activate a complete generation",
+  );
+  const firstState = await readKnowledgeGeneration();
+  assert(
+    firstState.generation.embeddingSpace.dimensions === firstTarget,
+    "First migrated generation has the wrong dimension",
+  );
+  assert(
+    firstState.manifest.generations.find(
+      (candidate) => candidate.generationId === initialState.generation.generationId,
+    )?.state === "superseded",
+    "Initial generation was not superseded after migration",
+  );
+
+  const secondMigration = await runPi(
+    "@galvinsan/pi-mentis-knowledge",
+    [
+      {
+        kind: "tool",
+        name: "search_knowledge",
+        parameters: { query: `Find ${marker}`, namespace, limit: 10 },
+      },
+      {
+        kind: "command",
+        name: "kb",
+        arguments: `migrate-embedding ${secondTarget}`,
+        waitForKnowledgeJob: true,
+      },
+    ],
+    { environment: { SILICONFLOW_EMBEDDING_DIMENSIONS: String(firstTarget) } },
+  );
+  assert(
+    searchPayload(secondMigration.results[0]).hits?.some((hit) => hit.text.includes(marker)),
+    "Restarted first migrated generation could not retrieve the marker",
+  );
+  const secondJob = secondMigration.results[1].job;
+  assert(
+    secondJob?.result?.activated === true && secondJob.result.migrated >= 1,
+    "Second embedding migration did not activate a complete generation",
+  );
+  const secondState = await readKnowledgeGeneration();
+  assert(
+    secondState.generation.embeddingSpace.dimensions === secondTarget,
+    "Second migrated generation has the wrong dimension",
+  );
+
+  const rollback = await runPi(
+    "@galvinsan/pi-mentis-knowledge",
+    [
+      {
+        kind: "tool",
+        name: "search_knowledge",
+        parameters: { query: `Find ${marker}`, namespace, limit: 10 },
+      },
+      {
+        kind: "command",
+        name: "kb",
+        arguments: `rollback-embedding ${initialState.generation.generationId}`,
+      },
+    ],
+    { environment: { SILICONFLOW_EMBEDDING_DIMENSIONS: String(secondTarget) } },
+  );
+  assert(
+    searchPayload(rollback.results[0]).hits?.some((hit) => hit.text.includes(marker)),
+    "Restarted second migrated generation could not retrieve the marker",
+  );
+  const rolledBackState = await readKnowledgeGeneration();
+  assert(
+    rolledBackState.generation.generationId === initialState.generation.generationId &&
+      rolledBackState.generation.embeddingSpace.dimensions === dimensions,
+    "Rollback did not reactivate the initial generation",
+  );
+  const finalRecall = await runPi(
+    "@galvinsan/pi-mentis-knowledge",
+    [
+      {
+        kind: "tool",
+        name: "search_knowledge",
+        parameters: { query: `Find ${marker}`, namespace, limit: 10 },
+      },
+    ],
+    { environment: { SILICONFLOW_EMBEDDING_DIMENSIONS: String(dimensions) } },
+  );
+  assert(
+    searchPayload(finalRecall.results[0]).hits?.some((hit) => hit.text.includes(marker)),
+    "Rolled-back generation could not retrieve the marker after process restart",
+  );
+  report.restarts.push(
+    {
+      beforeProcessId: initial.processId,
+      afterProcessId: firstMigration.processId,
+      recalled: false,
+    },
+    {
+      beforeProcessId: firstMigration.processId,
+      afterProcessId: secondMigration.processId,
+      recalled: true,
+    },
+    {
+      beforeProcessId: secondMigration.processId,
+      afterProcessId: rollback.processId,
+      recalled: true,
+    },
+    {
+      beforeProcessId: rollback.processId,
+      afterProcessId: finalRecall.processId,
+      recalled: true,
+    },
+  );
+  scenario("D1/G1 real multi-dimension Zvec generation migration and rollback", started, {
+    model: embeddingModel.value,
+    dimensions: [dimensions, firstTarget, secondTarget, dimensions],
+    generations: [
+      initialState.generation.generationId,
+      firstState.generation.generationId,
+      secondState.generation.generationId,
+      rolledBackState.generation.generationId,
+    ],
+    migratedRecords: [firstJob.result.migrated, secondJob.result.migrated],
+    processRestarts: 4,
+    rollbackRecall: true,
+  });
 }
 
 async function runPiSurfaces() {
@@ -1567,6 +1757,7 @@ try {
     if (name === "performance") await runPerformance();
     if (name === "formats") await runFormats();
     if (name === "faults") await runFaultRecovery();
+    if (name === "migration") await runEmbeddingMigration();
   }
 } catch (error) {
   report.scenarios.push({
@@ -1671,7 +1862,11 @@ await writeFile(jsonReport, `${JSON.stringify(report, null, 2)}\n`);
 const scenarioRows = report.scenarios
   .map((item) => `| ${item.name} | ${item.status} | ${Math.round(item.durationMs ?? 0)} |`)
   .join("\n");
-const markdown = `# Pi Mentis Live E2E Report
+const migrationCoverageNote =
+  suite === "all" && report.scenarios.some((item) => item.status === "BLOCKED")
+    ? "\nD1/G1 is blocked only for the production `BAAI/bge-m3` configuration because that model exposes a fixed 1024 dimensions. The same scenario is completed with real selectable dimensions in the [migration report](./live-migration-e2e-report.md).\n"
+    : "";
+const markdown = `# Pi Mentis Live${suite === "migration" ? " Embedding Migration" : ""} E2E Report
 
 - Run ID: \`${runId}\`
 - Suite: \`${suite}\`
@@ -1697,6 +1892,7 @@ No API key, Authorization header, request header, or input body is present in th
 | Scenario | Status | Duration ms |
 | --- | --- | ---: |
 ${scenarioRows}
+${migrationCoverageNote}
 
 ## Real remote requests
 
@@ -1722,6 +1918,13 @@ ${scenarioRows}
 
 The complete sanitized evidence is in \`${path.relative(root, jsonReport)}\`.
 `;
-await writeFile(path.join(root, "docs", "live-e2e-report.md"), markdown);
+await writeFile(
+  path.join(
+    root,
+    "docs",
+    suite === "migration" ? "live-migration-e2e-report.md" : "live-e2e-report.md",
+  ),
+  markdown,
+);
 console.log(JSON.stringify({ status: report.status, runId, artifactRoot, usage }, null, 2));
 if (report.status !== "PASS") process.exitCode = 1;
