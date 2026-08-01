@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import path from "node:path";
 
@@ -73,6 +74,17 @@ function generationSpaces(
 ): Readonly<Record<"knowledge" | "memory" | "capability", EmbeddingSpaceIdentity>> {
   const identity = embeddingSpace(config);
   return { knowledge: identity, memory: identity, capability: identity };
+}
+
+async function knowledgeCommandSource(target: string) {
+  if (/^https?:\/\//.test(target)) return { kind: "url" as const, url: target };
+  try {
+    const metadata = await stat(target);
+    if (metadata.isDirectory()) return { kind: "directory" as const, path: target };
+  } catch {
+    // Preserve the file-shaped command so the background job reports the path error.
+  }
+  return { kind: "file" as const, path: target };
 }
 
 function registerIntegratedTools(
@@ -239,9 +251,7 @@ function registerKbCommand(
           context.ui.notify(`Usage: /kb ${action} <path-or-url>`, "error");
           return;
         }
-        const source = /^https?:\/\//.test(target)
-          ? { kind: "url" as const, url: target }
-          : { kind: "file" as const, path: target };
+        const source = await knowledgeCommandSource(target);
         const receipt = await knowledge.enqueueIngest({ source }, { priority: "user" });
         context.ui.notify(`Knowledge job ${receipt.jobId} queued`, "info");
         return;
