@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import path from "node:path";
 
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -42,6 +43,12 @@ import {
   type PiScopeContext,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
+import {
+  formatPiToolJson,
+  normalizePiPathArgument,
+  notifyWhenUiAvailable,
+  PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
+} from "@pi-mentis/pi-mentis-pi-extension-support";
 import { CapabilityIndexer, scanPiInstallation } from "@pi-mentis/pi-mentis-pi-capabilities";
 import {
   createRetrievalService,
@@ -77,14 +84,17 @@ function generationSpaces(
 }
 
 async function knowledgeCommandSource(target: string) {
-  if (/^https?:\/\//.test(target)) return { kind: "url" as const, url: target };
+  const normalizedTarget = normalizePiPathArgument(target);
+  if (/^https?:\/\//.test(normalizedTarget)) {
+    return { kind: "url" as const, url: normalizedTarget };
+  }
   try {
-    const metadata = await stat(target);
-    if (metadata.isDirectory()) return { kind: "directory" as const, path: target };
+    const metadata = await stat(normalizedTarget);
+    if (metadata.isDirectory()) return { kind: "directory" as const, path: normalizedTarget };
   } catch {
     // Preserve the file-shaped command so the background job reports the path error.
   }
-  return { kind: "file" as const, path: target };
+  return { kind: "file" as const, path: normalizedTarget };
 }
 
 function registerIntegratedTools(
@@ -99,19 +109,18 @@ function registerIntegratedTools(
   pi.registerTool({
     name: "commit_memory",
     label: "Commit memory",
-    description:
-      "Commit evidence-bound durable memory. Knowledge remains read-only through automatic and manual retrieval.",
+    description: `Commit evidence-bound durable memory. Knowledge remains read-only through automatic and manual retrieval. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       content: Type.String({ minLength: 3 }),
-      type: Type.Union([
-        Type.Literal("preference"),
-        Type.Literal("requirement"),
-        Type.Literal("fact"),
-        Type.Literal("decision"),
-        Type.Literal("procedural"),
-        Type.Literal("episodic"),
-        Type.Literal("task"),
-      ]),
+      type: StringEnum([
+        "preference",
+        "requirement",
+        "fact",
+        "decision",
+        "procedural",
+        "episodic",
+        "task",
+      ] as const),
       confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       supersedesIds: Type.Optional(Type.Array(Type.String())),
@@ -138,7 +147,7 @@ function registerIntegratedTools(
         signal === undefined ? {} : { signal },
       );
       return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
+        content: [{ type: "text", text: formatPiToolJson(result) }],
         details: result,
       };
     },
@@ -146,8 +155,7 @@ function registerIntegratedTools(
   pi.registerTool({
     name: "search_memory",
     label: "Search memory",
-    description:
-      "Run knowledge-first retrieval, then knowledge-guided memory search with RRF, Rerank fallback, MMR, conflict, and context budgets.",
+    description: `Run knowledge-first retrieval, then knowledge-guided memory search with RRF, Rerank fallback, MMR, conflict, and context budgets. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       id: Type.Optional(Type.String({ minLength: 1 })),
       query: Type.Optional(Type.String({ minLength: 1 })),
@@ -172,7 +180,7 @@ function registerIntegratedTools(
       if (parameters.query === undefined) {
         const result = { exact, evidence: exactEvidence };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
           details: undefined,
         };
       }
@@ -199,7 +207,7 @@ function registerIntegratedTools(
         });
         const result = { exact, evolution, evidence: evidenceMatches };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
           details: undefined,
         };
       }
@@ -221,7 +229,7 @@ function registerIntegratedTools(
         content: [
           {
             type: "text",
-            text: JSON.stringify({
+            text: formatPiToolJson({
               ...(parameters.id === undefined ? {} : { exact, evidence: exactEvidence }),
               search: result,
             }),
@@ -248,28 +256,29 @@ function registerKbCommand(
       if (["add", "sync", "rebuild"].includes(action)) {
         const target = rest.join(" ");
         if (target === "") {
-          context.ui.notify(`Usage: /kb ${action} <path-or-url>`, "error");
+          notifyWhenUiAvailable(context, `Usage: /kb ${action} <path-or-url>`, "error");
           return;
         }
         const source = await knowledgeCommandSource(target);
         const receipt = await knowledge.enqueueIngest({ source }, { priority: "user" });
-        context.ui.notify(`Knowledge job ${receipt.jobId} queued`, "info");
+        notifyWhenUiAvailable(context, `Knowledge job ${receipt.jobId} queued`, "info");
         return;
       }
       if (action === "remove") {
         const sourceId = rest[0];
         if (sourceId === undefined) {
-          context.ui.notify("Usage: /kb remove <source-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb remove <source-id>", "error");
           return;
         }
         const result = await knowledge.remove({ sourceId });
-        context.ui.notify(`Removed ${result.removedChunks} chunks`, "info");
+        notifyWhenUiAvailable(context, `Removed ${result.removedChunks} chunks`, "info");
         return;
       }
       if (action === "cancel") {
         const jobId = rest[0];
         const cancelled = jobId !== undefined && scheduler.cancel(jobId);
-        context.ui.notify(
+        notifyWhenUiAvailable(
+          context,
           cancelled ? `Cancelled ${jobId}` : "Job not found or already finished",
           cancelled ? "info" : "warning",
         );
@@ -278,16 +287,21 @@ function registerKbCommand(
       if (action === "jobs") {
         const jobId = rest[0];
         if (jobId === undefined) {
-          context.ui.notify("Usage: /kb jobs <job-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb jobs <job-id>", "error");
           return;
         }
         const job = (await store.fetchScalar("jobs_v1", [jobId])).get(jobId);
-        context.ui.notify(job === undefined ? "Job not found" : JSON.stringify(job), "info");
+        notifyWhenUiAvailable(
+          context,
+          job === undefined ? "Job not found" : formatPiToolJson(job),
+          "info",
+        );
         return;
       }
       if (action === "models") {
-        context.ui.notify(
-          JSON.stringify({
+        notifyWhenUiAvailable(
+          context,
+          formatPiToolJson({
             embedding: config.inference.siliconflow.embedding,
             rerank: config.inference.siliconflow.rerank,
           }),
@@ -298,18 +312,22 @@ function registerKbCommand(
       if (action === "inspect") {
         const documentId = rest[0];
         if (documentId === undefined) {
-          context.ui.notify("Usage: /kb inspect <document-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb inspect <document-id>", "error");
           return;
         }
         const view = await knowledge.inspect({ documentId });
-        context.ui.notify(view === undefined ? "Document not found" : JSON.stringify(view), "info");
+        notifyWhenUiAvailable(
+          context,
+          view === undefined ? "Document not found" : formatPiToolJson(view),
+          "info",
+        );
         return;
       }
       if (action === "sources") {
-        context.ui.notify(JSON.stringify(knowledge.capabilities()), "info");
+        notifyWhenUiAvailable(context, formatPiToolJson(knowledge.capabilities()), "info");
         return;
       }
-      context.ui.notify(JSON.stringify(runtimeSnapshot()), "info");
+      notifyWhenUiAvailable(context, formatPiToolJson(runtimeSnapshot()), "info");
     },
   });
 }

@@ -7,6 +7,9 @@ import { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
 const codingAgentEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
 const codingAgentDist = path.dirname(codingAgentEntry);
+const codingAgentManifest = JSON.parse(
+  await readFile(path.resolve(codingAgentDist, "..", "package.json"), "utf8"),
+);
 const { loadExtensions } = await import(
   pathToFileURL(path.join(codingAgentDist, "core/extensions/loader.js")).href
 );
@@ -292,9 +295,13 @@ try {
     `${JSON.stringify(
       {
         ok: true,
-        piVersion: extensionManifest.peerDependencies?.["@earendil-works/pi-coding-agent"],
+        piVersion: codingAgentManifest.version,
         extensionPath,
         toolSurface,
+        toolDefinitions: runner.getAllRegisteredTools().map((tool) => ({
+          name: tool.definition.name,
+          parameters: tool.definition.parameters,
+        })),
         commandSurface,
         results,
         notifications,

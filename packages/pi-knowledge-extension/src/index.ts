@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -25,6 +26,12 @@ import {
   type KnowledgeService,
 } from "@pi-mentis/pi-mentis-knowledge-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
+import {
+  formatPiToolJson,
+  normalizePiPathArgument,
+  notifyWhenUiAvailable,
+  PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
+} from "@pi-mentis/pi-mentis-pi-extension-support";
 import { createRetrievalService, type RetrievalService } from "@pi-mentis/pi-mentis-retrieval";
 import {
   SiliconFlowEmbeddingProvider,
@@ -62,24 +69,28 @@ function spaces(
 function sourceInput(kind: string, value: string) {
   if (kind === "text") return { kind: "text" as const, text: value };
   if (kind === "url") return { kind: "url" as const, url: value };
-  if (kind === "directory") return { kind: "directory" as const, path: value };
-  if (kind === "workspace") return { kind: "workspace" as const, path: value };
-  if (kind === "git") return { kind: "git" as const, path: value };
-  if (kind === "pi-package") return { kind: "pi-package" as const, path: value };
-  if (kind === "skill") return { kind: "skill" as const, path: value };
-  if (kind === "mcp") return { kind: "mcp" as const, path: value };
-  return { kind: "file" as const, path: value };
+  const normalizedPath = normalizePiPathArgument(value);
+  if (kind === "directory") return { kind: "directory" as const, path: normalizedPath };
+  if (kind === "workspace") return { kind: "workspace" as const, path: normalizedPath };
+  if (kind === "git") return { kind: "git" as const, path: normalizedPath };
+  if (kind === "pi-package") return { kind: "pi-package" as const, path: normalizedPath };
+  if (kind === "skill") return { kind: "skill" as const, path: normalizedPath };
+  if (kind === "mcp") return { kind: "mcp" as const, path: normalizedPath };
+  return { kind: "file" as const, path: normalizedPath };
 }
 
 async function knowledgeCommandSource(target: string) {
-  if (/^https?:\/\//.test(target)) return { kind: "url" as const, url: target };
+  const normalizedTarget = normalizePiPathArgument(target);
+  if (/^https?:\/\//.test(normalizedTarget)) {
+    return { kind: "url" as const, url: normalizedTarget };
+  }
   try {
-    const metadata = await stat(target);
-    if (metadata.isDirectory()) return { kind: "directory" as const, path: target };
+    const metadata = await stat(normalizedTarget);
+    if (metadata.isDirectory()) return { kind: "directory" as const, path: normalizedTarget };
   } catch {
     // Preserve the file-shaped command so the background job reports the path error.
   }
-  return { kind: "file" as const, path: target };
+  return { kind: "file" as const, path: normalizedTarget };
 }
 
 function registerKnowledgeTools(
@@ -91,20 +102,19 @@ function registerKnowledgeTools(
   pi.registerTool({
     name: "commit_knowledge",
     label: "Commit knowledge",
-    description:
-      "Queue a file, directory, URL, text, Git repository, Pi package, Skill, or MCP schema for durable knowledge indexing.",
+    description: `Queue a file, directory, URL, text, Git repository, Pi package, Skill, or MCP schema for durable knowledge indexing. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
-      kind: Type.Union([
-        Type.Literal("file"),
-        Type.Literal("directory"),
-        Type.Literal("workspace"),
-        Type.Literal("git"),
-        Type.Literal("url"),
-        Type.Literal("text"),
-        Type.Literal("pi-package"),
-        Type.Literal("skill"),
-        Type.Literal("mcp"),
-      ]),
+      kind: StringEnum([
+        "file",
+        "directory",
+        "workspace",
+        "git",
+        "url",
+        "text",
+        "pi-package",
+        "skill",
+        "mcp",
+      ] as const),
       value: Type.String({ minLength: 1 }),
       namespace: Type.Optional(Type.String({ minLength: 1 })),
     }),
@@ -117,7 +127,7 @@ function registerKnowledgeTools(
         { ...(signal === undefined ? {} : { signal }), priority: "user" },
       );
       return {
-        content: [{ type: "text", text: JSON.stringify(receipt) }],
+        content: [{ type: "text", text: formatPiToolJson(receipt) }],
         details: receipt,
       };
     },
@@ -125,8 +135,7 @@ function registerKnowledgeTools(
   pi.registerTool({
     name: "search_knowledge",
     label: "Search knowledge",
-    description:
-      "Search durable user, project, and Pi capability knowledge with Dense and full-text retrieval.",
+    description: `Search durable user, project, and Pi capability knowledge with Dense and full-text retrieval. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       query: Type.String({ minLength: 1 }),
       namespace: Type.Optional(Type.String({ minLength: 1 })),
@@ -150,7 +159,7 @@ function registerKnowledgeTools(
               allowRerank: true,
             });
       return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
+        content: [{ type: "text", text: formatPiToolJson(result) }],
         details: result.diagnostics,
       };
     },
@@ -165,39 +174,40 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
       const [action = "status", ...argumentsList] = rawArguments.trim().split(/\s+/);
       const knowledge = runtime.getKnowledge<KnowledgeService>();
       if (knowledge === undefined) {
-        context.ui.notify("Pi Mentis knowledge provider is unavailable", "error");
+        notifyWhenUiAvailable(context, "Pi Mentis knowledge provider is unavailable", "error");
         return;
       }
       if (action === "add" || action === "sync" || action === "rebuild") {
         const target = argumentsList.join(" ");
         if (target === "") {
-          context.ui.notify(`Usage: /kb ${action} <path-or-url>`, "error");
+          notifyWhenUiAvailable(context, `Usage: /kb ${action} <path-or-url>`, "error");
           return;
         }
         const source = await knowledgeCommandSource(target);
         const receipt = await knowledge.enqueueIngest({ source }, { priority: "user" });
-        context.ui.notify(`Knowledge job ${receipt.jobId} queued`, "info");
+        notifyWhenUiAvailable(context, `Knowledge job ${receipt.jobId} queued`, "info");
         return;
       }
       if (action === "remove") {
         const sourceId = argumentsList[0];
         if (sourceId === undefined) {
-          context.ui.notify("Usage: /kb remove <source-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb remove <source-id>", "error");
           return;
         }
         const result = await knowledge.remove({ sourceId });
-        context.ui.notify(`Removed ${result.removedChunks} chunks`, "info");
+        notifyWhenUiAvailable(context, `Removed ${result.removedChunks} chunks`, "info");
         return;
       }
       if (action === "inspect") {
         const documentId = argumentsList[0];
         if (documentId === undefined) {
-          context.ui.notify("Usage: /kb inspect <document-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb inspect <document-id>", "error");
           return;
         }
         const result = await knowledge.inspect({ documentId });
-        context.ui.notify(
-          result === undefined ? "Document not found" : JSON.stringify(result),
+        notifyWhenUiAvailable(
+          context,
+          result === undefined ? "Document not found" : formatPiToolJson(result),
           "info",
         );
         return;
@@ -205,25 +215,31 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
       if (action === "jobs") {
         const jobId = argumentsList[0];
         if (jobId === undefined || store === undefined) {
-          context.ui.notify("Usage: /kb jobs <job-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb jobs <job-id>", "error");
           return;
         }
         const job = (await store.fetchScalar("jobs_v1", [jobId])).get(jobId);
-        context.ui.notify(job === undefined ? "Job not found" : JSON.stringify(job), "info");
+        notifyWhenUiAvailable(
+          context,
+          job === undefined ? "Job not found" : formatPiToolJson(job),
+          "info",
+        );
         return;
       }
       if (action === "cancel") {
         const jobId = argumentsList[0];
         const cancelled = jobId !== undefined && scheduler.cancel(jobId);
-        context.ui.notify(
+        notifyWhenUiAvailable(
+          context,
           cancelled ? `Cancelled ${jobId}` : "Job not found or already finished",
           cancelled ? "info" : "warning",
         );
         return;
       }
       if (action === "models") {
-        context.ui.notify(
-          JSON.stringify({
+        notifyWhenUiAvailable(
+          context,
+          formatPiToolJson({
             embedding: config.inference.siliconflow.embedding,
             rerank: config.inference.siliconflow.rerank,
           }),
@@ -232,8 +248,9 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
         return;
       }
       if (action === "migration-status") {
-        context.ui.notify(
-          store === undefined ? "Storage unavailable" : JSON.stringify(store.manifest),
+        notifyWhenUiAvailable(
+          context,
+          store === undefined ? "Storage unavailable" : formatPiToolJson(store.manifest),
           store === undefined ? "error" : "info",
         );
         return;
@@ -248,7 +265,7 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           dimensions < 768 ||
           dimensions > 4096
         ) {
-          context.ui.notify("Usage: /kb migrate-embedding <768..4096>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb migrate-embedding <768..4096>", "error");
           return;
         }
         const target = { ...embeddingSpace(config), dimensions };
@@ -258,20 +275,24 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           embedding,
           target,
         );
-        context.ui.notify(`Embedding migration job ${receipt.jobId} queued`, "info");
+        notifyWhenUiAvailable(context, `Embedding migration job ${receipt.jobId} queued`, "info");
         return;
       }
       if (action === "rollback-embedding") {
         const generationId = argumentsList[0];
         if (store === undefined || generationId === undefined) {
-          context.ui.notify("Usage: /kb rollback-embedding <generation-id>", "error");
+          notifyWhenUiAvailable(context, "Usage: /kb rollback-embedding <generation-id>", "error");
           return;
         }
         await store.rollbackGeneration("knowledge", generationId);
-        context.ui.notify(`Rolled back knowledge generation to ${generationId}`, "warning");
+        notifyWhenUiAvailable(
+          context,
+          `Rolled back knowledge generation to ${generationId}`,
+          "warning",
+        );
         return;
       }
-      context.ui.notify(JSON.stringify(runtime.snapshot()), "info");
+      notifyWhenUiAvailable(context, formatPiToolJson(runtime.snapshot()), "info");
     },
   });
 }

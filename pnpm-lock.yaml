@@ -144,8 +144,11 @@ importers:
 
   packages/pi-context-extension:
     dependencies:
+      "@earendil-works/pi-ai":
+        specifier: "*"
+        version: 0.83.0(ws@8.21.1)(zod@4.4.3)
       "@earendil-works/pi-coding-agent":
-        specifier: 0.83.0
+        specifier: "*"
         version: 0.83.0(ws@8.21.1)(zod@4.4.3)
       "@zvec/zvec":
         specifier: 0.6.0
@@ -166,7 +169,7 @@ importers:
         specifier: 1.7.1
         version: 1.7.1
       typebox:
-        specifier: 1.3.7
+        specifier: "*"
         version: 1.3.7
       yaml:
         specifier: 2.9.0
@@ -193,6 +196,9 @@ importers:
       "@pi-mentis/pi-mentis-pi-capabilities":
         specifier: workspace:*
         version: link:../pi-capabilities
+      "@pi-mentis/pi-mentis-pi-extension-support":
+        specifier: workspace:*
+        version: link:../pi-extension-support
       "@pi-mentis/pi-mentis-retrieval":
         specifier: workspace:*
         version: link:../retrieval
@@ -203,10 +209,19 @@ importers:
         specifier: workspace:*
         version: link:../zvec-storage
 
-  packages/pi-knowledge-extension:
+  packages/pi-extension-support:
     dependencies:
       "@earendil-works/pi-coding-agent":
-        specifier: 0.83.0
+        specifier: "*"
+        version: 0.83.0(ws@8.21.1)(zod@4.4.3)
+
+  packages/pi-knowledge-extension:
+    dependencies:
+      "@earendil-works/pi-ai":
+        specifier: "*"
+        version: 0.83.0(ws@8.21.1)(zod@4.4.3)
+      "@earendil-works/pi-coding-agent":
+        specifier: "*"
         version: 0.83.0(ws@8.21.1)(zod@4.4.3)
       "@zvec/zvec":
         specifier: 0.6.0
@@ -227,7 +242,7 @@ importers:
         specifier: 1.7.1
         version: 1.7.1
       typebox:
-        specifier: 1.3.7
+        specifier: "*"
         version: 1.3.7
       yaml:
         specifier: 2.9.0
@@ -248,6 +263,9 @@ importers:
       "@pi-mentis/pi-mentis-observability":
         specifier: workspace:*
         version: link:../observability
+      "@pi-mentis/pi-mentis-pi-extension-support":
+        specifier: workspace:*
+        version: link:../pi-extension-support
       "@pi-mentis/pi-mentis-retrieval":
         specifier: workspace:*
         version: link:../retrieval
@@ -260,14 +278,17 @@ importers:
 
   packages/pi-memory-extension:
     dependencies:
+      "@earendil-works/pi-ai":
+        specifier: "*"
+        version: 0.83.0(ws@8.21.1)(zod@4.4.3)
       "@earendil-works/pi-coding-agent":
-        specifier: 0.83.0
+        specifier: "*"
         version: 0.83.0(ws@8.21.1)(zod@4.4.3)
       "@zvec/zvec":
         specifier: 0.6.0
         version: 0.6.0
       typebox:
-        specifier: 1.3.7
+        specifier: "*"
         version: 1.3.7
     devDependencies:
       "@pi-mentis/pi-mentis-core":
@@ -282,6 +303,9 @@ importers:
       "@pi-mentis/pi-mentis-observability":
         specifier: workspace:*
         version: link:../observability
+      "@pi-mentis/pi-mentis-pi-extension-support":
+        specifier: workspace:*
+        version: link:../pi-extension-support
       "@pi-mentis/pi-mentis-retrieval":
         specifier: workspace:*
         version: link:../retrieval

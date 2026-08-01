@@ -267,11 +267,33 @@ async function runPi(packageName, operations, identity = {}) {
   );
   const response = JSON.parse(await readFile(responseFile, "utf8"));
   assert(response.ok === true, `Pi driver failed: ${response.error ?? "unknown error"}`);
-  assert(
-    response.piVersion === "0.83.0",
-    `Packed extension peer Pi version was ${response.piVersion}`,
-  );
+  assert(response.piVersion === "0.83.0", `Packed extension loaded with Pi ${response.piVersion}`);
+  for (const tool of response.toolDefinitions ?? []) {
+    assertNoStringLiteralUnion(tool.parameters, `${tool.name}.parameters`);
+  }
   return response;
+}
+
+function assertNoStringLiteralUnion(value, location) {
+  if (value === null || typeof value !== "object") return;
+  if (
+    Array.isArray(value.anyOf) &&
+    value.anyOf.length > 0 &&
+    value.anyOf.every(
+      (entry) => entry !== null && typeof entry === "object" && typeof entry.const === "string",
+    )
+  ) {
+    throw new Error(`${location} uses a Google-incompatible string literal union`);
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key === "anyOf" && Array.isArray(child)) {
+      child.forEach((entry, index) =>
+        assertNoStringLiteralUnion(entry, `${location}.anyOf[${index}]`),
+      );
+      continue;
+    }
+    assertNoStringLiteralUnion(child, `${location}.${key}`);
+  }
 }
 
 function toolPayload(entry) {
@@ -1918,13 +1940,15 @@ ${migrationCoverageNote}
 
 The complete sanitized evidence is in \`${path.relative(root, jsonReport)}\`.
 `;
-await writeFile(
-  path.join(
-    root,
-    "docs",
-    suite === "migration" ? "live-migration-e2e-report.md" : "live-e2e-report.md",
-  ),
-  markdown,
-);
+if (suite === "all" || suite === "migration") {
+  await writeFile(
+    path.join(
+      root,
+      "docs",
+      suite === "migration" ? "live-migration-e2e-report.md" : "live-e2e-report.md",
+    ),
+    markdown,
+  );
+}
 console.log(JSON.stringify({ status: report.status, runId, artifactRoot, usage }, null, 2));
 if (report.status !== "PASS") process.exitCode = 1;

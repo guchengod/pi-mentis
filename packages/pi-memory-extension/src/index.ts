@@ -1,5 +1,6 @@
 import { arch, platform } from "node:os";
 
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -37,6 +38,10 @@ import {
   type PiScopeContext,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
+import {
+  formatPiToolJson,
+  PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
+} from "@pi-mentis/pi-mentis-pi-extension-support";
 import {
   createRetrievalService,
   type CreateRetrievalServiceOptions,
@@ -76,30 +81,29 @@ function registerMemoryTools(
   pi.registerTool({
     name: "commit_memory",
     label: "Commit memory",
-    description:
-      "Commit evidence-bound durable memory with scope, type, confidence, and conflict handling.",
+    description: `Commit evidence-bound durable memory with scope, type, confidence, and conflict handling. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       content: Type.String({ minLength: 3 }),
-      type: Type.Union([
-        Type.Literal("preference"),
-        Type.Literal("requirement"),
-        Type.Literal("fact"),
-        Type.Literal("decision"),
-        Type.Literal("procedural"),
-        Type.Literal("episodic"),
-        Type.Literal("task"),
-      ]),
-      scopeKind: Type.Union([
-        Type.Literal("user"),
-        Type.Literal("workspace"),
-        Type.Literal("project"),
-        Type.Literal("repository"),
-        Type.Literal("topic"),
-        Type.Literal("task"),
-        Type.Literal("session"),
-        Type.Literal("branch"),
-        Type.Literal("run"),
-      ]),
+      type: StringEnum([
+        "preference",
+        "requirement",
+        "fact",
+        "decision",
+        "procedural",
+        "episodic",
+        "task",
+      ] as const),
+      scopeKind: StringEnum([
+        "user",
+        "workspace",
+        "project",
+        "repository",
+        "topic",
+        "task",
+        "session",
+        "branch",
+        "run",
+      ] as const),
       scopeId: Type.String({ minLength: 1 }),
       confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
@@ -136,7 +140,7 @@ function registerMemoryTools(
         signal === undefined ? {} : { signal },
       );
       return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
+        content: [{ type: "text", text: formatPiToolJson(result) }],
         details: result,
       };
     },
@@ -146,24 +150,24 @@ function registerMemoryTools(
     label: "Search memory",
     description:
       retrieval === undefined
-        ? "Search durable Pi Mentis memory."
-        : "Search Pi Mentis knowledge first, then knowledge-guided durable memory.",
+        ? `Search durable Pi Mentis memory. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`
+        : `Search Pi Mentis knowledge first, then knowledge-guided durable memory. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       id: Type.Optional(Type.String({ minLength: 1 })),
       query: Type.Optional(Type.String({ minLength: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
       scopeKind: Type.Optional(
-        Type.Union([
-          Type.Literal("user"),
-          Type.Literal("workspace"),
-          Type.Literal("project"),
-          Type.Literal("repository"),
-          Type.Literal("topic"),
-          Type.Literal("task"),
-          Type.Literal("session"),
-          Type.Literal("branch"),
-          Type.Literal("run"),
-        ]),
+        StringEnum([
+          "user",
+          "workspace",
+          "project",
+          "repository",
+          "topic",
+          "task",
+          "session",
+          "branch",
+          "run",
+        ] as const),
       ),
       scopeId: Type.Optional(Type.String({ minLength: 1 })),
     }),
@@ -185,7 +189,7 @@ function registerMemoryTools(
       if (parameters.query === undefined) {
         const result = { exact, evidence: exactEvidence };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
           details: undefined,
         };
       }
@@ -212,7 +216,7 @@ function registerMemoryTools(
         });
         const result = { exact, evolution, evidence: evidenceMatches };
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
           details: undefined,
         };
       }
@@ -265,7 +269,7 @@ function registerMemoryTools(
         content: [
           {
             type: "text",
-            text: JSON.stringify({
+            text: formatPiToolJson({
               ...(parameters.id === undefined ? {} : { exact, evidence: exactEvidence }),
               search: result,
             }),
