@@ -292,6 +292,35 @@ describe("priority scheduling and arbitration", () => {
     await scheduler.close();
   });
 
+  it("cleans rejected deduplicated work without creating an unhandled rejection", async () => {
+    const scheduler = new BackgroundScheduler({
+      maxQueuedTasks: 2,
+      maxQueuedBytes: 1_024,
+      maxActiveTasks: 1,
+    });
+    const failed = scheduler.schedule({
+      id: "failed",
+      deduplicationKey: "same-work",
+      priority: TaskPriority.UserRequested,
+      estimatedBytes: 1,
+      run: async () => {
+        throw new Error("expected failure");
+      },
+    });
+    await expect(failed.promise).rejects.toThrow("expected failure");
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const retried = scheduler.schedule({
+      id: "retried",
+      deduplicationKey: "same-work",
+      priority: TaskPriority.UserRequested,
+      estimatedBytes: 1,
+      run: async () => "completed",
+    });
+    expect(retried.deduplicated).toBe(false);
+    await expect(retried.promise).resolves.toBe("completed");
+    await scheduler.close();
+  });
+
   it("starts CPU workers lazily and executes predefined CPU operations", async () => {
     const pool = new CpuWorkerPool(1, 4);
     expect(pool.started).toBe(false);
