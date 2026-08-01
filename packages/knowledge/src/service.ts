@@ -171,6 +171,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
           typeof existingSource?.["createdAt"] === "number" ? existingSource["createdAt"] : now,
         updatedAt: now,
         fingerprint: resolved.fingerprint,
+        ...(resolved.source.attributes === undefined
+          ? {}
+          : { attributes: resolved.source.attributes }),
       };
       await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(knowledgeSource)]);
       const mediaType = detectMediaType(
@@ -277,6 +280,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
           namespace,
           createdAt: now,
           updatedAt: now,
+          ...(resolved.source.attributes === undefined
+            ? {}
+            : { sourceAttributes: resolved.source.attributes }),
         };
       });
       const knowledgeDocument: KnowledgeDocument = {
@@ -294,6 +300,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
         activeRevision: previousRevision,
         status: "preparing",
         indexedAt: now,
+        ...(parsedDocument.metadata.attributes === undefined
+          ? {}
+          : { attributes: parsedDocument.metadata.attributes }),
       };
       await this.#store.upsertScalar("knowledge_documents_v1", [
         this.#documentRecord(knowledgeDocument),

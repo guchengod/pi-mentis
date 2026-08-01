@@ -29,7 +29,12 @@ function flattenObject(value: unknown, prefix = ""): DocumentNode[] {
 }
 
 function stripHtml(html: string): DocumentNode[] {
-  const sanitized = html
+  const content =
+    /<main\b[^>]*>([\s\S]*?)<\/main>/i.exec(html)?.[1] ??
+    /<article\b[^>]*>([\s\S]*?)<\/article>/i.exec(html)?.[1] ??
+    /<body\b[^>]*>([\s\S]*?)<\/body>/i.exec(html)?.[1] ??
+    html;
+  const sanitized = content
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ");
   const nodes: DocumentNode[] = [];
@@ -251,8 +256,9 @@ export class TextParser implements KnowledgeParser {
       id: contentHash(`${input.source.id}:${input.filename ?? input.source.canonicalUri}`),
       source: input.source,
       metadata: {
-        title: input.filename ?? input.source.canonicalUri,
+        title: input.title ?? input.filename ?? input.source.canonicalUri,
         mediaType: input.mediaType,
+        ...(input.attributes === undefined ? {} : { attributes: input.attributes }),
       },
       nodes,
     };

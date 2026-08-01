@@ -4,6 +4,7 @@ export interface KnowledgeSourceRef {
   readonly id: string;
   readonly canonicalUri: string;
   readonly namespace: string;
+  readonly attributes?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface DocumentMetadata {
@@ -108,6 +109,8 @@ export interface ParserInput {
   readonly filename?: string;
   readonly mediaType: string;
   readonly bytes: Uint8Array;
+  readonly title?: string;
+  readonly attributes?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface ParserOptions {

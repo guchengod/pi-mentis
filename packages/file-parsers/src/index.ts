@@ -13,6 +13,7 @@ export * from "./registry.js";
 export * from "./source.js";
 export * from "./text-parser.js";
 export * from "./types.js";
+export * from "./web-source.js";
 
 export function createDefaultParserRegistry(): ParserRegistry {
   const registry = new ParserRegistry();
