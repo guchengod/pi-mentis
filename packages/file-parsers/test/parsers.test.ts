@@ -57,4 +57,38 @@ describe("parser selection and chunk packing", () => {
     expect(first).toEqual(second);
     expect(first.every((chunk) => chunk.tokenCount <= 160)).toBe(true);
   });
+
+  it("hard-splits long structure atoms without paragraph or line boundaries", () => {
+    const longLine = "Pi Mentis 长文本 without-breaks ".repeat(2_000);
+    const document = {
+      metadata: { title: "Long", mediaType: "text/html", canonicalUri: "memory:long" },
+      nodes: [{ type: "paragraph" as const, text: longLine }],
+    };
+    const chunks = chunkStructuredDocument(document, undefined, {
+      targetTokens: 80,
+      maxTokens: 160,
+      overlapTokens: 0,
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.tokenCount <= 160)).toBe(true);
+    expect(chunks.map((chunk) => chunk.text).join("")).toBe(longLine.trim());
+  });
+
+  it("drops overlap rather than exceeding the maximum chunk size", () => {
+    const document = {
+      metadata: { title: "Overlap", mediaType: "text/plain", canonicalUri: "memory:overlap" },
+      nodes: [
+        { type: "paragraph" as const, text: "a".repeat(50) },
+        { type: "paragraph" as const, text: "b".repeat(160) },
+      ],
+    };
+    const chunks = chunkStructuredDocument(document, undefined, {
+      targetTokens: 40,
+      maxTokens: 160,
+      overlapTokens: 60,
+    });
+    expect(chunks).toHaveLength(2);
+    expect(chunks.every((chunk) => chunk.tokenCount <= 160)).toBe(true);
+    expect(chunks[1]?.text).toBe("b".repeat(160));
+  });
 });

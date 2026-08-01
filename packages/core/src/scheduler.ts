@@ -187,7 +187,10 @@ export class BackgroundScheduler {
     this.#heap.push(entry as QueueEntry<unknown>);
     if (key !== undefined) {
       this.#deduplicated.set(key, promise);
-      void promise.finally(() => this.#deduplicated.delete(key));
+      void promise.then(
+        () => this.#deduplicated.delete(key),
+        () => this.#deduplicated.delete(key),
+      );
     }
     queueMicrotask(() => this.#drain());
     return { promise, deduplicated: false };

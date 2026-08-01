@@ -100,8 +100,50 @@ function safelySplit(text: string, maxTokens: number, counter: TokenCounter): re
     }
   }
   if (current !== "") pieces.push(current);
-  if (pieces.some((piece) => counter.count(piece) > maxTokens)) {
-    throw new Error("A structure atom exceeds the Embedding model token limit");
+  return pieces.flatMap((piece) =>
+    counter.count(piece) <= maxTokens ? [piece] : hardSplit(piece, maxTokens, counter),
+  );
+}
+
+function hardSplit(text: string, maxTokens: number, counter: TokenCounter): readonly string[] {
+  if (!Number.isFinite(maxTokens) || maxTokens < 1) {
+    throw new Error("Embedding model token limit must be at least one token");
+  }
+  const characters = Array.from(text);
+  const pieces: string[] = [];
+  let start = 0;
+  while (start < characters.length) {
+    let accepted = start;
+    let rejected = Math.min(characters.length, start + Math.max(1, Math.floor(maxTokens)));
+    const candidate = (end: number): string => characters.slice(start, end).join("");
+    if (counter.count(candidate(rejected)) <= maxTokens) {
+      accepted = rejected;
+      let step = Math.max(1, rejected - start);
+      while (accepted < characters.length) {
+        rejected = Math.min(characters.length, accepted + step * 2);
+        if (counter.count(candidate(rejected)) > maxTokens) break;
+        accepted = rejected;
+        step *= 2;
+      }
+      if (accepted === characters.length) {
+        pieces.push(candidate(accepted));
+        break;
+      }
+    }
+    while (accepted + 1 < rejected) {
+      const middle = Math.floor((accepted + rejected) / 2);
+      if (counter.count(candidate(middle)) <= maxTokens) accepted = middle;
+      else rejected = middle;
+    }
+    if (accepted === start) {
+      const character = candidate(start + 1);
+      if (counter.count(character) > maxTokens) {
+        throw new Error("A single character exceeds the Embedding model token limit");
+      }
+      accepted = start + 1;
+    }
+    pieces.push(candidate(accepted));
+    start = accepted;
   }
   return pieces;
 }
@@ -157,6 +199,10 @@ export function chunkStructuredDocument(
       (currentTokens >= policy.targetTokens || currentTokens + atom.tokenCount > maximum)
     ) {
       flush();
+    }
+    if (current.length > 0 && currentTokens + atom.tokenCount > maximum) {
+      current = [];
+      currentTokens = 0;
     }
     current.push(atom);
     currentTokens += atom.tokenCount;
