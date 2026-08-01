@@ -1,9 +1,9 @@
 # Pi Mentis Live E2E Report
 
-- Run ID: `live-e2e-20260801T045642538Z-476c61`
+- Run ID: `live-e2e-20260801T051746417Z-254cb9`
 - Suite: `all`
 - Status: **PASS**
-- Artifact: `.artifacts/live-e2e/live-e2e-20260801T045642538Z-476c61`
+- Artifact: `.artifacts/live-e2e/live-e2e-20260801T051746417Z-254cb9`
 
 ## Environment
 
@@ -23,43 +23,45 @@ No API key, Authorization header, request header, or input body is present in th
 
 | Scenario                                                             | Status  | Duration ms |
 | -------------------------------------------------------------------- | ------- | ----------: |
-| I1 real Embedding and Rerank                                         | PASS    |         609 |
+| I1 real Embedding and Rerank                                         | PASS    |        1110 |
 | D1/G1 multi-dimension Zvec generation migration                      | BLOCKED |           0 |
-| K1-K2 real text and Markdown knowledge                               | PASS    |        4926 |
-| K3 recursive directory ingestion with source path and symbol         | PASS    |        2707 |
-| K4 incremental update and unchanged-document reuse                   | PASS    |        2033 |
-| K5 source deletion preserves unrelated knowledge                     | PASS    |        1602 |
-| M1-M4 real memory commit, semantic search, reinforcement, correction | PASS    |        3894 |
-| M5 project, session, branch, and default contextual scope behavior   | PASS    |        2174 |
-| C1-C2/C5 knowledge-first combined retrieval and Pi auto recall       | PASS    |       23102 |
-| C3 authoritative knowledge conflicts and retires old memory          | PASS    |       23102 |
-| C4 real Rerank changes RRF order before MMR                          | PASS    |       23102 |
-| P1 packed Pi v0.83.0 extension surfaces                              | PASS    |        1719 |
-| M6/Z4 complete process restart persistence                           | PASS    |        2066 |
-| R1 long-context planned multi-batch real Rerank                      | PASS    |         646 |
-| F1-F22 real declared parser formats                                  | PASS    |        8523 |
-| E1-E3 real credential/model failure and Rerank recovery              | PASS    |        3483 |
+| K1-K2 real text and Markdown knowledge                               | PASS    |        4690 |
+| K3 recursive directory ingestion with source path and symbol         | PASS    |        2652 |
+| K4 incremental update and unchanged-document reuse                   | PASS    |        1896 |
+| K5 source deletion preserves unrelated knowledge                     | PASS    |        1674 |
+| M1-M4 real memory commit, semantic search, reinforcement, correction | PASS    |        3828 |
+| M5 project, session, branch, and default contextual scope behavior   | PASS    |        2100 |
+| C1-C2/C5 knowledge-first combined retrieval and Pi auto recall       | PASS    |       17648 |
+| C3 authoritative knowledge conflicts and retires old memory          | PASS    |       17648 |
+| C4 real Rerank changes RRF order before MMR                          | PASS    |       17648 |
+| P1 packed Pi v0.83.0 extension surfaces                              | PASS    |        1744 |
+| M6/Z4 complete process restart persistence                           | PASS    |        2057 |
+| R1 long-context planned multi-batch real Rerank                      | PASS    |         610 |
+| F1-F22 real declared parser formats                                  | PASS    |       10473 |
+| E1-E3 real credential/model failure and Rerank recovery              | PASS    |       16616 |
+
+D1/G1 is blocked only for the production `BAAI/bge-m3` configuration because that model exposes a fixed 1024 dimensions. The same scenario is completed with real selectable dimensions in the [migration report](./live-migration-e2e-report.md).
 
 ## Real remote requests
 
-- Embedding requests: 134
-- Embedding inputs: 1181
+- Embedding requests: 167
+- Embedding inputs: 2228
 - Rerank requests: 23
 - Rerank documents: 164
-- Estimated input units: 211607
-- Trace IDs returned: 156
+- Estimated input units: 318692
+- Trace IDs returned: 189
 - Retries: 0
 
 ## Persistence
 
-- Isolated Zvec root: `.artifacts/live-e2e/live-e2e-20260801T045642538Z-476c61/zvec`
+- Isolated Zvec root: `.artifacts/live-e2e/live-e2e-20260801T051746417Z-254cb9/zvec`
 - Full process restarts: 1
 - Restart recall successes: 1
 
 ## Performance
 
-- Remote request P50 / P95 / P99: 145.45091599999978 / 615.3909999999996 / 3017.2039160000004 ms
-- Embedding P50: 139.71391700000004 ms
-- Rerank P50: 169.42191699999967 ms
+- Remote request P50 / P95 / P99: 166.9088330000002 / 613.7489999999998 / 868.4525830000002 ms
+- Embedding P50: 200.81070799999998 ms
+- Rerank P50: 147.1957500000001 ms
 
-The complete sanitized evidence is in `.artifacts/live-e2e/live-e2e-20260801T045642538Z-476c61/reports/live-e2e.json`.
+The complete sanitized evidence is in `.artifacts/live-e2e/live-e2e-20260801T051746417Z-254cb9/reports/live-e2e.json`.

@@ -10,7 +10,6 @@ import {
   detectInstalledPackageVersion,
   getOrCreateRuntime,
   loadConfig,
-  operationId,
   resetGlobalRuntime,
   type PersistentIntelligenceRuntime,
   type PiMentisConfig,
@@ -22,7 +21,7 @@ import type {
 } from "@pi-mentis/pi-mentis-inference";
 import {
   createKnowledgeService,
-  migrateKnowledgeEmbedding,
+  enqueueKnowledgeEmbeddingMigration,
   type KnowledgeService,
 } from "@pi-mentis/pi-mentis-knowledge-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
@@ -87,6 +86,7 @@ function registerKnowledgeTools(
   pi: ExtensionAPI,
   service: KnowledgeService,
   retrieval: RetrievalService | undefined,
+  manualSearchTimeoutMs: number,
 ): void {
   pi.registerTool({
     name: "commit_knowledge",
@@ -140,9 +140,13 @@ function registerKnowledgeTools(
       };
       const result =
         retrieval === undefined
-          ? await service.search(query, signal === undefined ? {} : { signal })
+          ? await service.search(query, {
+              ...(signal === undefined ? {} : { signal }),
+              timeoutMs: manualSearchTimeoutMs,
+            })
           : await retrieval.search(query, {
               ...(signal === undefined ? {} : { signal }),
+              timeoutMs: manualSearchTimeoutMs,
               allowRerank: true,
             });
       return {
@@ -247,17 +251,14 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           context.ui.notify("Usage: /kb migrate-embedding <768..4096>", "error");
           return;
         }
-        const jobId = operationId("job");
         const target = { ...embeddingSpace(config), dimensions };
-        const scheduled = scheduler.schedule({
-          id: jobId,
-          priority: 20,
-          estimatedBytes: 1,
-          run: (signal) =>
-            migrateKnowledgeEmbedding(store as ZvecStore, embedding, target, { signal }),
-        });
-        void scheduled.promise.catch(() => undefined);
-        context.ui.notify(`Embedding migration job ${jobId} queued`, "info");
+        const receipt = await enqueueKnowledgeEmbeddingMigration(
+          store as ZvecStore,
+          scheduler,
+          embedding,
+          target,
+        );
+        context.ui.notify(`Embedding migration job ${receipt.jobId} queued`, "info");
         return;
       }
       if (action === "rollback-embedding") {
@@ -349,7 +350,12 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
     if (registered || runtime.getMemory() !== undefined) return;
     const knowledge = runtime.getKnowledge<KnowledgeService>();
     if (knowledge === undefined) return;
-    registerKnowledgeTools(pi, knowledge, runtime.getRetrieval<RetrievalService>());
+    registerKnowledgeTools(
+      pi,
+      knowledge,
+      runtime.getRetrieval<RetrievalService>(),
+      config.retrieval.manualSearchTimeoutMs,
+    );
     registerKnowledgeCommand(pi, runtime);
     registered = true;
   });

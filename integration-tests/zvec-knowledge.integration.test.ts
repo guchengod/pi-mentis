@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -11,6 +12,7 @@ import {
 } from "@pi-mentis/pi-mentis-core";
 import {
   createKnowledgeService,
+  enqueueKnowledgeEmbeddingMigration,
   migrateKnowledgeEmbedding,
 } from "@pi-mentis/pi-mentis-knowledge-core";
 import {
@@ -200,6 +202,21 @@ describe("real Zvec production loop", () => {
     expect(oldGeneration).toBeDefined();
     await store.rollbackGeneration("knowledge", oldGeneration!.generationId);
     expect(activeGenerationFor(store.manifest, "knowledge")).toBe(oldGeneration!.generationId);
+
+    const receipt = await enqueueKnowledgeEmbeddingMigration(
+      store,
+      jobs,
+      new DeterministicEmbeddingProvider(1024),
+      target,
+    );
+    let migrationJob = (await store.fetchScalar("jobs_v1", [receipt.jobId])).get(receipt.jobId);
+    expect(["queued", "running", "completed"]).toContain(migrationJob?.state);
+    for (let attempts = 0; attempts < 100 && migrationJob?.state !== "completed"; attempts++) {
+      await delay(10);
+      migrationJob = (await store.fetchScalar("jobs_v1", [receipt.jobId])).get(receipt.jobId);
+    }
+    expect(migrationJob?.state).toBe("completed");
+    expect(migrationJob?.result).toMatchObject({ activated: true, migrated: first.chunkCount });
     await jobs.close();
     await store.close();
   });

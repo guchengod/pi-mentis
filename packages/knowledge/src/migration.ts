@@ -1,6 +1,9 @@
 import {
+  BackgroundScheduler,
   EmbeddingMigrationError,
+  TaskPriority,
   operationId,
+  type JobReceipt,
   type OperationOptions,
 } from "@pi-mentis/pi-mentis-core";
 import {
@@ -14,6 +17,86 @@ export interface MigrationResult {
   readonly generationId: string;
   readonly migrated: number;
   readonly activated: boolean;
+}
+
+async function persistMigrationJob(
+  store: ZvecStore,
+  jobId: string,
+  state: "queued" | "running" | "completed" | "failed",
+  createdAt: number,
+  payload: Readonly<Record<string, unknown>>,
+): Promise<void> {
+  const updatedAt = Date.now();
+  await store.upsertScalar("jobs_v1", [
+    {
+      id: jobId,
+      kind: "embedding-migration",
+      namespace: "system:embedding-migration",
+      status: state,
+      payload: { jobId, state, ...payload },
+      createdAt,
+      updatedAt,
+    },
+  ]);
+}
+
+export async function enqueueKnowledgeEmbeddingMigration(
+  store: ZvecStore,
+  scheduler: BackgroundScheduler,
+  embedding: EmbeddingProvider,
+  targetSpace: EmbeddingSpaceIdentity,
+): Promise<JobReceipt> {
+  const jobId = operationId("job");
+  const createdAt = Date.now();
+  await persistMigrationJob(store, jobId, "queued", createdAt, {
+    targetSpace,
+    createdAt,
+  });
+  const scheduled = scheduler.schedule({
+    id: jobId,
+    priority: TaskPriority.Migration,
+    estimatedBytes: 1,
+    run: async (signal) => {
+      const startedAt = Date.now();
+      await persistMigrationJob(store, jobId, "running", createdAt, {
+        targetSpace,
+        startedAt,
+      });
+      try {
+        const result = await migrateKnowledgeEmbedding(store, embedding, targetSpace, { signal });
+        await persistMigrationJob(store, jobId, "completed", createdAt, {
+          targetSpace,
+          result,
+          completedAt: Date.now(),
+        });
+        return result;
+      } catch (error: unknown) {
+        await persistMigrationJob(store, jobId, "failed", createdAt, {
+          targetSpace,
+          error: error instanceof Error ? error.message : String(error),
+          failedAt: Date.now(),
+        });
+        throw error;
+      }
+    },
+  });
+  void scheduled.promise.catch(async (error: unknown) => {
+    try {
+      await persistMigrationJob(store, jobId, "failed", createdAt, {
+        targetSpace,
+        error: error instanceof Error ? error.message : String(error),
+        failedAt: Date.now(),
+      });
+    } catch {
+      // Preserve the migration failure when durable job reporting is also unavailable.
+    }
+  });
+  return {
+    jobId,
+    accepted: true,
+    deduplicated: scheduled.deduplicated,
+    state: "queued",
+  };
 }
 
 function numberField(fields: Record<string, unknown>, name: string, fallback: number): number {
