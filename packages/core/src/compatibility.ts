@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -52,13 +52,53 @@ async function findPackageManifest(
   }
 }
 
+async function findRuntimePackageManifest(
+  packageName: string,
+  runtimeEntry: string | undefined,
+): Promise<{ readonly path: string; readonly manifest: PackageManifest } | undefined> {
+  if (runtimeEntry === undefined || runtimeEntry === "") return undefined;
+  let entry: string;
+  try {
+    entry = await realpath(runtimeEntry);
+  } catch (error: unknown) {
+    const code =
+      typeof error === "object" && error !== null && "code" in error
+        ? (error as { readonly code?: unknown }).code
+        : undefined;
+    if (code === "ENOENT") return undefined;
+    throw error;
+  }
+  let directory = path.dirname(entry);
+  const root = path.parse(directory).root;
+  while (true) {
+    const manifestPath = path.join(directory, "package.json");
+    try {
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as PackageManifest;
+      if (manifest.name === packageName) return { path: manifestPath, manifest };
+    } catch (error: unknown) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? (error as { readonly code?: unknown }).code
+          : undefined;
+      if (code !== "ENOENT") throw error;
+    }
+    if (directory === root) return undefined;
+    directory = path.dirname(directory);
+  }
+}
+
 export async function detectInstalledPackageVersion(
   packageName: string,
   fromUrl: string,
+  runtimeEntry: string | undefined = process.argv[1],
 ): Promise<string> {
   const direct = await findPackageManifest(packageName, fromUrl);
   if (direct !== undefined && typeof direct.manifest.version === "string") {
     return direct.manifest.version;
+  }
+  const runtime = await findRuntimePackageManifest(packageName, runtimeEntry);
+  if (runtime !== undefined && typeof runtime.manifest.version === "string") {
+    return runtime.manifest.version;
   }
   const require = createRequire(fromUrl);
   const entry = require.resolve(packageName);
@@ -86,9 +126,12 @@ export async function detectInstalledPackageVersion(
 export async function findInstalledPackageRoot(
   packageName: string,
   fromUrl: string,
+  runtimeEntry: string | undefined = process.argv[1],
 ): Promise<string> {
   const direct = await findPackageManifest(packageName, fromUrl);
   if (direct !== undefined) return path.dirname(direct.path);
+  const runtime = await findRuntimePackageManifest(packageName, runtimeEntry);
+  if (runtime !== undefined) return path.dirname(runtime.path);
   const require = createRequire(fromUrl);
   const entry = require.resolve(packageName);
   let directory = path.dirname(entry);
