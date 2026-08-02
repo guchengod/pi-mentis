@@ -20,6 +20,12 @@ export interface SharedZvecStoreHandle {
   release(): Promise<void>;
 }
 
+/** Clean up any stale shared store entries (e.g. after a failed start). */
+export function resetSharedStores(): void {
+  const target = globalThis as SharedStoreGlobal;
+  delete target[SHARED_STORES_SYMBOL];
+}
+
 export async function acquireSharedZvecStore(
   config: StorageConfig,
   spaces: Readonly<Record<GenerationKind, EmbeddingSpaceIdentity>>,
@@ -33,7 +39,14 @@ export async function acquireSharedZvecStore(
     entry = { store, start: store.start(spaces), references: 0 };
     stores.set(config.rootDir, entry);
   }
-  await entry.start;
+  try {
+    await entry.start;
+  } catch (error) {
+    // The store failed to start (e.g. stale writer lock). Remove the failed
+    // entry so the next attempt can create a fresh store.
+    stores.delete(config.rootDir);
+    throw error;
+  }
   entry.references++;
   let released = false;
   return {

@@ -71,6 +71,7 @@ import {
 } from "@pi-mentis/pi-mentis-siliconflow";
 import {
   acquireSharedZvecStore,
+  resetSharedStores,
   type SharedZvecStoreHandle,
   type ZvecStore,
 } from "@pi-mentis/pi-mentis-zvec";
@@ -488,16 +489,33 @@ function registerKbCommand(
 }
 
 export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Promise<void> {
-  const installedVersion = await detectInstalledPackageVersion(
-    "@earendil-works/pi-coding-agent",
-    import.meta.url,
-  );
-  assertPiCompatibility(installedVersion);
-  const piPackageRoot = await findInstalledPackageRoot(
-    "@earendil-works/pi-coding-agent",
-    import.meta.url,
-  );
-  const config = await loadConfig(process.cwd());
+  let initError: Error | undefined;
+  let config: PiMentisConfig;
+  let piPackageRoot: string;
+  try {
+    const installedVersion = await detectInstalledPackageVersion(
+      "@earendil-works/pi-coding-agent",
+      import.meta.url,
+    );
+    assertPiCompatibility(installedVersion);
+    piPackageRoot = await findInstalledPackageRoot(
+      "@earendil-works/pi-coding-agent",
+      import.meta.url,
+    );
+    config = await loadConfig(process.cwd());
+  } catch (err) {
+    initError = err instanceof Error ? err : new Error(String(err));
+    // Register a session_start handler to surface the error to the user.
+    pi.on("session_start", (_event, ctx) => {
+      notifyWhenUiAvailable(
+        ctx,
+        `Pi Mentis extension failed to initialize: ${initError!.message}`,
+        "error",
+      );
+    });
+    return;
+  }
+  // Re-read config after try/catch so it's available to the rest of the factory.
   const scheduler = new BackgroundScheduler(config.performance.queue);
   const telemetry = new InMemoryTelemetry();
   const runtime = getOrCreateRuntime();
@@ -631,12 +649,137 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   pi.on("session_start", async (event, context) => {
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
     const startup = performance.now();
-    await runtime.ready(context.signal);
+    let runtimeReadyError: Error | undefined;
+    try {
+      await runtime.ready(context.signal);
+    } catch (err) {
+      runtimeReadyError = err instanceof Error ? err : new Error(String(err));
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis runtime initialization failed: ${runtimeReadyError.message}. Tools are registered but will return errors until the issue is resolved.`,
+        "error",
+      );
+    }
     const knowledge = runtime.getKnowledge<KnowledgeService>();
     const memory = runtime.getMemory<MemoryService>();
     const retrieval = runtime.getRetrieval<RetrievalService>();
-    if (knowledge === undefined || memory === undefined || retrieval === undefined) return;
+
+    // Always register tools — even if store init failed.
+    // Tools return structured errors when services are unavailable.
+    if (!registered) {
+      registerIntegratedTools(
+        pi,
+        memory!,
+        retrieval!,
+        evidenceStore ?? undefined!,
+        () => {
+          if (scopeContext.repositoryId !== undefined) {
+            return { kind: "repository", id: scopeContext.repositoryId };
+          }
+          const topicId = scopeContext.topicIds?.[0] ?? contextSnapshot?.situation.topicIds[0];
+          return topicId === undefined
+            ? { kind: "user", id: scopeContext.userId }
+            : { kind: "topic", id: topicId };
+        },
+        () => [
+          ...(scopeContext.repositoryId === undefined
+            ? []
+            : [{ kind: "repository" as const, id: scopeContext.repositoryId }]),
+          ...(scopeContext.projectId === undefined
+            ? []
+            : [{ kind: "project" as const, id: scopeContext.projectId }]),
+          ...(scopeContext.taskId === undefined
+            ? []
+            : [{ kind: "task" as const, id: scopeContext.taskId }]),
+          ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
+          { kind: "user", id: scopeContext.userId },
+        ],
+        () => scopeContext,
+        () => contextSnapshot,
+        () =>
+          captureSession?.goalEventId === undefined
+            ? undefined
+            : { kind: "event", id: captureSession.goalEventId, observedAt: Date.now() },
+        (traceId) => {
+          latestRetrievalTraceId = traceId;
+        },
+      );
+      registered = true;
+    }
+
+    if (knowledge === undefined || memory === undefined || retrieval === undefined) {
+      if (runtimeReadyError !== undefined) {
+        // Already notified with the specific error above.
+      } else {
+        const snapshot = runtime.snapshot();
+        const failures = snapshot.providers
+          .filter((p) => p.state === "failed")
+          .map((p) => `${p.kind}(${p.id}): ${p.error ?? "unknown"}`)
+          .join("; ");
+        notifyWhenUiAvailable(
+          context,
+          `Pi Mentis services unavailable (${failures || "no provider failures reported"}). commit_memory and search_memory tools are registered but will return errors.`,
+          "warning",
+        );
+      }
+      return;
+    }
     if (memoryStore === undefined) return;
+
+    // /kb command requires the knowledge service to be available.
+    let kbCommandRegistered = false;
+    if (!kbCommandRegistered && knowledgeStore !== undefined) {
+      registerKbCommand(
+        pi,
+        knowledge,
+        scheduler,
+        config,
+        knowledgeStore.store,
+        () => runtime.snapshot(),
+        async () => {
+          const namespace = "local:local:pi:pi-mentis";
+          const views = await Promise.all(
+            [
+              ...(scopeContext.projectId === undefined
+                ? []
+                : [{ kind: "project" as const, id: scopeContext.projectId }]),
+              ...(scopeContext.taskId === undefined
+                ? []
+                : [{ kind: "task" as const, id: scopeContext.taskId }]),
+              ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
+              { kind: "user" as const, id: scopeContext.userId },
+            ].map(async ({ kind, id }) => memory.getView?.(kind, id, scopeContext)),
+          );
+          return {
+            scheduler: scheduler.snapshot(),
+            context:
+              contextSnapshot === undefined
+                ? undefined
+                : {
+                    id: contextSnapshot.id,
+                    revision: contextSnapshot.revision,
+                    repositoryId: contextSnapshot.workspace?.repositoryId,
+                    projectId: contextSnapshot.workspace?.projectId,
+                    taskId: contextSnapshot.situation.taskId,
+                    topicIds: contextSnapshot.situation.topicIds,
+                    capabilitySnapshotId: contextSnapshot.capability.snapshotId,
+                  },
+            temporal: {
+              enabled: true,
+              repairOnStartup: config.intelligence.temporal.repairOnStartup,
+            },
+            views: views.filter((view) => view !== undefined),
+            policy: policy?.status(),
+            effectiveness: {
+              buffer: effectiveness?.bufferStatus(),
+              summary: await effectiveness?.summary(namespace),
+            },
+          };
+        },
+        () => scopeContext,
+      );
+      kbCommandRegistered = true;
+    }
     const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
       fallbackProjectIdentity(context.cwd),
     );
@@ -812,96 +955,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         createTaskGraphService(memoryStore.store),
       );
     }
-    if (!registered) {
-      if (knowledgeStore === undefined) return;
-      registerIntegratedTools(
-        pi,
-        memory,
-        retrieval,
-        evidenceStore,
-        () => {
-          if (scopeContext.repositoryId !== undefined) {
-            return { kind: "repository", id: scopeContext.repositoryId };
-          }
-          const topicId = scopeContext.topicIds?.[0] ?? contextSnapshot?.situation.topicIds[0];
-          return topicId === undefined
-            ? { kind: "user", id: scopeContext.userId }
-            : { kind: "topic", id: topicId };
-        },
-        () => [
-          ...(scopeContext.repositoryId === undefined
-            ? []
-            : [{ kind: "repository" as const, id: scopeContext.repositoryId }]),
-          ...(scopeContext.projectId === undefined
-            ? []
-            : [{ kind: "project" as const, id: scopeContext.projectId }]),
-          ...(scopeContext.taskId === undefined
-            ? []
-            : [{ kind: "task" as const, id: scopeContext.taskId }]),
-          ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
-          { kind: "user", id: scopeContext.userId },
-        ],
-        () => scopeContext,
-        () => contextSnapshot,
-        () =>
-          captureSession?.goalEventId === undefined
-            ? undefined
-            : { kind: "event", id: captureSession.goalEventId, observedAt: Date.now() },
-        (traceId) => {
-          latestRetrievalTraceId = traceId;
-        },
-      );
-      registerKbCommand(
-        pi,
-        knowledge,
-        scheduler,
-        config,
-        knowledgeStore.store,
-        () => runtime.snapshot(),
-        async () => {
-          const namespace = "local:local:pi:pi-mentis";
-          const views = await Promise.all(
-            [
-              ...(scopeContext.projectId === undefined
-                ? []
-                : [{ kind: "project" as const, id: scopeContext.projectId }]),
-              ...(scopeContext.taskId === undefined
-                ? []
-                : [{ kind: "task" as const, id: scopeContext.taskId }]),
-              ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
-              { kind: "user" as const, id: scopeContext.userId },
-            ].map(async ({ kind, id }) => memory.getView?.(kind, id, scopeContext)),
-          );
-          return {
-            scheduler: scheduler.snapshot(),
-            context:
-              contextSnapshot === undefined
-                ? undefined
-                : {
-                    id: contextSnapshot.id,
-                    revision: contextSnapshot.revision,
-                    repositoryId: contextSnapshot.workspace?.repositoryId,
-                    projectId: contextSnapshot.workspace?.projectId,
-                    taskId: contextSnapshot.situation.taskId,
-                    topicIds: contextSnapshot.situation.topicIds,
-                    capabilitySnapshotId: contextSnapshot.capability.snapshotId,
-                  },
-            temporal: {
-              enabled: true,
-              repairOnStartup: config.intelligence.temporal.repairOnStartup,
-            },
-            views: views.filter((view) => view !== undefined),
-            policy: policy?.status(),
-            effectiveness: {
-              buffer: effectiveness?.bufferStatus(),
-              summary: await effectiveness?.summary(namespace),
-            },
-          };
-        },
-        () => scopeContext,
-      );
-      registered = true;
-    }
+
     const capabilityJob = scheduler.schedule({
       id: "pi-capability-sync",
       deduplicationKey: "pi-capability-sync",
@@ -1316,7 +1370,15 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     }
   });
   pi.on("session_shutdown", async (event) => {
-    if (event.reason === "reload") await resetGlobalRuntime();
-    else await runtime.dispose();
+    // Pi reloads the extension for reload, new, resume, and fork — the
+    // factory runs again so we must reset the global runtime. Only "quit"
+    // keeps the same process; just dispose there.
+    if (event.reason === "quit") {
+      await runtime.dispose();
+    } else {
+      await runtime.dispose();
+      resetSharedStores();
+      await resetGlobalRuntime();
+    }
   });
 }

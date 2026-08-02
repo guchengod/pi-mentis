@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis-knowledge",
-  "version": "0.1.8",
+  "version": "0.1.14",
   "description": "Standalone Pi Mentis knowledge extension for Pi v0.83.0",
   "license": "MIT",
   "author": "guchengod",
@@ -41,7 +41,7 @@
     ]
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external csv-parse --external fast-xml-parser --external fflate --external pdfjs-dist --external smol-toml --external yaml",
+    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec --external csv-parse --external fast-xml-parser --external fflate --external pdfjs-dist --external smol-toml --external yaml",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json"
   },

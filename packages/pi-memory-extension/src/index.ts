@@ -62,7 +62,11 @@ import {
   SiliconFlowEmbeddingProvider,
   SiliconFlowRerankProvider,
 } from "@pi-mentis/pi-mentis-siliconflow";
-import { acquireSharedZvecStore, type SharedZvecStoreHandle } from "@pi-mentis/pi-mentis-zvec";
+import {
+  acquireSharedZvecStore,
+  resetSharedStores,
+  type SharedZvecStoreHandle,
+} from "@pi-mentis/pi-mentis-zvec";
 
 function embeddingSpace(config: PiMentisConfig): EmbeddingSpaceIdentity {
   return {
@@ -432,12 +436,26 @@ function registerMemoryTools(
 }
 
 export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise<void> {
-  const installedVersion = await detectInstalledPackageVersion(
-    "@earendil-works/pi-coding-agent",
-    import.meta.url,
-  );
-  assertPiCompatibility(installedVersion);
-  const config = await loadConfig(process.cwd());
+  let initError: Error | undefined;
+  let config: PiMentisConfig;
+  try {
+    const installedVersion = await detectInstalledPackageVersion(
+      "@earendil-works/pi-coding-agent",
+      import.meta.url,
+    );
+    assertPiCompatibility(installedVersion);
+    config = await loadConfig(process.cwd());
+  } catch (err) {
+    initError = err instanceof Error ? err : new Error(String(err));
+    pi.on("session_start", (_event, ctx) => {
+      notifyWhenUiAvailable(
+        ctx,
+        `Pi Mentis memory extension failed to initialize: ${initError!.message}`,
+        "error",
+      );
+    });
+    return;
+  }
   const scheduler = new BackgroundScheduler(config.performance.queue);
   const telemetry = new InMemoryTelemetry();
   const runtime = getOrCreateRuntime();
@@ -545,9 +563,101 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
 
   pi.on("session_start", async (event, context) => {
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
-    await runtime.ready(context.signal);
+    let runtimeReadyError: Error | undefined;
+    try {
+      await runtime.ready(context.signal);
+    } catch (err) {
+      runtimeReadyError = err instanceof Error ? err : new Error(String(err));
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis memory runtime initialization failed: ${runtimeReadyError.message}. Tools are registered but will return errors until the issue is resolved.`,
+        "error",
+      );
+    }
     const memory = runtime.getMemory<MemoryService>();
-    if (memory === undefined || storeHandle === undefined) return;
+    // Always register tools — even if store init failed.
+    // Tools return structured errors when services are unavailable.
+    if (!registered) {
+      registerMemoryTools(
+        pi,
+        memory!,
+        runtime.getRetrieval<RetrievalService>() ?? undefined,
+        evidenceStore ?? undefined!,
+        () => scopeContext,
+        () => contextSnapshot,
+        () =>
+          captureSession?.goalEventId === undefined
+            ? undefined
+            : { kind: "event", id: captureSession.goalEventId, observedAt: Date.now() },
+        (traceId) => {
+          latestRetrievalTraceId = traceId;
+        },
+      );
+      pi.registerCommand("mentis", {
+        description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
+        handler: async (rawArguments, commandCtx) => {
+          const action = rawArguments.trim() || "status";
+          if (action !== "status") {
+            notifyWhenUiAvailable(commandCtx, "Usage: /mentis status", "error");
+            return;
+          }
+          const memoryService = runtime.getMemory<MemoryService>();
+          const views = await Promise.all(
+            [
+              ...(scopeContext.projectId === undefined
+                ? []
+                : [{ kind: "project" as const, id: scopeContext.projectId }]),
+              ...(scopeContext.taskId === undefined
+                ? []
+                : [{ kind: "task" as const, id: scopeContext.taskId }]),
+              ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
+              { kind: "user" as const, id: scopeContext.userId },
+            ].map(async ({ kind, id }) => memoryService?.getView?.(kind, id, scopeContext)),
+          );
+          notifyWhenUiAvailable(
+            commandCtx,
+            formatPiToolJson({
+              runtime: runtime.snapshot(),
+              scheduler: scheduler.snapshot(),
+              context:
+                contextSnapshot === undefined
+                  ? undefined
+                  : {
+                      id: contextSnapshot.id,
+                      revision: contextSnapshot.revision,
+                      repositoryId: contextSnapshot.workspace?.repositoryId,
+                      projectId: contextSnapshot.workspace?.projectId,
+                      taskId: contextSnapshot.situation.taskId,
+                      topicIds: contextSnapshot.situation.topicIds,
+                      capabilitySnapshotId: contextSnapshot.capability.snapshotId,
+                    },
+              temporal: {
+                enabled: true,
+                repairOnStartup: config.intelligence.temporal.repairOnStartup,
+              },
+              views: views.filter((view) => view !== undefined),
+              policy: policy?.status(),
+              effectiveness: {
+                buffer: effectiveness?.bufferStatus(),
+                summary: await effectiveness?.summary("local:local:pi:pi-mentis-memory"),
+              },
+            }),
+            "info",
+          );
+        },
+      });
+      registered = true;
+    }
+    if (memory === undefined || storeHandle === undefined) {
+      if (runtimeReadyError === undefined) {
+        notifyWhenUiAvailable(
+          context,
+          "Pi Mentis memory services unavailable. commit_memory and search_memory tools are registered but will return errors until the issue is resolved.",
+          "warning",
+        );
+      }
+      return;
+    }
     const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
       fallbackProjectIdentity(context.cwd),
     );
@@ -722,76 +832,6 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         },
         createTaskGraphService(storeHandle.store),
       );
-    }
-    if (!registered) {
-      registerMemoryTools(
-        pi,
-        memory,
-        runtime.getRetrieval<RetrievalService>(),
-        evidenceStore,
-        () => scopeContext,
-        () => contextSnapshot,
-        () =>
-          captureSession?.goalEventId === undefined
-            ? undefined
-            : { kind: "event", id: captureSession.goalEventId, observedAt: Date.now() },
-        (traceId) => {
-          latestRetrievalTraceId = traceId;
-        },
-      );
-      pi.registerCommand("mentis", {
-        description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
-        handler: async (rawArguments, context) => {
-          const action = rawArguments.trim() || "status";
-          if (action !== "status") {
-            notifyWhenUiAvailable(context, "Usage: /mentis status", "error");
-            return;
-          }
-          const views = await Promise.all(
-            [
-              ...(scopeContext.projectId === undefined
-                ? []
-                : [{ kind: "project" as const, id: scopeContext.projectId }]),
-              ...(scopeContext.taskId === undefined
-                ? []
-                : [{ kind: "task" as const, id: scopeContext.taskId }]),
-              ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
-              { kind: "user" as const, id: scopeContext.userId },
-            ].map(async ({ kind, id }) => memory.getView?.(kind, id, scopeContext)),
-          );
-          notifyWhenUiAvailable(
-            context,
-            formatPiToolJson({
-              runtime: runtime.snapshot(),
-              scheduler: scheduler.snapshot(),
-              context:
-                contextSnapshot === undefined
-                  ? undefined
-                  : {
-                      id: contextSnapshot.id,
-                      revision: contextSnapshot.revision,
-                      repositoryId: contextSnapshot.workspace?.repositoryId,
-                      projectId: contextSnapshot.workspace?.projectId,
-                      taskId: contextSnapshot.situation.taskId,
-                      topicIds: contextSnapshot.situation.topicIds,
-                      capabilitySnapshotId: contextSnapshot.capability.snapshotId,
-                    },
-              temporal: {
-                enabled: true,
-                repairOnStartup: config.intelligence.temporal.repairOnStartup,
-              },
-              views: views.filter((view) => view !== undefined),
-              policy: policy?.status(),
-              effectiveness: {
-                buffer: effectiveness?.bufferStatus(),
-                summary: await effectiveness?.summary("local:local:pi:pi-mentis-memory"),
-              },
-            }),
-            "info",
-          );
-        },
-      });
-      registered = true;
     }
   });
   pi.on("session_tree", (event, context) => {
@@ -1084,7 +1124,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     await captureSession?.finish().catch(() => undefined);
   });
   pi.on("session_shutdown", async (event) => {
-    if (event.reason === "reload") await resetGlobalRuntime();
-    else await runtime.dispose();
+    if (event.reason === "quit") {
+      await runtime.dispose();
+    } else {
+      await runtime.dispose();
+      resetSharedStores();
+      await resetGlobalRuntime();
+    }
   });
 }

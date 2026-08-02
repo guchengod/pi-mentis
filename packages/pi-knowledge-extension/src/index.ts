@@ -39,6 +39,7 @@ import {
 } from "@pi-mentis/pi-mentis-siliconflow";
 import {
   acquireSharedZvecStore,
+  resetSharedStores,
   type SharedZvecStoreHandle,
   type ZvecStore,
 } from "@pi-mentis/pi-mentis-zvec";
@@ -328,12 +329,25 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
 }
 
 export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Promise<void> {
-  const installedVersion = await detectInstalledPackageVersion(
-    "@earendil-works/pi-coding-agent",
-    import.meta.url,
-  );
-  assertPiCompatibility(installedVersion);
-  config = await loadConfig(process.cwd());
+  let initError: Error | undefined;
+  try {
+    const installedVersion = await detectInstalledPackageVersion(
+      "@earendil-works/pi-coding-agent",
+      import.meta.url,
+    );
+    assertPiCompatibility(installedVersion);
+    config = await loadConfig(process.cwd());
+  } catch (err) {
+    initError = err instanceof Error ? err : new Error(String(err));
+    pi.on("session_start", (_event, ctx) => {
+      notifyWhenUiAvailable(
+        ctx,
+        `Pi Mentis knowledge extension failed to initialize: ${initError!.message}`,
+        "error",
+      );
+    });
+    return;
+  }
   scheduler = new BackgroundScheduler(config.performance.queue);
   const runtime = getOrCreateRuntime();
   runtime.registerEmbedding({
@@ -397,29 +411,58 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
   });
   let registered = false;
   pi.on("session_start", async (_event, context) => {
-    await runtime.ready(context.signal);
+    let runtimeReadyError: Error | undefined;
+    try {
+      await runtime.ready(context.signal);
+    } catch (err) {
+      runtimeReadyError = err instanceof Error ? err : new Error(String(err));
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis knowledge runtime initialization failed: ${runtimeReadyError.message}. Tools are registered but will return errors until the issue is resolved.`,
+        "error",
+      );
+    }
     const knowledge = runtime.getKnowledge<KnowledgeService>();
-    if (knowledge === undefined) return;
+
+    // Always register tools when running standalone (no memory extension co-installed).
+    // When the memory extension is present, the integrated tools handle both knowledge and memory.
+    if (!registered && runtime.getMemory() === undefined) {
+      registerKnowledgeTools(
+        pi,
+        knowledge!,
+        runtime.getRetrieval<RetrievalService>(),
+        config.retrieval.manualSearchTimeoutMs,
+        () => ({
+          tenantId: "local",
+          userId: "local",
+          appId: "pi",
+          agentId: "pi-mentis-knowledge",
+        }),
+      );
+      registerKnowledgeCommand(pi, runtime);
+      registered = true;
+    }
+
+    if (knowledge === undefined) {
+      if (runtimeReadyError === undefined) {
+        notifyWhenUiAvailable(
+          context,
+          "Pi Mentis knowledge service unavailable. Tools are registered but will return errors until the issue is resolved.",
+          "warning",
+        );
+      }
+      return;
+    }
     await knowledge.recoverJobs(context.signal === undefined ? {} : { signal: context.signal });
     await store?.collectSupersededGenerations(config.storage.generationRetentionMs);
-    if (registered || runtime.getMemory() !== undefined) return;
-    registerKnowledgeTools(
-      pi,
-      knowledge,
-      runtime.getRetrieval<RetrievalService>(),
-      config.retrieval.manualSearchTimeoutMs,
-      () => ({
-        tenantId: "local",
-        userId: "local",
-        appId: "pi",
-        agentId: "pi-mentis-knowledge",
-      }),
-    );
-    registerKnowledgeCommand(pi, runtime);
-    registered = true;
   });
   pi.on("session_shutdown", async (event) => {
-    if (event.reason === "reload") await resetGlobalRuntime();
-    else await runtime.dispose();
+    if (event.reason === "quit") {
+      await runtime.dispose();
+    } else {
+      await runtime.dispose();
+      resetSharedStores();
+      await resetGlobalRuntime();
+    }
   });
 }
