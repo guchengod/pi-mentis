@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Integrated Pi Mentis knowledge-first memory extension for Pi v0.83.0",
   "license": "MIT",
   "author": "guchengod",
@@ -62,8 +62,8 @@
     "@pi-mentis/pi-mentis-knowledge-core": "workspace:*",
     "@pi-mentis/pi-mentis-memory-core": "workspace:*",
     "@pi-mentis/pi-mentis-observability": "workspace:*",
-    "@pi-mentis/pi-mentis-pi-extension-support": "workspace:*",
     "@pi-mentis/pi-mentis-pi-capabilities": "workspace:*",
+    "@pi-mentis/pi-mentis-pi-extension-support": "workspace:*",
     "@pi-mentis/pi-mentis-retrieval": "workspace:*",
     "@pi-mentis/pi-mentis-siliconflow": "workspace:*",
     "@pi-mentis/pi-mentis-zvec": "workspace:*"
