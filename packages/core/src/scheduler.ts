@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os";
 
 import { OperationCancelledError, QueueFullError } from "./errors.js";
+import { systemClock, type Clock } from "./clock.js";
 
 export const TaskPriority = {
   Interactive: 100,
@@ -19,6 +20,7 @@ export interface QueueLimits {
   readonly maxActiveTasks: number;
   readonly maxPendingEmbeddingTokens: number;
   readonly maxPendingRerankTokens: number;
+  readonly maxQueuedTaskAgeMs?: number;
 }
 
 export interface ScheduledTask<T> {
@@ -32,6 +34,7 @@ export interface ScheduledTask<T> {
 
 interface QueueEntry<T> {
   readonly sequence: number;
+  readonly enqueuedAt: number;
   readonly task: ScheduledTask<T>;
   readonly controller: AbortController;
   readonly resolve: (value: T) => void;
@@ -48,6 +51,10 @@ export class PriorityHeap<T> {
 
   get size(): number {
     return this.#items.length;
+  }
+
+  peek(): T | undefined {
+    return this.#items[0];
   }
 
   push(item: T): void {
@@ -109,6 +116,7 @@ export interface SchedulerSnapshot {
 
 export class BackgroundScheduler {
   readonly #limits: QueueLimits;
+  readonly #clock: Clock;
   readonly #heap = new PriorityHeap<QueueEntry<unknown>>(
     (left, right) => left.task.priority - right.task.priority || right.sequence - left.sequence,
   );
@@ -119,8 +127,9 @@ export class BackgroundScheduler {
   #sequence = 0;
   #closed = false;
 
-  constructor(limits: QueueLimits) {
+  constructor(limits: QueueLimits, clock: Clock = systemClock) {
     this.#limits = limits;
+    this.#clock = clock;
   }
 
   snapshot(): SchedulerSnapshot {
@@ -146,9 +155,15 @@ export class BackgroundScheduler {
     if (existing !== undefined) {
       return { promise: existing as Promise<T>, deduplicated: true };
     }
+    const background = task.priority < TaskPriority.UserRequested;
+    const backgroundTaskLimit = Math.max(1, Math.floor(this.#limits.maxQueuedTasks * 0.8));
+    const backgroundByteLimit = Math.max(1, Math.floor(this.#limits.maxQueuedBytes * 0.8));
     if (
       this.#heap.size >= this.#limits.maxQueuedTasks ||
-      this.#queuedBytes + task.estimatedBytes > this.#limits.maxQueuedBytes
+      this.#queuedBytes + task.estimatedBytes > this.#limits.maxQueuedBytes ||
+      (background &&
+        (this.#heap.size >= backgroundTaskLimit ||
+          this.#queuedBytes + task.estimatedBytes > backgroundByteLimit))
     ) {
       return {
         promise: Promise.reject(
@@ -177,6 +192,7 @@ export class BackgroundScheduler {
     });
     const entry: QueueEntry<T> = {
       sequence: this.#sequence++,
+      enqueuedAt: this.#clock.now(),
       task,
       controller,
       resolve: resolvePromise,
@@ -203,8 +219,10 @@ export class BackgroundScheduler {
     return true;
   }
 
-  async close(): Promise<void> {
+  async close(timeoutMs = 5_000): Promise<void> {
     this.#closed = true;
+    const startedAt = Date.now();
+    const graceMs = Math.min(2_500, Math.max(0, timeoutMs / 2));
     while (this.#heap.size > 0) {
       const entry = this.#heap.pop();
       if (entry === undefined) break;
@@ -212,16 +230,38 @@ export class BackgroundScheduler {
       this.#controllers.delete(entry.task.id);
       entry.reject(new OperationCancelledError(`Task ${entry.task.id} was cancelled`));
     }
-    while (this.#active > 0) {
+    while (this.#active > 0 && Date.now() - startedAt < graceMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    if (this.#active > 0) {
+      for (const controller of this.#controllers.values()) {
+        controller.abort(new OperationCancelledError("Scheduler is shutting down"));
+      }
+    }
+    while (this.#active > 0 && Date.now() - startedAt < timeoutMs) {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
   }
 
   #drain(): void {
     while (this.#active < this.#limits.maxActiveTasks) {
+      const next = this.#heap.peek();
+      if (next === undefined) return;
+      const reservesInteractiveLane =
+        this.#limits.maxActiveTasks > 1 && next.task.priority < TaskPriority.UserRequested;
+      if (reservesInteractiveLane && this.#active >= this.#limits.maxActiveTasks - 1) return;
       const entry = this.#heap.pop();
       if (entry === undefined) return;
       this.#queuedBytes -= entry.task.estimatedBytes;
+      if (
+        entry.task.priority < TaskPriority.UserRequested &&
+        this.#limits.maxQueuedTaskAgeMs !== undefined &&
+        this.#clock.now() - entry.enqueuedAt > this.#limits.maxQueuedTaskAgeMs
+      ) {
+        this.#controllers.delete(entry.task.id);
+        entry.reject(new OperationCancelledError(`Task ${entry.task.id} expired in the queue`));
+        continue;
+      }
       if (entry.controller.signal.aborted) {
         this.#controllers.delete(entry.task.id);
         entry.reject(new OperationCancelledError(`Task ${entry.task.id} was cancelled`));

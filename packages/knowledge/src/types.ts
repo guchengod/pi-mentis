@@ -9,6 +9,13 @@ import type {
 import type { EmbeddingSpaceIdentity } from "@pi-mentis/pi-mentis-inference";
 import type { KnowledgeSourceInput } from "@pi-mentis/pi-mentis-file-parsers";
 
+export interface KnowledgeSecurityScope {
+  readonly tenantId: string;
+  readonly userId: string;
+  readonly appId: string;
+  readonly agentId: string;
+}
+
 export interface KnowledgeSource {
   readonly id: string;
   readonly kind: KnowledgeSourceInput["kind"];
@@ -73,6 +80,7 @@ export interface IngestKnowledgeCommand {
   readonly source: KnowledgeSourceInput;
   readonly namespace?: string;
   readonly authority?: EvidenceAuthority;
+  readonly scopeContext?: KnowledgeSecurityScope;
 }
 
 export interface IngestKnowledgeResult {
@@ -87,6 +95,7 @@ export interface KnowledgeQuery {
   readonly text: string;
   readonly namespace?: string;
   readonly limit?: number;
+  readonly scopeContext?: KnowledgeSecurityScope;
 }
 
 export interface SearchOptions extends OperationOptions {
@@ -98,6 +107,7 @@ export type KnowledgeSearchResult = SearchResult;
 
 export interface RemoveKnowledgeCommand {
   readonly sourceId: string;
+  readonly scopeContext: KnowledgeSecurityScope;
 }
 
 export interface RemoveKnowledgeResult {
@@ -108,6 +118,7 @@ export interface RemoveKnowledgeResult {
 export interface SyncKnowledgeSourceCommand {
   readonly source: KnowledgeSourceInput;
   readonly namespace?: string;
+  readonly scopeContext?: KnowledgeSecurityScope;
 }
 
 export interface EnqueueOptions extends OperationOptions {
@@ -116,6 +127,7 @@ export interface EnqueueOptions extends OperationOptions {
 
 export interface InspectKnowledgeQuery {
   readonly documentId: string;
+  readonly scopeContext: KnowledgeSecurityScope;
 }
 
 export interface KnowledgeDocumentView {
@@ -128,6 +140,13 @@ export interface KnowledgeCapabilities {
   readonly mediaTypes: readonly string[];
   readonly supportsIncrementalSync: true;
   readonly supportsEmbeddingMigration: true;
+}
+
+export interface KnowledgeJobRecoveryResult {
+  readonly inspected: number;
+  readonly recovered: number;
+  readonly dead: number;
+  readonly invalid: number;
 }
 
 export interface KnowledgeService {
@@ -143,5 +162,6 @@ export interface KnowledgeService {
   ): Promise<RemoveKnowledgeResult>;
   sync(command: SyncKnowledgeSourceCommand, options?: EnqueueOptions): Promise<JobReceipt>;
   inspect(query: InspectKnowledgeQuery): Promise<KnowledgeDocumentView | undefined>;
+  recoverJobs(options?: OperationOptions): Promise<KnowledgeJobRecoveryResult>;
   capabilities(): KnowledgeCapabilities;
 }

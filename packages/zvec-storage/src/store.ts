@@ -18,6 +18,7 @@ import {
   type EmbeddingSpaceIdentity,
   type StorageConfig,
 } from "@pi-mentis/pi-mentis-core";
+import { stableHash } from "@pi-mentis/pi-mentis-core";
 
 import {
   activeGenerationFor,
@@ -99,7 +100,7 @@ async function exists(target: string): Promise<boolean> {
 
 function scalarInput(record: StoredRecord): ZVecDocInput {
   return {
-    id: record.id,
+    id: physicalDocumentId(record.id),
     fields: {
       kind: record.kind,
       namespace: record.namespace,
@@ -109,6 +110,20 @@ function scalarInput(record: StoredRecord): ZVecDocInput {
       updated_at: record.updatedAt,
     },
   };
+}
+
+// Zvec accepts only a restricted document-id alphabet. Domain ids are intentionally richer
+// (for example `temporal-saga:<hash>`), so keep those ids in the payload and use a stable,
+// collision-resistant physical id at the storage boundary. Existing compatible ids remain
+// unchanged so already-published collections stay readable without an eager migration.
+function physicalDocumentId(id: string): string {
+  return /^[A-Za-z0-9-]+$/u.test(id) ? id : stableHash("zvec-document-id:v1", id);
+}
+
+function logicalDocument(document: ZVecDoc): ZVecDoc {
+  const payload = parsePayload(document);
+  const logicalId = payload["id"] ?? payload["jobId"] ?? payload["traceId"];
+  return typeof logicalId === "string" ? { ...document, id: logicalId } : document;
 }
 
 function vectorInput(record: StoredVectorRecord): ZVecDocInput {
@@ -151,6 +166,7 @@ function parsePayload(document: ZVecDoc): Readonly<Record<string, unknown>> {
 export class ZvecStore {
   readonly #config: StorageConfig;
   readonly #collections = new Map<string, ZVecCollection>();
+  readonly #openingCollections = new Map<string, Promise<ZVecCollection>>();
   #releaseLock: (() => Promise<void>) | undefined;
   #manifest?: ActiveIndexManifest;
 
@@ -226,6 +242,8 @@ export class ZvecStore {
   }
 
   async close(): Promise<void> {
+    await Promise.allSettled(this.#openingCollections.values());
+    this.#openingCollections.clear();
     for (const collection of this.#collections.values()) collection.closeSync();
     this.#collections.clear();
     await this.#releaseLock?.();
@@ -248,12 +266,41 @@ export class ZvecStore {
   ): Promise<ReadonlyMap<string, Readonly<Record<string, unknown>>>> {
     if (ids.length === 0) return new Map();
     const collection = await this.#scalarCollection(collectionName);
+    const physicalIds = ids.map(physicalDocumentId);
     const documents = collection.fetchSync({
-      ids: [...ids],
+      ids: physicalIds,
       outputFields: ["payload"],
       includeVector: false,
     });
-    return new Map(Object.entries(documents).map(([id, document]) => [id, parsePayload(document)]));
+    const result = new Map<string, Readonly<Record<string, unknown>>>();
+    for (const [index, id] of ids.entries()) {
+      const document = documents[physicalIds[index] ?? ""];
+      if (document !== undefined) result.set(id, parsePayload(document));
+    }
+    return result;
+  }
+
+  async filterScalar(
+    collectionName: ScalarCollectionName,
+    filter: string,
+    topK = 10_000,
+  ): Promise<readonly ZVecDoc[]> {
+    const collection = await this.#scalarCollection(collectionName);
+    return (
+      await collection.query({
+        filter,
+        topk: topK,
+        includeVector: false,
+        outputFields: ["payload", "kind", "namespace", "status", "created_at", "updated_at"],
+      })
+    ).map(logicalDocument);
+  }
+
+  async deleteScalar(collectionName: ScalarCollectionName, ids: readonly string[]): Promise<void> {
+    this.#assertWritable();
+    if (ids.length === 0) return;
+    const collection = await this.#scalarCollection(collectionName);
+    assertStatuses(collection.deleteSync(ids.map(physicalDocumentId)), "zvec-scalar-delete");
   }
 
   async upsertVectors(
@@ -275,51 +322,55 @@ export class ZvecStore {
     this.#assertWritable();
     if (ids.length === 0) return;
     const collection = await this.#vectorCollection(kind, generationId);
-    assertStatuses(collection.deleteSync([...ids]), "zvec-vector-delete");
+    assertStatuses(collection.deleteSync(ids.map(physicalDocumentId)), "zvec-vector-delete");
   }
 
   async vectorSearch(options: VectorSearchOptions): Promise<readonly ZVecDoc[]> {
     const generationId = options.generationId ?? activeGenerationFor(this.manifest, options.kind);
     const collection = await this.#vectorCollection(options.kind, generationId);
-    return collection.query({
-      fieldName: "embedding",
-      vector: options.vector,
-      topk: options.topK,
-      includeVector: false,
-      outputFields: [
-        "payload",
-        "searchable_text",
-        "content_hash",
-        "authority",
-        "token_count",
-        "namespace",
-        "updated_at",
-      ],
-      ...(options.filter === undefined ? {} : { filter: options.filter }),
-      params: { indexType: ZVecIndexType.HNSW, ef: Math.max(100, options.topK * 4) },
-    });
+    return (
+      await collection.query({
+        fieldName: "embedding",
+        vector: options.vector,
+        topk: options.topK,
+        includeVector: false,
+        outputFields: [
+          "payload",
+          "searchable_text",
+          "content_hash",
+          "authority",
+          "token_count",
+          "namespace",
+          "updated_at",
+        ],
+        ...(options.filter === undefined ? {} : { filter: options.filter }),
+        params: { indexType: ZVecIndexType.HNSW, ef: Math.max(100, options.topK * 4) },
+      })
+    ).map(logicalDocument);
   }
 
   async ftsSearch(options: FtsSearchOptions): Promise<readonly ZVecDoc[]> {
     const generationId = activeGenerationFor(this.manifest, options.kind);
     const collection = await this.#vectorCollection(options.kind, generationId);
-    return collection.query({
-      fieldName: "searchable_text",
-      fts: { matchString: options.query },
-      topk: options.topK,
-      includeVector: false,
-      outputFields: [
-        "payload",
-        "searchable_text",
-        "content_hash",
-        "authority",
-        "token_count",
-        "namespace",
-        "updated_at",
-      ],
-      ...(options.filter === undefined ? {} : { filter: options.filter }),
-      params: { indexType: ZVecIndexType.FTS, defaultOperator: "OR" },
-    });
+    return (
+      await collection.query({
+        fieldName: "searchable_text",
+        fts: { matchString: options.query },
+        topk: options.topK,
+        includeVector: false,
+        outputFields: [
+          "payload",
+          "searchable_text",
+          "content_hash",
+          "authority",
+          "token_count",
+          "namespace",
+          "updated_at",
+        ],
+        ...(options.filter === undefined ? {} : { filter: options.filter }),
+        params: { indexType: ZVecIndexType.FTS, defaultOperator: "OR" },
+      })
+    ).map(logicalDocument);
   }
 
   async fetchVectors(
@@ -328,8 +379,14 @@ export class ZvecStore {
   ): Promise<ReadonlyMap<string, ZVecDoc>> {
     if (ids.length === 0) return new Map();
     const collection = await this.#vectorCollection(kind, activeGenerationFor(this.manifest, kind));
-    const documents = collection.fetchSync({ ids: [...ids], includeVector: true });
-    return new Map(Object.entries(documents));
+    const physicalIds = ids.map(physicalDocumentId);
+    const documents = collection.fetchSync({ ids: physicalIds, includeVector: true });
+    const result = new Map<string, ZVecDoc>();
+    for (const [index, id] of ids.entries()) {
+      const document = documents[physicalIds[index] ?? ""];
+      if (document !== undefined) result.set(id, logicalDocument(document));
+    }
+    return result;
   }
 
   async filterVectors(
@@ -339,18 +396,28 @@ export class ZvecStore {
     generationId = activeGenerationFor(this.manifest, kind),
   ): Promise<readonly ZVecDoc[]> {
     const collection = await this.#vectorCollection(kind, generationId);
-    return collection.query({
-      filter,
-      topk: topK,
-      includeVector: false,
-      outputFields: ["payload", "source_id", "document_id", "content_hash", "namespace", "status"],
-    });
+    return (
+      await collection.query({
+        filter,
+        topk: topK,
+        includeVector: false,
+        outputFields: [
+          "payload",
+          "source_id",
+          "document_id",
+          "content_hash",
+          "namespace",
+          "status",
+        ],
+      })
+    ).map(logicalDocument);
   }
 
   async createGeneration(
     kind: GenerationKind,
     generationId: string,
     embeddingSpace: EmbeddingSpaceIdentity,
+    now = Date.now(),
   ): Promise<EmbeddingIndexGeneration> {
     this.#assertWritable();
     if (this.manifest.generations.some((generation) => generation.generationId === generationId)) {
@@ -361,12 +428,12 @@ export class ZvecStore {
       kind,
       embeddingSpace,
       state: "preparing",
-      createdAt: Date.now(),
+      createdAt: now,
     };
     this.#manifest = {
       ...this.manifest,
       generations: [...this.manifest.generations, generation],
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
     await this.#vectorCollection(kind, generationId);
     await writeActiveManifest(this.#config.rootDir, this.#manifest);
@@ -377,6 +444,7 @@ export class ZvecStore {
     generationId: string,
     state: Exclude<GenerationState, "active" | "superseded">,
     failure?: string,
+    now = Date.now(),
   ): Promise<void> {
     this.#assertWritable();
     this.#manifest = {
@@ -386,14 +454,18 @@ export class ZvecStore {
           ? { ...generation, state, ...(failure === undefined ? {} : { failure }) }
           : generation,
       ),
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
     await writeActiveManifest(this.#config.rootDir, this.#manifest);
   }
 
-  async activateGeneration(kind: GenerationKind, generationId: string): Promise<void> {
+  async activateGeneration(
+    kind: GenerationKind,
+    generationId: string,
+    now = Date.now(),
+  ): Promise<void> {
     this.#assertWritable();
-    this.#manifest = replaceActiveGeneration(this.manifest, kind, generationId);
+    this.#manifest = replaceActiveGeneration(this.manifest, kind, generationId, now);
     await writeActiveManifest(this.#config.rootDir, this.#manifest);
   }
 
@@ -418,6 +490,45 @@ export class ZvecStore {
     await writeActiveManifest(this.#config.rootDir, this.#manifest);
   }
 
+  async collectSupersededGenerations(retentionMs: number, now = Date.now()): Promise<number> {
+    this.#assertWritable();
+    const active = new Set([
+      this.manifest.knowledgeGeneration,
+      this.manifest.memoryGeneration,
+      this.manifest.capabilityGeneration,
+    ]);
+    const expired = this.manifest.generations.filter(
+      (generation) =>
+        generation.state === "superseded" &&
+        !active.has(generation.generationId) &&
+        generation.supersededAt !== undefined &&
+        generation.supersededAt + Math.max(0, retentionMs) <= now,
+    );
+    for (const generation of expired) {
+      const name = generationCollectionName(generation.kind, generation.generationId);
+      const target = path.join(this.#config.rootDir, name);
+      const cached = this.#collections.get(name);
+      if (cached !== undefined) {
+        cached.destroySync();
+        this.#collections.delete(name);
+      } else if (await exists(target)) {
+        ZVecOpen(target, { readOnly: false, enableMMAP: true }).destroySync();
+      }
+    }
+    if (expired.length > 0) {
+      const expiredIds = new Set(expired.map((generation) => generation.generationId));
+      this.#manifest = {
+        ...this.manifest,
+        generations: this.manifest.generations.filter(
+          (generation) => !expiredIds.has(generation.generationId),
+        ),
+        updatedAt: now,
+      };
+      await writeActiveManifest(this.#config.rootDir, this.#manifest);
+    }
+    return expired.length;
+  }
+
   #assertWritable(): void {
     if (this.#config.readOnly) {
       throw new StorageBusyError("Pi Mentis storage is open read-only", {
@@ -430,10 +541,7 @@ export class ZvecStore {
   async #scalarCollection(name: ScalarCollectionName): Promise<ZVecCollection> {
     const existing = this.#collections.get(name);
     if (existing !== undefined) return existing;
-    const target = path.join(this.#config.rootDir, name);
-    const collection = await this.#openCollection(target, () => scalarCollectionSchema(name));
-    this.#collections.set(name, collection);
-    return collection;
+    return this.#openCollectionOnce(name, () => scalarCollectionSchema(name));
   }
 
   async #vectorCollection(kind: GenerationKind, generationId: string): Promise<ZVecCollection> {
@@ -444,12 +552,28 @@ export class ZvecStore {
       (candidate) => candidate.generationId === generationId && candidate.kind === kind,
     );
     if (generation === undefined) throw new Error(`Unknown ${kind} generation ${generationId}`);
-    const target = path.join(this.#config.rootDir, name);
-    const collection = await this.#openCollection(target, () =>
+    return this.#openCollectionOnce(name, () =>
       vectorCollectionSchema(name, generation.embeddingSpace.dimensions),
     );
-    this.#collections.set(name, collection);
-    return collection;
+  }
+
+  async #openCollectionOnce(
+    name: string,
+    schema: () => ReturnType<typeof scalarCollectionSchema>,
+  ): Promise<ZVecCollection> {
+    const pending = this.#openingCollections.get(name);
+    if (pending !== undefined) return pending;
+    const target = path.join(this.#config.rootDir, name);
+    const opening = this.#openCollection(target, schema).then((collection) => {
+      this.#collections.set(name, collection);
+      return collection;
+    });
+    this.#openingCollections.set(name, opening);
+    try {
+      return await opening;
+    } finally {
+      this.#openingCollections.delete(name);
+    }
   }
 
   async #openCollection(

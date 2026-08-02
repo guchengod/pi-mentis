@@ -210,12 +210,12 @@ describe("real Zvec production loop", () => {
       target,
     );
     let migrationJob = (await store.fetchScalar("jobs_v1", [receipt.jobId])).get(receipt.jobId);
-    expect(["queued", "running", "completed"]).toContain(migrationJob?.state);
-    for (let attempts = 0; attempts < 100 && migrationJob?.state !== "completed"; attempts++) {
+    expect(["queued", "leased", "running", "succeeded"]).toContain(migrationJob?.state);
+    for (let attempts = 0; attempts < 100 && migrationJob?.state !== "succeeded"; attempts++) {
       await delay(10);
       migrationJob = (await store.fetchScalar("jobs_v1", [receipt.jobId])).get(receipt.jobId);
     }
-    expect(migrationJob?.state).toBe("completed");
+    expect(migrationJob?.state).toBe("succeeded");
     expect(migrationJob?.result).toMatchObject({ activated: true, migrated: first.chunkCount });
     await jobs.close();
     await store.close();
@@ -241,6 +241,12 @@ describe("real Zvec production loop", () => {
       source: { kind: "text", text: "The release process uses a canary before production." },
       namespace: "user",
       authority: EvidenceAuthority.UserKnowledge,
+      scopeContext: {
+        tenantId: "tenant",
+        userId: "user",
+        appId: "pi",
+        agentId: "agent",
+      },
     });
     const memory = createMemoryService({
       store,

@@ -1,4 +1,5 @@
 export * from "./compatibility.js";
+export * from "./clock.js";
 export * from "./context.js";
 export * from "./config.js";
 export * from "./cpu-worker-pool.js";

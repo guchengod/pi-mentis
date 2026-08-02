@@ -23,6 +23,7 @@ import {
   resetGlobalRuntime,
   type PiMentisConfig,
   type MentisContextSnapshot,
+  type EvidenceRef,
 } from "@pi-mentis/pi-mentis-core";
 import type {
   EmbeddingProvider,
@@ -31,15 +32,21 @@ import type {
 } from "@pi-mentis/pi-mentis-inference";
 import { createKnowledgeService, type KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
 import {
+  ContextStateService,
   PiCaptureSession,
   createExperienceLearningService,
   createPiEvidenceStore,
+  createTaskGraphService,
   createMemoryService,
   deriveExperienceObservation,
+  memoryContentGroundedInUserPrompt,
+  referencedMemoryIds,
   resolvePiProjectIdentity,
+  taskIdentityId,
   type MemoryService,
   type MemoryScope,
   type PiEvidenceStore,
+  type PiProjectIdentity,
   type PiScopeContext,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
@@ -51,8 +58,11 @@ import {
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 import { CapabilityIndexer, scanPiInstallation } from "@pi-mentis/pi-mentis-pi-capabilities";
 import {
+  AdaptivePolicyService,
+  EffectivenessService,
   createRetrievalService,
   decideRecall,
+  evaluateReplayCandidate,
   type RetrievalService,
 } from "@pi-mentis/pi-mentis-retrieval";
 import {
@@ -83,6 +93,10 @@ function generationSpaces(
   return { knowledge: identity, memory: identity, capability: identity };
 }
 
+function fallbackProjectIdentity(cwd: string): PiProjectIdentity {
+  return { workspacePath: cwd, manifestTypes: [] };
+}
+
 async function knowledgeCommandSource(target: string) {
   const normalizedTarget = normalizePiPathArgument(target);
   if (/^https?:\/\//.test(normalizedTarget)) {
@@ -105,6 +119,9 @@ function registerIntegratedTools(
   currentScope: () => MemoryScope,
   currentScopes: () => readonly MemoryScope[],
   currentScopeContext: () => PiScopeContext,
+  currentContextSnapshot: () => MentisContextSnapshot | undefined,
+  currentEvidenceRef: () => EvidenceRef | undefined,
+  onTrace: (traceId: string) => void,
 ): void {
   pi.registerTool({
     name: "commit_memory",
@@ -124,25 +141,102 @@ function registerIntegratedTools(
       confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       supersedesIds: Type.Optional(Type.Array(Type.String())),
+      factKey: Type.Optional(Type.String({ minLength: 1 })),
+      cardinality: Type.Optional(StringEnum(["single", "set", "ordered", "event"] as const)),
+      observedAt: Type.Optional(Type.Integer({ minimum: 0 })),
+      idempotencyKey: Type.Optional(Type.String({ minLength: 1 })),
+      branchClaimState: Type.Optional(
+        StringEnum(["global", "hypothesis", "verified", "merged", "abandoned"] as const),
+      ),
+      retractsFact: Type.Optional(Type.Boolean()),
+      applicability: Type.Optional(
+        Type.Object({
+          os: Type.Optional(Type.Array(Type.String())),
+          strictOs: Type.Optional(Type.Boolean()),
+          architecture: Type.Optional(Type.Array(Type.String())),
+          strictArchitecture: Type.Optional(Type.Boolean()),
+          runtime: Type.Optional(Type.String()),
+          runtimeVersionMin: Type.Optional(Type.String()),
+          runtimeVersionMax: Type.Optional(Type.String()),
+          packageManager: Type.Optional(Type.String()),
+          repositoryId: Type.Optional(Type.String()),
+          projectId: Type.Optional(Type.String()),
+        }),
+      ),
+      premises: Type.Optional(
+        Type.Array(
+          Type.Object({
+            kind: StringEnum(["manifest", "tool", "package-manager", "context"] as const),
+            value: Type.String({ minLength: 1 }),
+            required: Type.Boolean(),
+          }),
+        ),
+      ),
     }),
     async execute(_toolCallId, parameters, signal) {
+      const current = currentScopeContext();
+      const observedAt = parameters.observedAt ?? Date.now();
+      const userGrounded = memoryContentGroundedInUserPrompt(
+        parameters.content,
+        currentContextSnapshot()?.situation.activeGoal,
+      );
+      const activeContext = currentContextSnapshot();
+      const inferredApplicability =
+        parameters.applicability ??
+        (parameters.type === "procedural"
+          ? {
+              ...(current.repositoryId === undefined ? {} : { repositoryId: current.repositoryId }),
+              ...(current.projectId === undefined ? {} : { projectId: current.projectId }),
+              ...(activeContext?.environment?.os === undefined
+                ? {}
+                : { os: [activeContext.environment.os] }),
+              ...(activeContext?.environment?.architecture === undefined
+                ? {}
+                : { architecture: [activeContext.environment.architecture] }),
+              ...(activeContext?.environment?.runtime === undefined
+                ? {}
+                : { runtime: activeContext.environment.runtime }),
+              ...(activeContext?.environment?.packageManager === undefined
+                ? {}
+                : { packageManager: activeContext.environment.packageManager }),
+            }
+          : undefined);
       const result = await memory.commit(
         {
           content: parameters.content,
           type: parameters.type,
           scope: currentScope(),
-          scopeContext: currentScopeContext(),
+          scopeContext: current,
           confidence: parameters.confidence ?? 0.8,
           importance: parameters.importance ?? 0.5,
-          authority:
-            parameters.type === "episodic"
-              ? EvidenceAuthority.EpisodicMemory
-              : parameters.type === "procedural"
-                ? EvidenceAuthority.ProceduralMemory
-                : EvidenceAuthority.UserCurrentInstruction,
+          authority: userGrounded
+            ? EvidenceAuthority.UserCurrentInstruction
+            : EvidenceAuthority.AssistantInference,
           ...(parameters.supersedesIds === undefined
             ? {}
             : { supersedesIds: parameters.supersedesIds }),
+          ...(parameters.factKey === undefined ? {} : { factKey: parameters.factKey }),
+          ...(parameters.cardinality === undefined ? {} : { cardinality: parameters.cardinality }),
+          observedAt,
+          ...(parameters.idempotencyKey === undefined
+            ? {}
+            : { idempotencyKey: parameters.idempotencyKey }),
+          ...(parameters.branchClaimState === undefined
+            ? {}
+            : { branchClaimState: parameters.branchClaimState }),
+          ...(parameters.retractsFact === undefined
+            ? {}
+            : { retractsFact: parameters.retractsFact }),
+          ...(inferredApplicability === undefined ? {} : { applicability: inferredApplicability }),
+          ...(parameters.premises === undefined ? {} : { premises: parameters.premises }),
+          contentOrigin: userGrounded ? "user" : "model",
+          evidenceRefs: [
+            currentEvidenceRef() ?? {
+              kind: userGrounded ? "user" : "event",
+              id: current.contextSnapshotId ?? current.runId ?? current.sessionId ?? "current-user",
+              observedAt,
+            },
+          ],
         },
         signal === undefined ? {} : { signal },
       );
@@ -158,13 +252,43 @@ function registerIntegratedTools(
     description: `Run knowledge-first retrieval, then knowledge-guided memory search with RRF, Rerank fallback, MMR, conflict, and context budgets. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
     parameters: Type.Object({
       id: Type.Optional(Type.String({ minLength: 1 })),
+      artifactId: Type.Optional(Type.String({ minLength: 1 })),
+      offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      length: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_536 })),
       query: Type.Optional(Type.String({ minLength: 1 })),
       namespace: Type.Optional(Type.String({ minLength: 1 })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+      temporalMode: Type.Optional(StringEnum(["current", "historical", "all"] as const)),
     }),
     async execute(_toolCallId, parameters, signal) {
-      if (parameters.id === undefined && parameters.query === undefined) {
-        throw new Error("search_memory requires id, query, or both");
+      if (
+        parameters.id === undefined &&
+        parameters.query === undefined &&
+        parameters.artifactId === undefined
+      ) {
+        throw new Error("search_memory requires id, artifactId, query, or a combination");
+      }
+      if (parameters.artifactId !== undefined) {
+        const scopeContext = currentScopeContext();
+        const artifact = await evidence.getArtifact(parameters.artifactId, {
+          ...(signal === undefined ? {} : { signal }),
+          scopeContext,
+        });
+        const range = await evidence.readArtifactRange(parameters.artifactId, {
+          ...(signal === undefined ? {} : { signal }),
+          scopeContext,
+          offset: parameters.offset ?? 0,
+          length: parameters.length ?? 32_768,
+        });
+        const result = {
+          artifact,
+          range,
+          content: range?.content,
+        };
+        return {
+          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
+          details: undefined,
+        };
       }
       const exact =
         parameters.id === undefined
@@ -176,7 +300,10 @@ function registerIntegratedTools(
       const exactEvidence =
         exact === undefined
           ? []
-          : await evidence.readEvidence(exact.evidenceRefs, signal === undefined ? {} : { signal });
+          : await evidence.readEvidence(exact.evidenceRefs, {
+              ...(signal === undefined ? {} : { signal }),
+              scopeContext: currentScopeContext(),
+            });
       if (parameters.query === undefined) {
         const result = { exact, evidence: exactEvidence };
         return {
@@ -200,17 +327,21 @@ function registerIntegratedTools(
             ),
           )
         ).filter((record) => record !== undefined);
-        const terms = parameters.query.toLowerCase().split(/\s+/).filter(Boolean);
-        const evidenceMatches = exactEvidence.filter((item) => {
-          const text = JSON.stringify(item).toLowerCase();
-          return terms.every((term) => text.includes(term));
-        });
+        const evidenceMatches = await evidence.searchEvidence(
+          exact?.evidenceRefs ?? [],
+          parameters.query,
+          {
+            ...(signal === undefined ? {} : { signal }),
+            scopeContext: currentScopeContext(),
+          },
+        );
         const result = { exact, evolution, evidence: evidenceMatches };
         return {
           content: [{ type: "text" as const, text: formatPiToolJson(result) }],
           details: undefined,
         };
       }
+      const activeSnapshot = currentContextSnapshot();
       const result = await retrieval.search(
         {
           text: parameters.query,
@@ -218,11 +349,16 @@ function registerIntegratedTools(
           ...(parameters.limit === undefined ? {} : { limit: parameters.limit }),
           memoryScopes: currentScopes(),
           memoryScopeContext: currentScopeContext(),
+          ...(parameters.temporalMode === undefined
+            ? {}
+            : { temporalMode: parameters.temporalMode }),
+          ...(activeSnapshot === undefined ? {} : { contextSnapshot: activeSnapshot }),
         },
         {
           ...(signal === undefined ? {} : { signal }),
           allowRerank: true,
           rerankRequired: false,
+          onTrace,
         },
       );
       return {
@@ -248,6 +384,8 @@ function registerKbCommand(
   config: PiMentisConfig,
   store: ZvecStore,
   runtimeSnapshot: () => unknown,
+  intelligenceSnapshot: () => Promise<unknown>,
+  currentScopeContext: () => PiScopeContext,
 ): void {
   pi.registerCommand("kb", {
     description: "Manage integrated Pi Mentis knowledge sources, jobs, models, and status",
@@ -260,7 +398,10 @@ function registerKbCommand(
           return;
         }
         const source = await knowledgeCommandSource(target);
-        const receipt = await knowledge.enqueueIngest({ source }, { priority: "user" });
+        const receipt = await knowledge.enqueueIngest(
+          { source, scopeContext: currentScopeContext() },
+          { priority: "user" },
+        );
         notifyWhenUiAvailable(context, `Knowledge job ${receipt.jobId} queued`, "info");
         return;
       }
@@ -270,7 +411,7 @@ function registerKbCommand(
           notifyWhenUiAvailable(context, "Usage: /kb remove <source-id>", "error");
           return;
         }
-        const result = await knowledge.remove({ sourceId });
+        const result = await knowledge.remove({ sourceId, scopeContext: currentScopeContext() });
         notifyWhenUiAvailable(context, `Removed ${result.removedChunks} chunks`, "info");
         return;
       }
@@ -315,7 +456,10 @@ function registerKbCommand(
           notifyWhenUiAvailable(context, "Usage: /kb inspect <document-id>", "error");
           return;
         }
-        const view = await knowledge.inspect({ documentId });
+        const view = await knowledge.inspect({
+          documentId,
+          scopeContext: currentScopeContext(),
+        });
         notifyWhenUiAvailable(
           context,
           view === undefined ? "Document not found" : formatPiToolJson(view),
@@ -327,7 +471,18 @@ function registerKbCommand(
         notifyWhenUiAvailable(context, formatPiToolJson(knowledge.capabilities()), "info");
         return;
       }
-      notifyWhenUiAvailable(context, formatPiToolJson(runtimeSnapshot()), "info");
+      if (action === "status") {
+        notifyWhenUiAvailable(
+          context,
+          formatPiToolJson({
+            runtime: runtimeSnapshot(),
+            intelligence: await intelligenceSnapshot(),
+          }),
+          "info",
+        );
+        return;
+      }
+      notifyWhenUiAvailable(context, `Unknown /kb action: ${action}`, "error");
     },
   });
 }
@@ -361,7 +516,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   const contextResolver = new MentisContextResolver();
   let contextSnapshot: MentisContextSnapshot | undefined;
   let sessionMode: MentisContextSnapshot["conversation"]["sessionMode"] = "persistent";
-  let projectIdentity: Awaited<ReturnType<typeof resolvePiProjectIdentity>> | undefined;
+  let contextState: ContextStateService | undefined;
+  let effectiveness: EffectivenessService | undefined;
+  let policy: AdaptivePolicyService | undefined;
+  let latestRetrievalTraceId: string | undefined;
 
   runtime.registerEmbedding({
     id: "siliconflow-integrated",
@@ -409,15 +567,19 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       const embedding = runtime.getEmbedding<EmbeddingProvider>();
       if (embedding === undefined) throw new Error("Embedding provider is unavailable");
       memoryStore = await acquireSharedZvecStore(config.storage, generationSpaces(config));
+      contextState ??= new ContextStateService(memoryStore.store);
       return createMemoryService({
         store: memoryStore.store,
         embedding,
         embeddingSpace: embeddingSpace(config),
         dimensions: config.inference.siliconflow.embedding.dimensions,
         telemetry,
+        viewsEnabled: config.intelligence.views.enabled,
+        viewTtlMs: config.intelligence.views.ttlMs,
       });
     },
-    dispose: async () => {
+    dispose: async (memory) => {
+      await memory.flushBackground?.();
       await memoryStore?.release();
       memoryStore = undefined;
     },
@@ -430,6 +592,20 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       const knowledge = runtime.getKnowledge<KnowledgeService>();
       const memory = runtime.getMemory<MemoryService>();
       const reranker = runtime.getReranker<RerankProvider>();
+      if (memoryStore !== undefined) {
+        if (config.intelligence.effectiveness.enabled) {
+          effectiveness ??= new EffectivenessService(memoryStore.store, {
+            flushIntervalMs: config.intelligence.effectiveness.flushIntervalMs,
+            maxBatch: config.intelligence.effectiveness.maxBatch,
+          });
+        }
+        if (config.intelligence.adaptivePolicy.enabled) {
+          policy ??= new AdaptivePolicyService(memoryStore.store, "local:local:pi:pi-mentis", {
+            cooldownMs: config.intelligence.adaptivePolicy.cooldownMs,
+          });
+          await policy.initialize();
+        }
+      }
       return createRetrievalService({
         ...(knowledge === undefined ? {} : { knowledge }),
         ...(memory === undefined ? {} : { memory }),
@@ -440,9 +616,14 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         rerankCacheEntries: config.inference.rerank.cacheEntries,
         rerankCacheTtlMs: config.inference.rerank.cacheTtlMs,
         telemetry,
+        ...(effectiveness === undefined ? {} : { effectiveness }),
+        ...(policy === undefined ? {} : { policy }),
       });
     },
-    dispose: async () => scheduler.close(),
+    dispose: async () => {
+      await effectiveness?.close();
+      await scheduler.close();
+    },
   });
 
   let registered = false;
@@ -456,8 +637,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     const retrieval = runtime.getRetrieval<RetrievalService>();
     if (knowledge === undefined || memory === undefined || retrieval === undefined) return;
     if (memoryStore === undefined) return;
-    const project = await resolvePiProjectIdentity(context.cwd);
-    projectIdentity = project;
+    const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
+      fallbackProjectIdentity(context.cwd),
+    );
     scopeContext = {
       tenantId: "local",
       userId: "local",
@@ -470,6 +652,80 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       ...(parentBranchId === undefined ? {} : { parentBranchId }),
     };
     evidenceStore ??= createPiEvidenceStore(memoryStore.store);
+    contextState ??= new ContextStateService(memoryStore.store);
+    const repair = scheduler.schedule({
+      id: `temporal-repair:${scopeContext.userId}`,
+      deduplicationKey: `temporal-repair:${scopeContext.userId}`,
+      priority: TaskPriority.SessionMaintenance,
+      estimatedBytes: 1024,
+      run: async (signal) => {
+        await evidenceStore?.recoverArtifacts({ signal });
+        await evidenceStore?.collectExpiredArtifacts(undefined, { signal });
+        await memoryStore?.store.collectSupersededGenerations(config.storage.generationRetentionMs);
+        await knowledge.recoverJobs({ signal });
+        if (config.intelligence.temporal.repairOnStartup) {
+          await memory.repairTemporal?.({ signal });
+        }
+        await memory.repairViews?.();
+      },
+    });
+    void repair.promise.catch(() => undefined);
+    if (effectiveness !== undefined && policy !== undefined) {
+      const policyJob = scheduler.schedule({
+        id: "adaptive-policy-maintenance",
+        deduplicationKey: "adaptive-policy-maintenance",
+        priority: TaskPriority.BackgroundSync,
+        estimatedBytes: 4096,
+        run: async () => {
+          const cases = await effectiveness?.replayCases("local:local:pi:pi-mentis");
+          if (cases === undefined || cases.length < 20) return;
+          const evaluate = evaluateReplayCandidate;
+          const canary = policy?.canary();
+          if (canary !== undefined) {
+            const summary = await effectiveness?.summary(
+              "local:local:pi:pi-mentis",
+              1_000,
+              canary.id,
+            );
+            if (summary === undefined) return;
+            const decision = await policy?.observeCanary(canary, summary);
+            if (decision === "continue" && summary.samples >= 20) await policy?.activate(canary);
+            return;
+          }
+          const shadow = policy?.shadow();
+          if (shadow !== undefined) {
+            const [baseline, candidate] = await Promise.all([
+              policy?.replay(policy.active(), cases, evaluate),
+              policy?.replay(shadow, cases, evaluate),
+            ]);
+            if (
+              baseline !== undefined &&
+              candidate !== undefined &&
+              candidate.forbiddenExposure === 0 &&
+              candidate.evidenceCoverage >= baseline.evidenceCoverage &&
+              candidate.score > baseline.score
+            ) {
+              await policy?.promoteToCanary(shadow);
+            }
+            return;
+          }
+          const active = policy?.active();
+          if (active !== undefined) {
+            const summary = await effectiveness?.summary(
+              "local:local:pi:pi-mentis",
+              1_000,
+              active.id,
+            );
+            if (summary !== undefined && summary.samples >= 20) {
+              const drift = await policy?.observeCanary(active, summary);
+              if (drift === "rollback") return;
+            }
+          }
+          await policy?.optimize(cases, evaluate);
+        },
+      });
+      void policyJob.promise.catch(() => undefined);
+    }
     if (config.memory.captureEnabled) {
       const experience = createExperienceLearningService({
         store: memoryStore.store,
@@ -479,12 +735,67 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         evidenceStore,
         config.memory.offload,
         (episode, events, outcome) => {
-          const observation = deriveExperienceObservation(episode, events, outcome, {
-            embeddingModel: config.inference.siliconflow.embedding.model,
-            embeddingDimensions: String(config.inference.siliconflow.embedding.dimensions),
-            rerankModel: config.inference.siliconflow.rerank.model,
-            piVersion: config.runtime.piVersion,
-          });
+          if (episode.taskId !== undefined && contextState !== undefined) {
+            const episodeTaskId = episode.taskId;
+            const taskState =
+              outcome.taskStatus === "completed"
+                ? "completed"
+                : outcome.taskStatus === "failed"
+                  ? "failed"
+                  : outcome.taskStatus === "aborted"
+                    ? "aborted"
+                    : "active";
+            const taskJob = scheduler.schedule({
+              id: `task-state:${episode.id}`,
+              deduplicationKey: `task-state:${episode.id}`,
+              priority: TaskPriority.SessionMaintenance,
+              estimatedBytes: 256,
+              run: async () =>
+                contextState?.updateTaskState(episodeTaskId, "local:local:pi:pi-mentis", taskState),
+            });
+            void taskJob.promise.catch(() => undefined);
+          }
+          if (latestRetrievalTraceId !== undefined) {
+            const traceId = latestRetrievalTraceId;
+            const namespace = [
+              scopeContext.tenantId,
+              scopeContext.userId,
+              scopeContext.appId,
+              scopeContext.agentId,
+            ]
+              .map(encodeURIComponent)
+              .join(":");
+            const retrieval = runtime.getRetrieval<RetrievalService>();
+            const observation = {
+              traceId,
+              execution: outcome.executionStatus,
+              verification: outcome.verificationStatus,
+              toolArgumentMemoryIds: events.flatMap((item) =>
+                referencedMemoryIds(item.payload["input"]),
+              ),
+              evidenceIds: events.map((item) => item.id),
+            } as const;
+            const effectJob = scheduler.schedule({
+              id: `effectiveness:${episode.id}`,
+              deduplicationKey: `effectiveness:${episode.id}`,
+              priority: TaskPriority.SessionMaintenance,
+              estimatedBytes: 1024,
+              run: async () => retrieval?.recordOutcome?.(namespace, observation),
+            });
+            void effectJob.promise.catch(() => undefined);
+          }
+          const observation = deriveExperienceObservation(
+            episode,
+            events,
+            outcome,
+            {
+              embeddingModel: config.inference.siliconflow.embedding.model,
+              embeddingDimensions: String(config.inference.siliconflow.embedding.dimensions),
+              rerankModel: config.inference.siliconflow.rerank.model,
+              piVersion: config.runtime.piVersion,
+            },
+            scopeContext,
+          );
           if (observation === undefined) return;
           const learning = scheduler.schedule({
             id: `episode-learning:${episode.id}`,
@@ -498,6 +809,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           });
           void learning.promise.catch(() => undefined);
         },
+        createTaskGraphService(memoryStore.store),
       );
     }
     if (!registered) {
@@ -530,9 +842,63 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           { kind: "user", id: scopeContext.userId },
         ],
         () => scopeContext,
+        () => contextSnapshot,
+        () =>
+          captureSession?.goalEventId === undefined
+            ? undefined
+            : { kind: "event", id: captureSession.goalEventId, observedAt: Date.now() },
+        (traceId) => {
+          latestRetrievalTraceId = traceId;
+        },
       );
-      registerKbCommand(pi, knowledge, scheduler, config, knowledgeStore.store, () =>
-        runtime.snapshot(),
+      registerKbCommand(
+        pi,
+        knowledge,
+        scheduler,
+        config,
+        knowledgeStore.store,
+        () => runtime.snapshot(),
+        async () => {
+          const namespace = "local:local:pi:pi-mentis";
+          const views = await Promise.all(
+            [
+              ...(scopeContext.projectId === undefined
+                ? []
+                : [{ kind: "project" as const, id: scopeContext.projectId }]),
+              ...(scopeContext.taskId === undefined
+                ? []
+                : [{ kind: "task" as const, id: scopeContext.taskId }]),
+              ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
+              { kind: "user" as const, id: scopeContext.userId },
+            ].map(async ({ kind, id }) => memory.getView?.(kind, id, scopeContext)),
+          );
+          return {
+            scheduler: scheduler.snapshot(),
+            context:
+              contextSnapshot === undefined
+                ? undefined
+                : {
+                    id: contextSnapshot.id,
+                    revision: contextSnapshot.revision,
+                    repositoryId: contextSnapshot.workspace?.repositoryId,
+                    projectId: contextSnapshot.workspace?.projectId,
+                    taskId: contextSnapshot.situation.taskId,
+                    topicIds: contextSnapshot.situation.topicIds,
+                    capabilitySnapshotId: contextSnapshot.capability.snapshotId,
+                  },
+            temporal: {
+              enabled: true,
+              repairOnStartup: config.intelligence.temporal.repairOnStartup,
+            },
+            views: views.filter((view) => view !== undefined),
+            policy: policy?.status(),
+            effectiveness: {
+              buffer: effectiveness?.bufferStatus(),
+              summary: await effectiveness?.summary(namespace),
+            },
+          };
+        },
+        () => scopeContext,
       );
       registered = true;
     }
@@ -542,10 +908,29 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       priority: TaskPriority.BackgroundSync,
       estimatedBytes: 1024,
       run: async (signal) => {
-        const scan = await scanPiInstallation({
-          piPackageRoot,
-          resourceRoots: [path.join(context.cwd, ".pi"), path.join(homedir(), ".pi", "agent")],
+        const refresh = async () => {
+          const configuredPiHome = process.env["PI_CODING_AGENT_DIR"]?.trim();
+          const piHome =
+            configuredPiHome === undefined || configuredPiHome === ""
+              ? path.join(homedir(), ".pi", "agent")
+              : path.resolve(configuredPiHome);
+          const scan = await scanPiInstallation({
+            piPackageRoot,
+            resourceRoots: [path.join(context.cwd, ".pi"), piHome],
+          });
+          return {
+            fingerprint: scan.fingerprint,
+            value: { fingerprint: scan.fingerprint, records: scan.records },
+          };
+        };
+        const lifecycle = await contextState?.staleWhileRevalidate({
+          namespace: "local:local:pi:pi-mentis",
+          key: "pi-installation",
+          maxAgeMs: config.intelligence.context.capabilityMaxAgeMs,
+          refresh,
         });
+        const refreshed = lifecycle === undefined ? await refresh() : await lifecycle.refresh;
+        const scan = refreshed.value;
         const embedding = runtime.getEmbedding<EmbeddingProvider>();
         if (embedding === undefined || knowledgeStore === undefined) return;
         const indexer = new CapabilityIndexer({
@@ -574,10 +959,58 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     };
   });
   pi.on("input", async (event) => {
-    if (event.streamingBehavior === "steer") await captureSession?.steer(event.text);
+    if (latestRetrievalTraceId !== undefined) {
+      const confirmation = /^(?:对|是的|没错|就是这个|正确|yes|correct|exactly)\b/i.test(
+        event.text.trim(),
+      )
+        ? "confirmed"
+        : /(?:不对|错了|不是这个|incorrect|wrong)/i.test(event.text)
+          ? "corrected"
+          : undefined;
+      if (confirmation !== undefined) {
+        const namespace = [
+          scopeContext.tenantId,
+          scopeContext.userId,
+          scopeContext.appId,
+          scopeContext.agentId,
+        ]
+          .map(encodeURIComponent)
+          .join(":");
+        const traceId = latestRetrievalTraceId;
+        const feedbackJob = scheduler.schedule({
+          id: `retrieval-feedback:${traceId}:${confirmation}`,
+          deduplicationKey: `retrieval-feedback:${traceId}:${confirmation}`,
+          priority: TaskPriority.SessionMaintenance,
+          estimatedBytes: 256,
+          run: async () =>
+            runtime.getRetrieval<RetrievalService>()?.recordOutcome?.(namespace, {
+              traceId,
+              execution: confirmation === "confirmed" ? "success" : "failed",
+              verification: "unknown",
+              userConfirmation: confirmation,
+              evidenceIds: [],
+            }),
+        });
+        void feedbackJob.promise.catch(() => undefined);
+      }
+    }
+    if (event.streamingBehavior === "steer") {
+      await captureSession?.steer(event.text).catch(() => undefined);
+      const memory = runtime.getMemory<MemoryService>();
+      const invalidation = scheduler.schedule({
+        id: `branch-invalidation:${branchId}:${stableHash("steering:v1", event.text)}`,
+        deduplicationKey: `branch-invalidation:${branchId}:${stableHash("steering:v1", event.text)}`,
+        priority: TaskPriority.SessionMaintenance,
+        estimatedBytes: 1024,
+        run: async () => memory?.abandonBranch?.(branchId, scopeContext),
+      });
+      void invalidation.promise.catch(() => undefined);
+    }
   });
   pi.on("tool_execution_start", async (event) => {
-    await captureSession?.toolStarted(event.toolCallId, event.toolName, event.args);
+    await captureSession
+      ?.toolStarted(event.toolCallId, event.toolName, event.args)
+      .catch(() => undefined);
   });
   pi.on("tool_result", async (event, context) => {
     const text = event.content
@@ -587,41 +1020,61 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       )
       .map((item) => item.text)
       .join("\n");
-    const result = await captureSession?.toolResult({
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      input: event.input,
-      text,
-      details: event.details,
-      isError: event.isError,
-      cwd: context.cwd,
-      completedAt: Date.now(),
-    });
+    const result = await captureSession
+      ?.toolResult({
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        input: event.input,
+        text,
+        details: event.details,
+        isError: event.isError,
+        cwd: context.cwd,
+        completedAt: Date.now(),
+      })
+      .catch(() => undefined);
     if (result === undefined || result.mode === "inline") return;
     return {
       content: [
         { type: "text" as const, text: result.modelText },
         ...event.content.filter((item) => item.type === "image"),
       ],
-      details: { original: event.details, piMentis: result.symbolic },
+      details: {
+        original: event.details,
+        piMentis: { symbolic: result.symbolic, tokenAccounting: result.tokenAccounting },
+      },
     };
   });
   pi.on("session_compact", async (event) => {
-    await captureSession?.compact(event.compactionEntry.summary, event.reason, event.willRetry);
+    await captureSession
+      ?.compact(event.compactionEntry.summary, event.reason, event.willRetry)
+      .catch(() => undefined);
   });
   pi.on("agent_settled", async () => {
-    await captureSession?.finish();
+    await captureSession?.finish().catch(() => undefined);
   });
   pi.on("before_agent_start", async (event, context) => {
-    const identity = projectIdentity ?? (await resolvePiProjectIdentity(context.cwd));
-    projectIdentity = identity;
+    latestRetrievalTraceId = undefined;
+    const identity = await resolvePiProjectIdentity(context.cwd).catch(() =>
+      fallbackProjectIdentity(context.cwd),
+    );
     const currentEntryId = context.sessionManager.getLeafId() ?? undefined;
     const parentEntryId =
       currentEntryId === undefined
         ? undefined
         : (context.sessionManager.getEntry(currentEntryId)?.parentId ?? undefined);
     const tools = [...(event.systemPromptOptions.selectedTools ?? [])].sort();
-    const skills = [...(event.systemPromptOptions.skills ?? [])].map((skill) => skill.name).sort();
+    const skillsHash = stableHash(
+      "skills:v2",
+      JSON.stringify(event.systemPromptOptions.skills ?? []),
+    );
+    const toolsHash = stableHash(
+      "tools:v2",
+      JSON.stringify({
+        selectedTools: tools,
+        snippets: event.systemPromptOptions.toolSnippets ?? {},
+      }),
+    );
+    const promptResourcesHash = stableHash("pi-prompt-resources:v1", event.systemPrompt);
     const scopedModels = context.scopedModels
       .map(({ model, thinkingLevel }) => ({
         provider: model.provider,
@@ -633,7 +1086,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       );
     const capabilityFingerprint = stableHash(
       "pi-capability-context:v1",
-      JSON.stringify({ tools, skills, scopedModels }),
+      JSON.stringify({ toolsHash, skillsHash, promptResourcesHash, scopedModels }),
     );
     const workspace =
       identity.repositoryId === undefined &&
@@ -650,15 +1103,46 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
               : { repositoryRoot: identity.repositoryRoot }),
             manifestTypes: identity.manifestTypes,
             ...(identity.manifestHash === undefined ? {} : { manifestHash: identity.manifestHash }),
+            ...(identity.branchName === undefined ? {} : { branchName: identity.branchName }),
+            ...(identity.commitId === undefined ? {} : { commitId: identity.commitId }),
           };
-    contextSnapshot = contextResolver.resolve({
+    const identityFacet = {
+      tenantId: "local",
+      userId: "local",
+      appId: "pi",
+      agentId: "pi-mentis",
+    };
+    const identityNamespace = Object.values(identityFacet).map(encodeURIComponent).join(":");
+    const explicitTopic = event.prompt
+      .match(/(?:^|\s)(?:topic|主题)\s*[:：]\s*([^\n]{2,80})/i)?.[1]
+      ?.trim();
+    let topicIds: readonly string[] = [];
+    if (explicitTopic !== undefined && contextState !== undefined) {
+      const topic = await contextState
+        .observeTopicLabel(identityNamespace, explicitTopic)
+        .catch(() => undefined);
+      if (topic?.state === "active") topicIds = [topic.topicId];
+    } else if (contextState !== undefined) {
+      const topic = await contextState
+        .inferTopic(identityNamespace, event.prompt)
+        .catch(() => undefined);
+      if (topic?.state === "active") topicIds = [topic.topicId];
+    }
+    const taskInput = {
+      namespace: identityNamespace,
+      goal: event.prompt,
+      ...(identity.repositoryId === undefined ? {} : { repositoryId: identity.repositoryId }),
+      ...(identity.projectId === undefined ? {} : { projectId: identity.projectId }),
+      topicIds,
+      ...(contextSnapshot?.situation.taskId === undefined
+        ? {}
+        : { currentTaskId: contextSnapshot.situation.taskId }),
+    };
+    const resolvedTask = await contextState?.resolveTask(taskInput).catch(() => undefined);
+    const taskId = resolvedTask?.taskId ?? taskIdentityId(taskInput);
+    const fastContext = {
       runtimeKey: context.sessionManager.getSessionId(),
-      identity: {
-        tenantId: "local",
-        userId: "local",
-        appId: "pi",
-        agentId: "pi-mentis",
-      },
+      identity: identityFacet,
       conversation: {
         sessionId: context.sessionManager.getSessionId(),
         ...(currentEntryId === undefined ? {} : { branchId: currentEntryId, currentEntryId }),
@@ -668,7 +1152,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       },
       ...(workspace === undefined ? {} : { workspace }),
       situation: {
-        topicIds: contextSnapshot?.situation.topicIds ?? [],
+        taskId,
+        topicIds,
         activeGoal: event.prompt,
         interactionMode: inferInteractionMode(event.prompt, workspace !== undefined),
         startedAt: Date.now(),
@@ -679,18 +1164,37 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ...(process.env["SHELL"] === undefined ? {} : { shell: process.env["SHELL"] }),
         runtime: "node",
         runtimeVersion: process.version,
+        ...(identity.packageManager === undefined
+          ? {}
+          : { packageManager: identity.packageManager }),
+        ...(identity.packageManagerVersion === undefined
+          ? {}
+          : { packageManagerVersion: identity.packageManagerVersion }),
+        ...(identity.language === undefined ? {} : { language: identity.language }),
       },
       capability: {
         piVersion: config.runtime.piVersion,
         ...(context.model?.provider === undefined ? {} : { provider: context.model.provider }),
         ...(context.model?.id === undefined ? {} : { model: context.model.id }),
-        extensionsHash: "runtime-managed",
-        skillsHash: stableHash("skills:v1", JSON.stringify(skills)),
-        mcpHash: "runtime-managed",
-        toolsHash: stableHash("tools:v1", JSON.stringify(tools)),
+        extensionsHash: promptResourcesHash,
+        skillsHash,
+        mcpHash: toolsHash,
+        toolsHash,
         snapshotId: capabilityFingerprint,
       },
-    }).snapshot;
+    } as const;
+    const previousSnapshot = config.intelligence.context.persistSnapshots
+      ? await contextState
+          ?.latestSnapshot(identityFacet, context.sessionManager.getSessionId())
+          .catch(() => undefined)
+      : undefined;
+    contextSnapshot =
+      contextState === undefined
+        ? contextResolver.resolve(fastContext).snapshot
+        : contextState.resolveFromPersistent(fastContext, previousSnapshot).snapshot;
+    if (contextState !== undefined && config.intelligence.context.persistSnapshots) {
+      await contextState.persistSnapshot(contextSnapshot).catch(() => undefined);
+    }
     scopeContext = {
       ...contextSnapshot.identity,
       sessionId: contextSnapshot.conversation.sessionId,
@@ -714,6 +1218,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ? {}
         : { workspacePath: contextSnapshot.workspace.canonicalPath }),
       topicIds: contextSnapshot.situation.topicIds,
+      ...(contextSnapshot.situation.taskId === undefined
+        ? {}
+        : { taskId: contextSnapshot.situation.taskId }),
       interactionMode: contextSnapshot.situation.interactionMode,
       environmentFingerprint: stableHash(
         "environment:v1",
@@ -721,10 +1228,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       ),
       capabilitySnapshotId: contextSnapshot.capability.snapshotId,
     };
-    await captureSession?.start({
-      goal: event.prompt,
-      scope: scopeContext,
-    });
+    await captureSession
+      ?.start({
+        goal: event.prompt,
+        scope: scopeContext,
+      })
+      .catch(() => undefined);
     if (!config.retrieval.automaticRecall) return;
     const decision = decideRecall({
       prompt: event.prompt,
@@ -756,12 +1265,35 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
             { kind: "user", id: scopeContext.userId },
           ],
           memoryScopeContext: scopeContext,
+          contextSnapshot,
+          gateContext: {
+            manifestTypes: contextSnapshot.workspace?.manifestTypes ?? [],
+            availableTools: tools,
+            ...(contextSnapshot.environment?.os === undefined
+              ? {}
+              : { os: contextSnapshot.environment.os }),
+            ...(contextSnapshot.environment?.architecture === undefined
+              ? {}
+              : { architecture: contextSnapshot.environment.architecture }),
+            ...(contextSnapshot.environment?.runtime === undefined
+              ? {}
+              : { runtime: contextSnapshot.environment.runtime }),
+            ...(contextSnapshot.environment?.runtimeVersion === undefined
+              ? {}
+              : { runtimeVersion: contextSnapshot.environment.runtimeVersion }),
+            ...(contextSnapshot.environment?.packageManager === undefined
+              ? {}
+              : { packageManager: contextSnapshot.environment.packageManager }),
+          },
         },
         {
           timeoutMs: config.retrieval.autoRecallHardTimeoutMs,
           softTimeoutMs: config.retrieval.autoRecallSoftTimeoutMs,
           allowRerank: decision.allowRerank,
           rerankRequired: false,
+          onTrace: (traceId) => {
+            latestRetrievalTraceId = traceId;
+          },
         },
       );
       if (result.hits.length === 0) return;

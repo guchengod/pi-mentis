@@ -1,4 +1,5 @@
 import { stableHash } from "./hash.js";
+import { systemClock, type Clock } from "./clock.js";
 
 export interface IdentityFacet {
   readonly tenantId: string;
@@ -324,6 +325,11 @@ export function contextAffinity(
 /** Synchronous minimum-snapshot resolver; slow repository/capability scans stay outside this path. */
 export class MentisContextResolver {
   readonly #cache = new Map<string, MentisContextSnapshot>();
+  readonly #clock: Clock;
+
+  constructor(clock: Clock = systemClock) {
+    this.#clock = clock;
+  }
 
   resolve(input: FastMentisContext): ContextResolution {
     const { runtimeKey, ...facets } = input;
@@ -331,7 +337,7 @@ export class MentisContextResolver {
     const cached = this.#cache.get(runtimeKey);
     if (cached?.fingerprint === fingerprint) return { snapshot: cached, reused: true };
     const revision = (cached?.revision ?? 0) + 1;
-    const createdAt = Date.now();
+    const createdAt = this.#clock.now();
     const snapshot: MentisContextSnapshot = {
       id: stableHash("mentis-context-snapshot:v1", runtimeKey, String(revision), fingerprint),
       revision,

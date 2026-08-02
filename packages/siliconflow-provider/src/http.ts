@@ -10,6 +10,8 @@ import {
   ProviderTimeoutError,
   ProviderUnavailableError,
   AsyncSemaphore,
+  systemClock,
+  type Clock,
   type MentisError,
 } from "@pi-mentis/pi-mentis-core";
 
@@ -26,14 +28,16 @@ export interface ProviderRequestGateOptions {
 export class ProviderRequestGate {
   readonly #options: ProviderRequestGateOptions;
   readonly #semaphore: AsyncSemaphore;
+  readonly #clock: Clock;
   readonly #requests: number[] = [];
   readonly #tokens: { readonly at: number; readonly count: number }[] = [];
   #consecutiveThrottleFailures = 0;
   #openUntil = 0;
 
-  constructor(options: ProviderRequestGateOptions) {
+  constructor(options: ProviderRequestGateOptions, clock: Clock = systemClock) {
     this.#options = options;
     this.#semaphore = new AsyncSemaphore(options.concurrentRequests);
+    this.#clock = clock;
   }
 
   async run<T>(
@@ -41,7 +45,7 @@ export class ProviderRequestGate {
     signal: AbortSignal | undefined,
     operation: () => Promise<T>,
   ): Promise<T> {
-    if (Date.now() < this.#openUntil) {
+    if (this.#clock.now() < this.#openUntil) {
       throw new ProviderUnavailableError("SiliconFlow circuit breaker is temporarily open", {
         operation: "provider-rate-limit",
         provider: "siliconflow",
@@ -59,10 +63,15 @@ export class ProviderRequestGate {
         typeof error === "object" && error !== null && "code" in error
           ? (error as { readonly code?: unknown }).code
           : undefined;
-      if (code === "PROVIDER_RATE_LIMIT" || code === "PROVIDER_OVERLOADED") {
+      if (
+        code === "PROVIDER_RATE_LIMIT" ||
+        code === "PROVIDER_OVERLOADED" ||
+        code === "PROVIDER_TIMEOUT" ||
+        code === "PROVIDER_UNAVAILABLE"
+      ) {
         this.#consecutiveThrottleFailures++;
         if (this.#consecutiveThrottleFailures >= this.#options.circuitFailureThreshold) {
-          this.#openUntil = Date.now() + this.#options.circuitOpenMs;
+          this.#openUntil = this.#clock.now() + this.#options.circuitOpenMs;
         }
       }
       throw error;
@@ -76,7 +85,7 @@ export class ProviderRequestGate {
       if (signal?.aborted === true) {
         throw new OperationCancelledError("Provider rate-limit wait cancelled");
       }
-      const now = Date.now();
+      const now = this.#clock.now();
       while ((this.#requests[0] ?? now) <= now - 1_000) this.#requests.shift();
       while ((this.#tokens[0]?.at ?? now) <= now - 60_000) this.#tokens.shift();
       const usedTokens = this.#tokens.reduce((sum, item) => sum + item.count, 0);

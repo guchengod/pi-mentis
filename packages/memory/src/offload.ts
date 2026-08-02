@@ -6,9 +6,22 @@ import type {
   ToolResultOffloadPolicy,
   ToolSymbolicResult,
 } from "./types.js";
+import { ConservativeUtf8TokenEstimator } from "@pi-mentis/pi-mentis-inference";
 
 const ERROR_LINE = /(?:\berror\b|\bfailed\b|\bfatal\b|exception|traceback|\bE[A-Z]{2,}\b)/i;
 const PATH_TOKEN = /(?:^|[\s"'`(])((?:\.{0,2}\/|\/)?[\w@.-]+(?:\/[\w@.-]+)+(?::\d+(?::\d+)?)?)/g;
+const tokenEstimator = new ConservativeUtf8TokenEstimator();
+
+function tokenAccounting(original: string, retained: string) {
+  const originalTokens = tokenEstimator.count(original);
+  const retainedTokens = tokenEstimator.count(retained);
+  return {
+    estimator: "conservative-utf8-v1" as const,
+    originalTokens,
+    retainedTokens,
+    offloadedTokens: Math.max(0, originalTokens - retainedTokens),
+  };
+}
 
 function unique(values: readonly string[], limit: number): string[] {
   return [...new Set(values.filter((value) => value !== ""))].slice(0, limit);
@@ -88,6 +101,7 @@ export async function offloadToolResult(
       mode,
       symbolic: summarizeToolResult(envelope, policy),
       modelText: envelope.text,
+      tokenAccounting: tokenAccounting(envelope.text, envelope.text),
     };
   }
   const artifact = await evidence.writeArtifact({
@@ -99,10 +113,13 @@ export async function offloadToolResult(
   });
   const symbolic = summarizeToolResult(envelope, policy, artifact);
   const header = `<pi-mentis-tool-result artifact_id="${artifact.id}" mode="${mode}">\n${JSON.stringify(symbolic, null, 2)}\n</pi-mentis-tool-result>`;
+  const modelText =
+    mode === "truncated" ? `${header}\n\nPreview:\n${symbolic.preview ?? ""}` : header;
   return {
     mode,
     symbolic,
-    modelText: mode === "truncated" ? `${header}\n\nPreview:\n${symbolic.preview ?? ""}` : header,
+    modelText,
+    tokenAccounting: tokenAccounting(envelope.text, modelText),
     artifact,
   };
 }

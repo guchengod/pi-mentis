@@ -1,5 +1,5 @@
-import type { BackgroundScheduler } from "@pi-mentis/pi-mentis-core";
-import { TaskPriority, operationId } from "@pi-mentis/pi-mentis-core";
+import type { BackgroundScheduler, Clock } from "@pi-mentis/pi-mentis-core";
+import { TaskPriority, operationId, systemClock } from "@pi-mentis/pi-mentis-core";
 
 import type { CapturedToolEvent, TurnCapture } from "./types.js";
 
@@ -10,12 +10,19 @@ export class TurnCaptureBuffer {
   readonly #events: CapturedToolEvent[] = [];
   readonly #recentFiles: string[] = [];
   readonly #recentSymbols: string[] = [];
+  readonly #clock: Clock;
   #turnIndex = 0;
 
-  constructor(eventLimit = 256, recentFileLimit = 64, recentSymbolLimit = 128) {
+  constructor(
+    eventLimit = 256,
+    recentFileLimit = 64,
+    recentSymbolLimit = 128,
+    clock: Clock = systemClock,
+  ) {
     this.#eventLimit = eventLimit;
     this.#recentFileLimit = recentFileLimit;
     this.#recentSymbolLimit = recentSymbolLimit;
+    this.#clock = clock;
   }
 
   startTurn(turnIndex: number): void {
@@ -49,7 +56,7 @@ export class TurnCaptureBuffer {
     return {
       turnIndex: this.#turnIndex,
       events: [...this.#events],
-      sealedAt: Date.now(),
+      sealedAt: this.#clock.now(),
     };
   }
 }

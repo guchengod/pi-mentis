@@ -108,6 +108,103 @@ describe("SiliconFlow wire contracts", () => {
     });
   });
 
+  it("never retries authentication failures", async () => {
+    const request = vi.fn(
+      async () =>
+        new Response('{"message":"unauthorized"}', {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", request);
+    await expect(
+      postJson(
+        "https://api.siliconflow.cn/v1/embeddings",
+        "invalid",
+        {},
+        {
+          providerId: "siliconflow",
+          modelId: "m",
+          operation: "embedding",
+          timeoutMs: 1_000,
+          maxAttempts: 3,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          estimatedTokens: 1,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "PROVIDER_AUTHENTICATION" });
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it.each([429, 503, 504])("retries HTTP %i and returns the recovered response", async (status) => {
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        attempts++;
+        if (attempts === 1) {
+          return new Response('{"message":"retry"}', {
+            status,
+            headers: { "content-type": "application/json", "retry-after": "0" },
+          });
+        }
+        return Response.json({ ok: true });
+      }),
+    );
+    await expect(
+      postJson(
+        "https://api.siliconflow.cn/v1/embeddings",
+        "redacted",
+        {},
+        {
+          providerId: "siliconflow",
+          modelId: "m",
+          operation: "embedding",
+          timeoutMs: 1_000,
+          maxAttempts: 2,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          estimatedTokens: 1,
+        },
+      ),
+    ).resolves.toMatchObject({ value: { ok: true }, retryCount: 1 });
+    expect(attempts).toBe(2);
+  });
+
+  it("maps a timed-out fetch to a retryable provider timeout", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      ),
+    );
+    await expect(
+      postJson(
+        "https://api.siliconflow.cn/v1/embeddings",
+        "redacted",
+        {},
+        {
+          providerId: "siliconflow",
+          modelId: "m",
+          operation: "embedding",
+          timeoutMs: 5,
+          maxAttempts: 1,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          estimatedTokens: 1,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "PROVIDER_TIMEOUT", context: { retryable: true } });
+  });
+
   it("omits dimensions for the fixed-dimension bge-m3 model", async () => {
     let requestBody: Record<string, unknown> | undefined;
     vi.stubGlobal(

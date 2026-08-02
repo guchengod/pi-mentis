@@ -1,4 +1,4 @@
-import type { SearchHit } from "@pi-mentis/pi-mentis-core";
+import { systemClock, type SearchHit } from "@pi-mentis/pi-mentis-core";
 
 export interface RankedList {
   readonly weight: number;
@@ -67,12 +67,16 @@ export function maximalMarginalRelevance(
   return selected;
 }
 
-export function authorityAndFreshness(hit: SearchHit, now = Date.now()): number {
+export function authorityAndFreshness(
+  hit: SearchHit,
+  now = systemClock.now(),
+  freshnessWeight = 0.1,
+): number {
   const updatedAt =
     typeof hit.metadata?.["updatedAt"] === "number" ? hit.metadata["updatedAt"] : now;
   const ageDays = Math.max(0, (now - updatedAt) / 86_400_000);
   const freshness = 1 / (1 + ageDays / 30);
-  return hit.score * 0.65 + (hit.authority / 100) * 0.25 + freshness * 0.1;
+  return hit.score * 0.65 + (hit.authority / 100) * 0.25 + freshness * freshnessWeight;
 }
 
 export function selectContext(

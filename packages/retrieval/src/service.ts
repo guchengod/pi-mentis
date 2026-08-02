@@ -1,8 +1,12 @@
 import {
+  EvidenceAuthority,
   SearchTimeoutError,
   contentHash,
+  systemClock,
+  type Clock,
   type SearchHit,
   type SearchResult,
+  type MentisContextSnapshot,
 } from "@pi-mentis/pi-mentis-core";
 import {
   BoundedTtlCache,
@@ -25,6 +29,9 @@ import {
   reciprocalRankFusion,
   selectContext,
 } from "./algorithms.js";
+import { gateSearchHit, type GateRuntimeContext } from "./gates.js";
+import { EffectivenessService, type TaskOutcomeObservation } from "./effectiveness.js";
+import { AdaptivePolicyService } from "./policy.js";
 
 export interface RetrievalQuery {
   readonly text: string;
@@ -33,6 +40,9 @@ export interface RetrievalQuery {
   readonly memoryScopeContext?: MemoryQuery["scopeContext"];
   readonly limit?: number;
   readonly contextTokens?: number;
+  readonly temporalMode?: "current" | "historical" | "all";
+  readonly contextSnapshot?: MentisContextSnapshot;
+  readonly gateContext?: Omit<GateRuntimeContext, "scope" | "snapshot" | "historical">;
 }
 
 export interface RetrievalOptions {
@@ -42,10 +52,13 @@ export interface RetrievalOptions {
   readonly allowRerank?: boolean;
   readonly rerankRequired?: boolean;
   readonly softTimeoutMs?: number;
+  readonly onTrace?: (traceId: string) => void;
 }
 
 export interface RetrievalService {
   search(query: RetrievalQuery, options?: RetrievalOptions): Promise<SearchResult>;
+  recordOutcome?(namespace: string, outcome: TaskOutcomeObservation): Promise<void>;
+  flush?(): Promise<void>;
 }
 
 export interface CreateRetrievalServiceOptions {
@@ -58,6 +71,9 @@ export interface CreateRetrievalServiceOptions {
   readonly rerankCacheEntries?: number;
   readonly rerankCacheTtlMs?: number;
   readonly telemetry?: InMemoryTelemetry;
+  readonly effectiveness?: EffectivenessService;
+  readonly policy?: AdaptivePolicyService;
+  readonly clock?: Clock;
 }
 
 function extractGuidance(hits: readonly SearchHit[]): string {
@@ -96,6 +112,9 @@ export class DefaultRetrievalService implements RetrievalService {
   readonly #rerankCache: BoundedTtlCache<RerankCacheValue>;
   readonly #telemetry: InMemoryTelemetry;
   readonly #estimator = new ConservativeUtf8TokenEstimator();
+  readonly #effectiveness: EffectivenessService | undefined;
+  readonly #policy: AdaptivePolicyService | undefined;
+  readonly #clock: Clock;
 
   constructor(options: CreateRetrievalServiceOptions) {
     this.#knowledge = options.knowledge;
@@ -109,6 +128,9 @@ export class DefaultRetrievalService implements RetrievalService {
       options.rerankCacheTtlMs ?? 60_000,
     );
     this.#telemetry = options.telemetry ?? new InMemoryTelemetry();
+    this.#effectiveness = options.effectiveness;
+    this.#policy = options.policy;
+    this.#clock = options.clock ?? systemClock;
   }
 
   async search(query: RetrievalQuery, options: RetrievalOptions = {}): Promise<SearchResult> {
@@ -125,6 +147,12 @@ export class DefaultRetrievalService implements RetrievalService {
         : AbortSignal.any([options.signal, controller.signal]);
     const degraded: string[] = [];
     const stages: Record<string, number> = {};
+    const activePolicy = this.#policy?.forRequest(
+      `${query.text}:${query.memoryScopeContext?.sessionId ?? "session"}`,
+    );
+    const policyCandidateLimit =
+      activePolicy?.parameters.rerankCandidateLimit ?? this.#candidateLimit;
+    const candidateLimit = Math.min(this.#candidateLimit, policyCandidateLimit);
     try {
       const knowledgeStarted = performance.now();
       const knowledgePromise =
@@ -134,7 +162,10 @@ export class DefaultRetrievalService implements RetrievalService {
               {
                 text: query.text,
                 ...(query.namespace === undefined ? {} : { namespace: query.namespace }),
-                limit: this.#candidateLimit,
+                ...(query.memoryScopeContext === undefined
+                  ? {}
+                  : { scopeContext: query.memoryScopeContext }),
+                limit: candidateLimit,
               },
               { signal, timeoutMs },
             );
@@ -143,6 +174,61 @@ export class DefaultRetrievalService implements RetrievalService {
         return undefined;
       });
       stages["knowledge"] = performance.now() - knowledgeStarted;
+      const viewStarted = performance.now();
+      const viewHits: SearchHit[] = [];
+      if (this.#memory?.getView !== undefined && query.memoryScopes !== undefined) {
+        const supported = new Set(["project", "user", "topic", "task", "capability"]);
+        const views = await Promise.all(
+          query.memoryScopes
+            .filter((scope) => supported.has(scope.kind))
+            .map((scope) =>
+              this.#memory
+                ?.getView?.(
+                  scope.kind as "project" | "user" | "topic" | "task" | "capability",
+                  scope.id,
+                  query.memoryScopeContext,
+                )
+                .catch(() => undefined),
+            ),
+        );
+        for (const view of views) {
+          if (view === undefined || view.memberMemoryIds.length === 0) continue;
+          const text = Object.values(view.facts)
+            .filter((fact) => fact.currentMemoryIds.length > 0)
+            .map((fact) => {
+              const values = fact.currentMemoryIds.map(
+                (memoryId) => fact.values?.[memoryId] ?? fact.value,
+              );
+              return `${fact.factKey}: ${
+                values.length > 1 ? `CONFLICT [${values.join(" | ")}]` : values[0]
+              }`;
+            })
+            .join("\n");
+          if (text === "") continue;
+          viewHits.push({
+            id: view.id,
+            kind: "memory",
+            text,
+            score: 1,
+            tokenCount: Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4)),
+            authority: Math.max(
+              EvidenceAuthority.HistoricalSummary,
+              ...Object.values(view.facts).map((fact) => fact.authority),
+            ) as SearchHit["authority"],
+            namespace: view.namespace,
+            contentHash: contentHash(text),
+            metadata: {
+              derivedView: true,
+              viewKind: view.kind,
+              viewRevision: view.revision,
+              memberMemoryIds: view.memberMemoryIds,
+              state: view.state,
+              updatedAt: view.updatedAt,
+            },
+          });
+        }
+      }
+      stages["views"] = performance.now() - viewStarted;
       const guidance = knowledgeResult === undefined ? "" : extractGuidance(knowledgeResult.hits);
       const memoryStarted = performance.now();
       let memoryResult =
@@ -156,7 +242,8 @@ export class DefaultRetrievalService implements RetrievalService {
                   ...(query.memoryScopeContext === undefined
                     ? {}
                     : { scopeContext: query.memoryScopeContext }),
-                  limit: this.#candidateLimit,
+                  ...(query.temporalMode === undefined ? {} : { temporalMode: query.temporalMode }),
+                  limit: candidateLimit,
                 },
                 { signal, timeoutMs },
               )
@@ -182,9 +269,17 @@ export class DefaultRetrievalService implements RetrievalService {
               {
                 kind: "knowledge",
                 id: conflictingKnowledge.id,
-                observedAt: Date.now(),
+                observedAt: this.#clock.now(),
               },
-              { signal },
+              {
+                signal,
+                scopeContext: query.memoryScopeContext ?? {
+                  tenantId: "local",
+                  userId: "local",
+                  appId: "pi",
+                  agentId: "pi-mentis",
+                },
+              },
             );
             return record === undefined
               ? memoryHit
@@ -197,13 +292,69 @@ export class DefaultRetrievalService implements RetrievalService {
         memoryResult = { ...memoryResult, hits: verifiedHits };
         stages["knowledgeVerification"] = performance.now() - verificationStarted;
       }
-      const fused = reciprocalRankFusion([
+      const fusedBeforeGate = reciprocalRankFusion([
+        ...(viewHits.length === 0 ? [] : [{ weight: 1.2, hits: viewHits }]),
         ...(knowledgeResult === undefined ? [] : [{ weight: 1.1, hits: knowledgeResult.hits }]),
         ...(memoryResult === undefined ? [] : [{ weight: 1, hits: memoryResult.hits }]),
-      ])
-        .map((hit) => ({ ...hit, score: authorityAndFreshness(hit) }))
+      ]);
+      const scope = query.memoryScopeContext ?? {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+      };
+      const gateRuntime: GateRuntimeContext = {
+        scope,
+        ...(query.contextSnapshot === undefined ? {} : { snapshot: query.contextSnapshot }),
+        ...(query.gateContext ?? {}),
+        historical: query.temporalMode === "historical" || query.temporalMode === "all",
+      };
+      const rejectedIds: string[] = [];
+      const rejectionReasons: Record<string, readonly string[]> = {};
+      const fused = fusedBeforeGate
+        .flatMap((hit) => {
+          const decision = gateSearchHit(hit, gateRuntime);
+          if (
+            !decision.allowed ||
+            hit.authority < (activePolicy?.parameters.minimumAuthority ?? 0)
+          ) {
+            rejectedIds.push(hit.id);
+            rejectionReasons[hit.id] = decision.allowed
+              ? ["policy:minimum-authority"]
+              : decision.reasons;
+            return [];
+          }
+          return [
+            {
+              ...hit,
+              score:
+                hit.score *
+                Math.max(
+                  0,
+                  1 +
+                    (decision.scoreMultiplier - 1) * (activePolicy?.parameters.affinityWeight ?? 1),
+                ),
+              metadata: {
+                ...(hit.metadata ?? {}),
+                gate: {
+                  reasons: decision.reasons,
+                  uncheckedPremises: decision.uncheckedPremises,
+                  instructionSafe: decision.instructionSafe,
+                },
+              },
+            },
+          ];
+        })
+        .map((hit) => ({
+          ...hit,
+          score: authorityAndFreshness(
+            hit,
+            this.#clock.now(),
+            activePolicy?.parameters.freshnessWeight ?? 0.1,
+          ),
+        }))
         .sort((left, right) => right.score - left.score)
-        .slice(0, this.#candidateLimit);
+        .slice(0, candidateLimit);
       const rrfRanking = fused.map((hit) => hit.id);
       let ranked: readonly SearchHit[] = fused;
       if (this.#reranker === undefined && options.allowRerank !== false && fused.length > 1) {
@@ -225,15 +376,93 @@ export class DefaultRetrievalService implements RetrievalService {
         }
         stages["rerank"] = performance.now() - rerankStarted;
       }
-      const diversified = maximalMarginalRelevance(ranked, query.limit ?? 20);
+      const diversified = maximalMarginalRelevance(
+        ranked,
+        Math.min(
+          query.limit ?? activePolicy?.parameters.topK ?? 20,
+          activePolicy?.parameters.topK ?? query.limit ?? 20,
+        ),
+        activePolicy?.parameters.diversityLambda ?? 0.75,
+      );
       const rerankRanking = ranked.map((hit) => hit.id);
       const mmrRanking = diversified.map((hit) => hit.id);
+      const policyContextTokens = activePolicy?.parameters.contextTokens ?? 1_600;
+      const contextTokenLimit = Math.min(
+        query.contextTokens ?? policyContextTokens,
+        policyContextTokens,
+      );
       const context = selectContext(
         diversified,
-        query.contextTokens ?? 1_600,
-        Math.min(1_100, query.contextTokens ?? 1_600),
-        Math.min(500, query.contextTokens ?? 1_600),
+        contextTokenLimit,
+        Math.min(1_100, contextTokenLimit),
+        Math.min(500, contextTokenLimit),
       );
+      const traceId = options.traceId ?? `trace:${contentHash(`${query.text}:${started}`)}`;
+      options.onTrace?.(traceId);
+      const namespace = [scope.tenantId, scope.userId, scope.appId, scope.agentId]
+        .map(encodeURIComponent)
+        .join(":");
+      this.#effectiveness?.recordRetrieval({
+        namespace,
+        traceId,
+        query: query.text,
+        ...(query.contextSnapshot?.id === undefined
+          ? {}
+          : { contextSnapshotId: query.contextSnapshot.id }),
+        hits: context,
+        candidateHits: ranked,
+        rejectedIds,
+        rejectionReasons,
+        durationMs: performance.now() - started,
+        stages,
+        policyId: activePolicy?.id ?? "policy:default",
+      });
+      const shadow = this.#policy?.shadow();
+      if (shadow !== undefined) {
+        const shadowHits = fusedBeforeGate
+          .flatMap((hit) => {
+            const decision = gateSearchHit(hit, gateRuntime);
+            if (!decision.allowed || hit.authority < shadow.parameters.minimumAuthority) return [];
+            const adjusted = {
+              ...hit,
+              score:
+                hit.score *
+                Math.max(0, 1 + (decision.scoreMultiplier - 1) * shadow.parameters.affinityWeight),
+            };
+            return [
+              {
+                ...adjusted,
+                score: authorityAndFreshness(
+                  adjusted,
+                  this.#clock.now(),
+                  shadow.parameters.freshnessWeight,
+                ),
+              },
+            ];
+          })
+          .sort((left, right) => right.score - left.score);
+        const shadowSelected = maximalMarginalRelevance(
+          shadowHits,
+          shadow.parameters.topK,
+          shadow.parameters.diversityLambda,
+        );
+        this.#effectiveness?.recordRetrieval({
+          namespace,
+          traceId: `${traceId}:shadow:${shadow.id}`,
+          query: query.text,
+          ...(query.contextSnapshot?.id === undefined
+            ? {}
+            : { contextSnapshotId: query.contextSnapshot.id }),
+          hits: shadowSelected,
+          candidateHits: shadowHits,
+          rejectedIds: fusedBeforeGate
+            .filter((hit) => !shadowSelected.some((selected) => selected.id === hit.id))
+            .map((hit) => hit.id),
+          durationMs: performance.now() - started,
+          stages,
+          policyId: shadow.id,
+        });
+      }
       return {
         hits: context,
         diagnostics: {
@@ -243,9 +472,12 @@ export class DefaultRetrievalService implements RetrievalService {
           stages,
           traceOrder: [
             ...(this.#knowledge === undefined ? [] : ["knowledge"]),
+            ...(viewHits.length === 0 ? [] : ["state-views"]),
             ...(this.#memory === undefined ? [] : ["knowledge-guided-memory"]),
             ...(stages["knowledgeVerification"] === undefined ? [] : ["knowledge-verification"]),
-            "rrf-authority",
+            "rrf",
+            "applicability-gates",
+            "authority-freshness",
             ...(stages["rerank"] === undefined ? [] : ["rerank"]),
             "mmr",
             "context-budget",
@@ -255,12 +487,20 @@ export class DefaultRetrievalService implements RetrievalService {
             rerank: rerankRanking,
             mmr: mmrRanking,
           },
-          ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
+          traceId,
         },
       };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async recordOutcome(namespace: string, outcome: TaskOutcomeObservation): Promise<void> {
+    await this.#effectiveness?.recordOutcome(namespace, outcome);
+  }
+
+  async flush(): Promise<void> {
+    await this.#effectiveness?.flush();
   }
 
   async #rerank(

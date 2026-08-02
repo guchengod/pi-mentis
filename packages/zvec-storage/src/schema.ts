@@ -64,6 +64,8 @@ export const SCALAR_COLLECTIONS = [
   "episodes_v1",
   "events_v1",
   "artifacts_v1",
+  "mentis_state_v1",
+  "mentis_views_v1",
 ] as const;
 
 export type ScalarCollectionName = (typeof SCALAR_COLLECTIONS)[number];

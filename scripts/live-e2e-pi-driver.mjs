@@ -167,8 +167,10 @@ async function waitForKnowledgeJob(jobId) {
     if (typeof message === "string") {
       try {
         const job = JSON.parse(message);
-        if (job.state === "completed") return job;
-        if (job.state === "failed") throw new Error(`Knowledge job failed: ${job.error}`);
+        if (job.state === "succeeded") return job;
+        if (job.state === "failed" || job.state === "dead") {
+          throw new Error(`Knowledge job failed: ${job.error ?? job.failure ?? job.state}`);
+        }
       } catch (error) {
         if (error instanceof SyntaxError) {
           // The queue may not have written the job record yet.
@@ -177,7 +179,7 @@ async function waitForKnowledgeJob(jobId) {
         }
       }
     }
-    await delay(25);
+    await delay(100);
   }
   throw new Error(`Knowledge job ${jobId} did not complete within 120 seconds`);
 }
@@ -212,6 +214,14 @@ try {
     .sort();
   for (const [index, operation] of request.operations.entries()) {
     if (operation.kind === "tool") {
+      // Direct commit_memory calls in this harness represent an explicit user instruction.
+      // Emit the real Pi before_agent_start lifecycle first so provenance, authority, and
+      // evidence validation exercise the same path as an interactive Pi turn.
+      if (operation.name === "commit_memory" && typeof operation.parameters?.content === "string") {
+        await runner.emitBeforeAgentStart(operation.parameters.content, undefined, "", {
+          cwd: request.workspace,
+        });
+      }
       const definition = runner.getToolDefinition(operation.name);
       if (definition === undefined) throw new Error(`Pi tool ${operation.name} is not registered`);
       const toolCallId = `${request.runId}-tool-${index}`;

@@ -55,6 +55,32 @@ type Services = {
   reranker: unknown;
 };
 
+const PROVIDER_DISPOSE_TIMEOUT_MS = 5_000;
+
+async function disposeWithinTimeout<T>(provider: CapabilityProvider<T>, value: T): Promise<void> {
+  if (provider.dispose === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      provider.dispose(value),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `Provider ${provider.id} disposal exceeded ${PROVIDER_DISPOSE_TIMEOUT_MS}ms`,
+              ),
+            ),
+          PROVIDER_DISPOSE_TIMEOUT_MS,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 interface ProviderEntry<T> {
   readonly sequence: number;
   readonly kind: CapabilityKind;
@@ -157,19 +183,30 @@ class Runtime implements PersistentIntelligenceRuntime {
   }
 
   async dispose(): Promise<void> {
-    for (const entries of this.#entries.values()) {
+    for (const kind of ["retrieval", "memory", "knowledge", "reranker", "embedding"] as const) {
+      const entries = this.#entries.get(kind) ?? [];
       for (const entry of entries) {
         if (entry.state !== "active" || entry.value === undefined) continue;
         entry.state = "disposing";
         this.#emit();
-        await entry.provider.dispose?.(entry.value);
-        entry.state = "declared";
+        try {
+          await disposeWithinTimeout(entry.provider, entry.value);
+          entry.state = "disposed";
+          delete entry.error;
+        } catch (error: unknown) {
+          entry.state = "failed";
+          entry.error = error instanceof Error ? error.message : String(error);
+        }
         entry.value = undefined;
-        delete entry.error;
       }
     }
     for (const kind of Object.keys(this.#services) as CapabilityKind[]) {
       delete this.#services[kind];
+    }
+    for (const entries of this.#entries.values()) {
+      for (const entry of entries) {
+        if (entry.state === "declared" || entry.state === "shadowed") entry.state = "disposed";
+      }
     }
     this.#ready = false;
     this.#readyPromise = undefined;
@@ -206,15 +243,22 @@ class Runtime implements PersistentIntelligenceRuntime {
       providerId: entry.provider.id,
       kind: entry.kind,
       dispose: async () => {
+        let failure: unknown;
         if (entry.state === "active" && entry.value !== undefined) {
           entry.state = "disposing";
           this.#emit();
-          await entry.provider.dispose?.(entry.value);
-          delete this.#services[entry.kind];
+          try {
+            await disposeWithinTimeout(entry.provider, entry.value);
+          } catch (error: unknown) {
+            failure = error;
+          } finally {
+            delete this.#services[entry.kind];
+          }
         }
         entry.state = "disposed";
         entry.value = undefined;
         this.#emit();
+        if (failure !== undefined) throw failure;
       },
     };
   }

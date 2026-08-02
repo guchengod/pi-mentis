@@ -34,64 +34,72 @@ temporal, gate, view, and evaluation algorithms are shared.
 Evidence is immutable ground truth, atomic memory is a reusable claim, and a state view is derived.
 No view or summary may become the only source of truth.
 
-## P8 current implementation
+## P8 implementation
 
 Implemented in the production extension path:
 
 - Faceted immutable `MentisContextSnapshot`: identity, conversation, optional workspace, situation,
   optional environment, and capability.
-- Synchronous fingerprint cache with snapshot reuse and monotonically increasing revisions.
+- Persistent fingerprint snapshots, latest pointers, cache reuse, and monotonically increasing
+  revisions across restart.
 - Pi-native leaf/parent provenance; Branch and Compaction remain Pi-owned.
-- Optional repository/project identity. The implemented fast resolver uses explicit ID, normalized
-  origin remote, manifest identity, then canonical repository path. A non-code directory produces no
-  repository or project identity.
+- Optional repository/project identity using explicit ID, normalized origin remote, Git-history
+  signature, manifest signature, then canonical path. Git worktrees and packed refs are supported; a
+  non-code directory produces no repository or project identity.
 - Remote normalization across SSH, SCP-like, and HTTPS Git URLs without hashing repository contents.
 - Interaction-mode inference for coding, research, planning, conversation, and operation.
 - Pi 0.83 session-scoped models are included in the capability fingerprint, so model-scope changes
   create a new context revision.
-- Topic resolution contracts with explicit/active-topic reuse, calibrated vector thresholds,
-  ambiguous pending state, and no per-turn topic creation.
+- Persisted Topic candidates and active topics with lexical continuation, calibrated score
+  distributions, explicit-topic evidence, ambiguous pending state, and no automatic activation from
+  a single weak turn.
+- Persisted Task identity with continuation reuse and active/completed/failed/aborted lifecycle.
 - Context affinity with strict tenant/user/app/agent isolation, project/repository mismatch rejection,
   and denominator-free optional facets so general memories are not penalized for missing code fields.
 - Denormalized context on memories and episodes: snapshot, repository, project, workspace, task,
   topic, environment fingerprint, capability snapshot, session, branch, and run.
 - Dynamic recall scopes: repository/project/task/topic when present, then user fallback.
+- Environment and toolchain facets include OS, architecture, shell, Node version, package manager,
+  language, branch, commit, manifests, active tools, tool snippets, Skills, scoped models, and a hash
+  of Pi's assembled prompt resources.
+- Capability scans are stale-while-revalidate: an old valid snapshot remains active if a refresh
+  fails, and removed capabilities are marked inactive.
 
-P8 is not yet complete. Remaining work is persistent snapshot storage in StateStore, a stable
-repository-signature strategy between manifest and path fallbacks, background Git and capability
-refresh with stale-while-revalidate, persisted Topic candidates plus calibrated embedding
-distributions, task identity, full environment/toolchain probing, and measured P95 budgets. These
-are not claimed by the in-memory resolver.
+## P9–P13 implementation
 
-## P9–P13 implementation contract
+P9 uses append-only atomic claims, deterministic `factKey`, `single`/`set`/`ordered`/`event`
+cardinality, current/historical/all modes, revisioned heads, deterministic
+reinforce/supersede/coexist/historical/conflict/retract decisions, branch-local hypotheses,
+idempotency state, relationship records, and durable Saga repair. A claim is written before its head;
+an out-of-order historical single claim never enters the current head.
 
-P9 adds append-only temporal claims, deterministic `factKey`, cardinality (`single`, `set`,
-`ordered`, `event`), temporal modes, materialized heads, reinforce/supersede/coexist/conflict/retract
-decisions, branch-local hypotheses, and Saga repair. It must write the new claim before advancing a
-head.
+P10 applies security, domain/context affinity, temporal, branch, project, environment, trust,
+evidence-integrity, premise, and instruction-safety gates before Rerank or model exposure. Storage
+filters are backed by an application-layer identity check. Exact reads, mutations, knowledge removal,
+and document inspection use the same boundary. External/model/knowledge content remains data and
+cannot become an instruction merely because it is relevant.
 
-P10 applies a chain of gates: security scope, domain compatibility, P8 affinity, temporal validity,
-environment applicability, trust, premises, instruction safety, and diversity/budget. Retrieval
-relevance alone never grants instruction authority.
+P11 maintains Zvec-backed project, user, topic, task, and capability views through durable View-delta
+jobs and CAS retry. Every field retains current and historical atomic memory IDs. Stale reads return
+immediately and trigger local background revalidation; failures preserve the old View with failed or
+stale state.
 
-P11 creates Zvec-backed materialized project, user, topic, task, and capability views. Every field
-must retain atomic-memory IDs. View deltas reuse the existing job store and all updates run in the
-background.
+P12 appends retrieval traces to a bounded in-memory buffer and flushes batches outside the answer
+path. It distinguishes exposure from actual tool-argument use, execution from verification, and
+explicit confirmation from correction. Per-memory Beta utility uses priors and gives exposure-only
+results fractional credit. Replay features contain hashes rather than raw query text.
 
-P12 records sampled retrieval traces, observable usage signals, task outcomes, and Bayesian-smoothed
-utility. It references Tencent token accounting rather than duplicating cost collection.
-
-P13 optimizes only bounded retrieval parameters through offline replay, constrained coordinate
-descent, Shadow, Canary, EWMA drift detection, and rollback. Security isolation, instruction safety,
-evidence integrity, and deletion rules are invariants and are never adaptive.
+P13 protects security scope, instruction safety, evidence integrity, deletion rules, and the minimum
+trust floor. It uses deterministic local replay, changes one bounded coordinate per candidate,
+retires losing drafts, runs Shadow without remote Rerank, buckets Canary requests deterministically,
+persists EWMA/cooldown state, and rolls back degraded active policies to a durable fallback.
 
 ## Implementation order and release gates
 
-1. Finish P8 persistence, topic/task identity, background refresh, and latency measurements.
-2. Implement P9 temporal claims, heads, transitions, and repair.
-3. Implement P10 gates and query-time scalar prefilters.
-4. Release P8–P10 together only after code and non-code recall cases pass.
-5. Add P11 views, then P12 evaluation, then P13 adaptive policy.
+Implementation is complete in the production extension path. Release remains gated on the separate
+functional, fault-injection, restart, security, live-provider, and performance suites. Those suites
+must establish the target incremental P95 foreground cost below 20 ms; implementation status alone
+does not claim the measured budget.
 
 Target incremental P95 foreground cost for P8–P13 combined is below 20 ms. Deep capability scans,
 semantic conflict analysis, LLM temporal classification, view rebuilding, effectiveness aggregation,

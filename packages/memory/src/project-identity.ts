@@ -12,6 +12,12 @@ export interface PiProjectIdentity {
   readonly manifestName?: string;
   readonly manifestTypes: readonly string[];
   readonly manifestHash?: string;
+  readonly repositorySignature?: string;
+  readonly packageManager?: string;
+  readonly packageManagerVersion?: string;
+  readonly language?: string;
+  readonly branchName?: string;
+  readonly commitId?: string;
 }
 
 async function exists(target: string): Promise<boolean> {
@@ -49,11 +55,28 @@ async function optionalText(filename: string): Promise<string | undefined> {
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
-      (error as { code?: unknown }).code === "ENOENT"
+      ["ENOENT", "ENOTDIR"].includes(String((error as { code?: unknown }).code))
     ) {
       return undefined;
     }
     throw error;
+  }
+}
+
+async function resolveGitDirectory(
+  repositoryRoot: string | undefined,
+): Promise<string | undefined> {
+  if (repositoryRoot === undefined) return undefined;
+  const marker = path.join(repositoryRoot, ".git");
+  try {
+    const metadata = await stat(marker);
+    if (metadata.isDirectory()) return marker;
+    if (!metadata.isFile()) return undefined;
+    const pointer = await readFile(marker, "utf8");
+    const gitdir = pointer.match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
+    return gitdir === undefined ? undefined : path.resolve(repositoryRoot, gitdir);
+  } catch {
+    return undefined;
   }
 }
 
@@ -88,6 +111,16 @@ function packageName(packageJson: string | undefined): string | undefined {
   }
 }
 
+function packageManagerDeclaration(packageJson: string | undefined): string | undefined {
+  if (packageJson === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(packageJson) as Record<string, unknown>;
+    return typeof parsed["packageManager"] === "string" ? parsed["packageManager"] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function goModule(goMod: string | undefined): string | undefined {
   return goMod?.match(/^module\s+(.+)$/m)?.[1]?.trim();
 }
@@ -98,14 +131,58 @@ export async function resolvePiProjectIdentity(
 ): Promise<PiProjectIdentity> {
   const workspacePath = path.resolve(cwd);
   const repositoryRoot = await findRepositoryRoot(workspacePath);
+  const gitDirectory = await resolveGitDirectory(repositoryRoot);
+  const commonDirectoryPointer =
+    gitDirectory === undefined
+      ? undefined
+      : (await optionalText(path.join(gitDirectory, "commondir")))?.trim();
+  const gitCommonDirectory =
+    gitDirectory === undefined
+      ? undefined
+      : commonDirectoryPointer === undefined
+        ? gitDirectory
+        : path.resolve(gitDirectory, commonDirectoryPointer);
+  const head =
+    gitDirectory === undefined ? undefined : await optionalText(path.join(gitDirectory, "HEAD"));
+  const headRef = head?.match(/^ref:\s*(.+)$/)?.[1]?.trim();
+  const branchName = headRef?.replace(/^refs\/heads\//, "");
+  const looseCommitId =
+    headRef === undefined
+      ? head?.trim()
+      : gitDirectory === undefined
+        ? undefined
+        : (await optionalText(path.join(gitDirectory, headRef)))?.trim();
+  const packedRefs =
+    looseCommitId !== undefined || gitDirectory === undefined
+      ? undefined
+      : await optionalText(path.join(gitDirectory, "packed-refs"));
+  const commitId =
+    looseCommitId ??
+    (headRef === undefined
+      ? undefined
+      : packedRefs
+          ?.split("\n")
+          .find((line) => line.endsWith(` ${headRef}`))
+          ?.split(" ")[0]);
   const manifestRoot = repositoryRoot ?? workspacePath;
-  const [gitConfig, packageJson, goMod] = await Promise.all([
-    repositoryRoot === undefined
-      ? Promise.resolve(undefined)
-      : optionalText(path.join(repositoryRoot, ".git", "config")),
-    optionalText(path.join(manifestRoot, "package.json")),
-    optionalText(path.join(manifestRoot, "go.mod")),
-  ]);
+  const [gitConfig, gitLog, packageJson, goMod, pyproject, cargoToml, lockfiles] =
+    await Promise.all([
+      gitCommonDirectory === undefined
+        ? Promise.resolve(undefined)
+        : optionalText(path.join(gitCommonDirectory, "config")),
+      gitCommonDirectory === undefined
+        ? Promise.resolve(undefined)
+        : optionalText(path.join(gitCommonDirectory, "logs", "HEAD")),
+      optionalText(path.join(manifestRoot, "package.json")),
+      optionalText(path.join(manifestRoot, "go.mod")),
+      optionalText(path.join(manifestRoot, "pyproject.toml")),
+      optionalText(path.join(manifestRoot, "Cargo.toml")),
+      Promise.all(
+        ["pnpm-lock.yaml", "yarn.lock", "package-lock.json", "bun.lock", "bun.lockb"].map(
+          async (name) => ((await exists(path.join(manifestRoot, name))) ? name : undefined),
+        ),
+      ),
+    ]);
   const remote = gitRemote(gitConfig);
   const manifestName = packageName(packageJson) ?? goModule(goMod);
   const manifests = [
@@ -113,15 +190,29 @@ export async function resolvePiProjectIdentity(
       ? []
       : [{ type: "package.json", name: packageName(packageJson) ?? "" }]),
     ...(goMod === undefined ? [] : [{ type: "go.mod", name: goModule(goMod) ?? "" }]),
+    ...(pyproject === undefined ? [] : [{ type: "pyproject.toml", name: "" }]),
+    ...(cargoToml === undefined ? [] : [{ type: "Cargo.toml", name: "" }]),
+    ...lockfiles
+      .filter((name): name is string => name !== undefined)
+      .map((name) => ({ type: name, name: "" })),
   ];
   const manifestHash = manifests.length === 0 ? undefined : contentHash(JSON.stringify(manifests));
+  const firstCommit = gitLog?.split("\n").find(Boolean)?.trim().split(/\s+/)[1];
+  const repositorySignature =
+    remote !== undefined
+      ? `remote:${remote}`
+      : firstCommit !== undefined && !/^0+$/.test(firstCommit)
+        ? `history:${firstCommit}`
+        : manifestHash === undefined
+          ? undefined
+          : `manifest-path:${manifestHash}:${path.basename(repositoryRoot ?? workspacePath)}`;
   const repositoryId =
     explicitProjectId !== undefined
       ? `repo:explicit:${stableHash("explicit-repository:v1", explicitProjectId)}`
       : remote !== undefined
         ? `repo:remote:${stableHash("remote-repository:v1", remote)}`
-        : manifests.length > 0
-          ? `repo:manifest:${stableHash("manifest-repository:v1", JSON.stringify(manifests))}`
+        : repositorySignature !== undefined
+          ? `repo:signature:${stableHash("repository-signature:v1", repositorySignature)}`
           : repositoryRoot === undefined
             ? undefined
             : `repo:path:${stableHash("path-repository:v1", repositoryRoot)}`;
@@ -131,6 +222,33 @@ export async function resolvePiProjectIdentity(
       : repositoryId === undefined
         ? undefined
         : `project:${stableHash("pi-project:v1", repositoryId, manifestName ?? path.basename(manifestRoot))}`;
+  const packageManager = lockfiles.includes("pnpm-lock.yaml")
+    ? "pnpm"
+    : lockfiles.includes("yarn.lock")
+      ? "yarn"
+      : lockfiles.includes("bun.lock") || lockfiles.includes("bun.lockb")
+        ? "bun"
+        : lockfiles.includes("package-lock.json")
+          ? "npm"
+          : goMod !== undefined
+            ? "go"
+            : cargoToml !== undefined
+              ? "cargo"
+              : pyproject !== undefined
+                ? "python"
+                : undefined;
+  const declaredPackageManager = packageManagerDeclaration(packageJson);
+  const packageManagerVersion = declaredPackageManager?.split("@").slice(1).join("@") || undefined;
+  const language =
+    packageJson !== undefined
+      ? "javascript/typescript"
+      : goMod !== undefined
+        ? "go"
+        : cargoToml !== undefined
+          ? "rust"
+          : pyproject !== undefined
+            ? "python"
+            : undefined;
   return {
     workspacePath,
     ...(repositoryRoot === undefined ? {} : { repositoryRoot }),
@@ -140,5 +258,11 @@ export async function resolvePiProjectIdentity(
     ...(manifestName === undefined ? {} : { manifestName }),
     manifestTypes: manifests.map((manifest) => manifest.type),
     ...(manifestHash === undefined ? {} : { manifestHash }),
+    ...(repositorySignature === undefined ? {} : { repositorySignature }),
+    ...(packageManager === undefined ? {} : { packageManager }),
+    ...(packageManagerVersion === undefined ? {} : { packageManagerVersion }),
+    ...(language === undefined ? {} : { language }),
+    ...(branchName === undefined ? {} : { branchName }),
+    ...(commitId === undefined || commitId === "" ? {} : { commitId }),
   };
 }

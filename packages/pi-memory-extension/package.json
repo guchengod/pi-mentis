@@ -41,7 +41,7 @@
     ]
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox",
+    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json"
   },

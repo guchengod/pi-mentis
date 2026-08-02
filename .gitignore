@@ -4,8 +4,12 @@ coverage/
 .turbo/
 .pi-mentis/
 .artifacts/
+.stryker-tmp/
 *.tgz
 *.log
 .DS_Store
 benchmark-results/*.json
 !benchmark-results/.gitkeep
+
+# IDE
+.idea/

@@ -41,6 +41,11 @@ The memory-only product exposes `commit_memory` and `search_memory`. The default
 integrated product also exposes only the memory pair; its search is knowledge-first
 and its automatic recall inserts evidence as explicitly untrusted data.
 
+The integrated and memory products include persistent faceted context, temporal truth, strict
+retrieval gates, provenance-backed state views, non-blocking effectiveness attribution, and bounded
+Shadow/Canary adaptive retrieval. Inspect them with `/kb status` (integrated) or `/mentis status`
+(memory-only).
+
 ## Development and verification
 
 ```bash

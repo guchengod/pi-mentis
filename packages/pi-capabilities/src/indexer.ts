@@ -1,4 +1,10 @@
-import { EvidenceAuthority, contentHash, type OperationOptions } from "@pi-mentis/pi-mentis-core";
+import {
+  EvidenceAuthority,
+  contentHash,
+  systemClock,
+  type Clock,
+  type OperationOptions,
+} from "@pi-mentis/pi-mentis-core";
 import {
   embeddingSpaceId,
   type EmbeddingProvider,
@@ -19,6 +25,7 @@ export interface CapabilityIndexerOptions {
   readonly embedding: EmbeddingProvider;
   readonly embeddingSpace: EmbeddingSpaceIdentity;
   readonly dimensions: number;
+  readonly clock?: Clock;
 }
 
 export class CapabilityIndexer {
@@ -26,12 +33,14 @@ export class CapabilityIndexer {
   readonly #embedding: EmbeddingProvider;
   readonly #embeddingSpaceId: string;
   readonly #dimensions: number;
+  readonly #clock: Clock;
 
   constructor(options: CapabilityIndexerOptions) {
     this.#store = options.store;
     this.#embedding = options.embedding;
     this.#embeddingSpaceId = embeddingSpaceId(options.embeddingSpace);
     this.#dimensions = options.dimensions;
+    this.#clock = options.clock ?? systemClock;
   }
 
   async sync(
@@ -44,6 +53,48 @@ export class CapabilityIndexer {
       fingerprintId,
     );
     if (existing?.["fingerprint"] === fingerprint) return { indexed: 0, unchanged: true };
+    const previous = await this.#store.filterVectors(
+      "capability",
+      'namespace = "pi:0.83.0" AND status = "active"',
+      10_000,
+    );
+    const activeIds = new Set(records.map((record) => record.id));
+    const removedIds = previous.map((document) => document.id).filter((id) => !activeIds.has(id));
+    const removedVectors: StoredVectorRecord[] = [];
+    for (let offset = 0; offset < removedIds.length; offset += 512) {
+      const ids = removedIds.slice(offset, offset + 512);
+      const stored = await this.#store.fetchVectors("capability", ids);
+      const now = this.#clock.now();
+      for (const [id, document] of stored) {
+        const vector = document.vectors["embedding"];
+        const payload = document.fields["payload"];
+        if (
+          (!(vector instanceof Float32Array) && !Array.isArray(vector)) ||
+          typeof payload !== "string"
+        ) {
+          continue;
+        }
+        const decoded = JSON.parse(payload) as Readonly<Record<string, unknown>>;
+        const text = `${String(decoded["qualifiedName"] ?? id)}\n${String(decoded["description"] ?? "")}`;
+        removedVectors.push({
+          id,
+          kind: "capability",
+          namespace: "pi:0.83.0",
+          status: "removed",
+          payload: { ...decoded, installed: false, removedAt: now, updatedAt: now },
+          searchableText: text,
+          contentHash: contentHash(text),
+          sourceId: String(decoded["packageName"] ?? "unknown"),
+          documentId: id,
+          authority: EvidenceAuthority.PiInstalledCapability,
+          tokenCount: Math.max(1, Buffer.byteLength(text, "utf8")),
+          revision: Number(decoded["revision"] ?? 1) + 1,
+          embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+          createdAt: Number(decoded["createdAt"] ?? now),
+          updatedAt: now,
+        });
+      }
+    }
     const vectors: StoredVectorRecord[] = [];
     for (let offset = 0; offset < records.length; offset += 32) {
       const batch = records.slice(offset, offset + 32);
@@ -66,7 +117,7 @@ export class CapabilityIndexer {
         const vector = response.vectors[index];
         if (vector === undefined) throw new Error("Capability Embedding batch is incomplete");
         const text = `${record.qualifiedName}\n${record.description}`;
-        const now = Date.now();
+        const now = this.#clock.now();
         vectors.push({
           id: record.id,
           kind: "capability",
@@ -95,7 +146,10 @@ export class CapabilityIndexer {
     for (let offset = 0; offset < vectors.length; offset += 512) {
       await this.#store.upsertVectors("capability", vectors.slice(offset, offset + 512));
     }
-    const now = Date.now();
+    for (let offset = 0; offset < removedVectors.length; offset += 512) {
+      await this.#store.upsertVectors("capability", removedVectors.slice(offset, offset + 512));
+    }
+    const now = this.#clock.now();
     const fingerprintRecord: StoredRecord = {
       id: fingerprintId,
       kind: "capability-fingerprint",

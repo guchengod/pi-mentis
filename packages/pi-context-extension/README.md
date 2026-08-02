@@ -111,10 +111,18 @@ Pi Mentis 从 **Pi 启动目录**读取 `.pi-mentis/config.json`。所有字段�
     }
   },
   "performance": {
+    "queue": { "maxQueuedTaskAgeMs": 1800000 },
     "resources": {
       "maxWebPages": 1000,
       "maxWebBytes": 536870912
     }
+  },
+  "intelligence": {
+    "context": { "persistSnapshots": true, "capabilityMaxAgeMs": 60000 },
+    "temporal": { "enabled": true, "repairOnStartup": true },
+    "views": { "enabled": true, "ttlMs": 300000 },
+    "effectiveness": { "enabled": true, "flushIntervalMs": 250, "maxBatch": 64 },
+    "adaptivePolicy": { "enabled": true, "cooldownMs": 1800000 }
   },
   "storage": {
     "rootDir": "/Users/your-name/.pi/agent/pi-mentis/zvec"
@@ -140,6 +148,34 @@ pi
 ```
 
 正常状态应包含 `ready: true`，并显示 embedding、reranker、knowledge、memory、retrieval 五个 active Provider。
+同一状态输出还包含当前 Context revision、Topic/Task、相关 State Views、Effectiveness Buffer、
+Outcome 汇总以及 Active/Shadow/Canary/Fallback Policy。
+
+## 记忆如何保持“当前事实”
+
+Pi Mentis 不把所有相似文本都当成同一层级的永真信息：
+
+- `single` 事实只有一个当前 Head；较新的高可信事实会 supersede 旧事实。
+- `set`、`ordered` 和 `event` 可以保留多个值或事件。
+- 迟到的旧事实只进入 historical，不会覆盖当前 Head。
+- 无法安全判断时进入 conflict，不猜测一个胜者。
+- 实验 Branch 中的 hypothesis 不会修改主 Branch；放弃 Branch 后会被拒绝。
+- Commit 使用可选 `idempotencyKey` 防止重试生成重复 Claim。
+
+`search_memory` 的 `temporalMode` 可选择 `current`、`historical` 或 `all`。默认只返回当前可用事实。
+
+## 安全 Gate、State View 与自适应检索
+
+候选必须依次通过 tenant/user/app/agent、项目、时间、Branch、环境、证据、前提和指令安全检查。
+网页、知识库、工具输出和模型推断可以作为数据被召回，但不会因此升级为用户指令。
+`procedural` 记忆在未显式提供 applicability 时会绑定当前仓库、运行时和包管理器上下文。
+
+Project/User/Topic/Task/Capability View 是可丢弃的派生加速层；每个字段保留 Atomic Memory ID，
+不能创造新事实。过期 View 会立即返回旧值并在后台校验，失败不会阻塞 Atomic Memory 搜索。
+
+检索 Trace 先写入有界内存 Buffer，再批量落盘。成功归因区分“展示过”和“实际在工具参数中使用”；
+执行成功、验证通过和用户确认分别记录。Adaptive Policy 只优化有界检索参数，经过 Offline Replay、
+Shadow、Canary 和 EWMA 监控；安全隔离、证据完整性、指令安全和删除规则永远不可自适应修改。
 
 ## 长期记忆的使用
 
@@ -165,6 +201,17 @@ pi
 ```text
 请调用 search_memory，搜索我关于 Node.js 包管理器的长期偏好。
 ```
+
+大型 Tool Result 会返回 `artifactId`。可继续使用同一个工具按 UTF-8 安全的字节范围读取，
+响应中的 `nextOffset` 可直接用于下一页：
+
+```text
+请调用 search_memory，artifactId 为 <id>，offset 为 0，length 为 32768。
+```
+
+也可以同时提供 Memory `id` 和 `query`，在该记忆的 Event/Artifact 证据链中搜索；返回匹配
+片段与 `artifactOffset`，再按范围精确读取。Artifact 读取会再次校验 tenant/user/app/agent，
+不会仅凭 ID 跨身份返回内容。
 
 自动召回默认开启。相关证据会在模型回复前以明确标记的“不受信任证据”进入上下文，不能覆盖当前用户指令。
 
@@ -227,18 +274,22 @@ pi
 
 ## `/kb` 命令参考
 
-| 命令                        | 说明                                 |
-| --------------------------- | ------------------------------------ |
-| `/kb status`                | 查看运行时和 Provider 状态           |
-| `/kb models`                | 查看当前生效的 Embedding/Rerank 模型 |
-| `/kb add <path-or-url>`     | 添加文件、目录或 URL                 |
-| `/kb sync <path-or-url>`    | 增量同步来源                         |
-| `/kb rebuild <path-or-url>` | 重新解析并构建来源                   |
-| `/kb jobs <job-id>`         | 查看后台任务结果或错误               |
-| `/kb cancel <job-id>`       | 取消尚未完成的任务                   |
-| `/kb inspect <document-id>` | 查看文档及其 chunks                  |
-| `/kb remove <source-id>`    | 删除指定来源                         |
-| `/kb sources`               | 查看知识库能力和支持范围             |
+| 命令                        | 说明                                      |
+| --------------------------- | ----------------------------------------- |
+| `/kb status`                | 查看 Provider 与 P8–P13 Intelligence 状态 |
+| `/kb models`                | 查看当前生效的 Embedding/Rerank 模型      |
+| `/kb add <path-or-url>`     | 添加文件、目录或 URL                      |
+| `/kb sync <path-or-url>`    | 增量同步来源                              |
+| `/kb rebuild <path-or-url>` | 重新解析并构建来源                        |
+| `/kb jobs <job-id>`         | 查看后台任务结果或错误                    |
+| `/kb cancel <job-id>`       | 取消尚未完成的任务                        |
+| `/kb inspect <document-id>` | 查看文档及其 chunks                       |
+| `/kb remove <source-id>`    | 删除指定来源                              |
+| `/kb sources`               | 查看知识库能力和支持范围                  |
+
+知识导入和 Embedding 迁移任务使用持久化的
+`queued/leased/running/succeeded/failed/dead` 生命周期。命令会在“queued”响应前写入 Zvec；进程
+中断后由下一次启动接管未完成 Lease，幂等 Source/Chunk/Generation ID 防止重试产生重复效果。
 
 ## 检索行为
 

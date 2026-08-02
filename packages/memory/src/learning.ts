@@ -6,6 +6,7 @@ import type {
   OutcomeStatus,
   PiEpisode,
   PiEvent,
+  PiScopeContext,
 } from "./types.js";
 
 type CandidateInput = Omit<
@@ -51,6 +52,7 @@ export function deriveExperienceObservation(
   events: readonly PiEvent[],
   outcome: OutcomeStatus,
   environment: Readonly<Record<string, string>>,
+  scopeContext?: PiScopeContext,
 ): DerivedExperienceObservation | undefined {
   const lastSteering =
     [...events].reverse().find((event) => event.kind === "steering")?.sequence ?? 0;
@@ -73,6 +75,9 @@ export function deriveExperienceObservation(
   return {
     candidate: {
       goal: episode.goal,
+      ...(scopeContext === undefined ? {} : { scopeContext }),
+      branchClaimState:
+        episode.branchId === undefined || episode.branchId === "root" ? "global" : "hypothesis",
       environment,
       prerequisites: [],
       steps,

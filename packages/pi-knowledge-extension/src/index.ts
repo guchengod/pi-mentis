@@ -48,6 +48,15 @@ let scheduler: BackgroundScheduler;
 let storeHandle: SharedZvecStoreHandle | undefined;
 let store: ZvecStore | undefined;
 
+function localKnowledgeScope() {
+  return {
+    tenantId: "local",
+    userId: "local",
+    appId: "pi",
+    agentId: "pi-mentis-knowledge",
+  } as const;
+}
+
 function embeddingSpace(current: PiMentisConfig): EmbeddingSpaceIdentity {
   return {
     providerId: "siliconflow",
@@ -98,6 +107,12 @@ function registerKnowledgeTools(
   service: KnowledgeService,
   retrieval: RetrievalService | undefined,
   manualSearchTimeoutMs: number,
+  scopeContext: () => {
+    readonly tenantId: string;
+    readonly userId: string;
+    readonly appId: string;
+    readonly agentId: string;
+  },
 ): void {
   pi.registerTool({
     name: "commit_knowledge",
@@ -123,6 +138,7 @@ function registerKnowledgeTools(
         {
           source: sourceInput(parameters.kind, parameters.value),
           ...(parameters.namespace === undefined ? {} : { namespace: parameters.namespace }),
+          scopeContext: scopeContext(),
         },
         { ...(signal === undefined ? {} : { signal }), priority: "user" },
       );
@@ -142,10 +158,12 @@ function registerKnowledgeTools(
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
     }),
     async execute(_toolCallId, parameters, signal) {
+      const securityScope = scopeContext();
       const query = {
         text: parameters.query,
         ...(parameters.namespace === undefined ? {} : { namespace: parameters.namespace }),
         ...(parameters.limit === undefined ? {} : { limit: parameters.limit }),
+        scopeContext: securityScope,
       };
       const result =
         retrieval === undefined
@@ -153,11 +171,14 @@ function registerKnowledgeTools(
               ...(signal === undefined ? {} : { signal }),
               timeoutMs: manualSearchTimeoutMs,
             })
-          : await retrieval.search(query, {
-              ...(signal === undefined ? {} : { signal }),
-              timeoutMs: manualSearchTimeoutMs,
-              allowRerank: true,
-            });
+          : await retrieval.search(
+              { ...query, memoryScopeContext: securityScope },
+              {
+                ...(signal === undefined ? {} : { signal }),
+                timeoutMs: manualSearchTimeoutMs,
+                allowRerank: true,
+              },
+            );
       return {
         content: [{ type: "text", text: formatPiToolJson(result) }],
         details: result.diagnostics,
@@ -184,7 +205,13 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           return;
         }
         const source = await knowledgeCommandSource(target);
-        const receipt = await knowledge.enqueueIngest({ source }, { priority: "user" });
+        const receipt = await knowledge.enqueueIngest(
+          {
+            source,
+            scopeContext: localKnowledgeScope(),
+          },
+          { priority: "user" },
+        );
         notifyWhenUiAvailable(context, `Knowledge job ${receipt.jobId} queued`, "info");
         return;
       }
@@ -194,7 +221,7 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           notifyWhenUiAvailable(context, "Usage: /kb remove <source-id>", "error");
           return;
         }
-        const result = await knowledge.remove({ sourceId });
+        const result = await knowledge.remove({ sourceId, scopeContext: localKnowledgeScope() });
         notifyWhenUiAvailable(context, `Removed ${result.removedChunks} chunks`, "info");
         return;
       }
@@ -204,7 +231,10 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           notifyWhenUiAvailable(context, "Usage: /kb inspect <document-id>", "error");
           return;
         }
-        const result = await knowledge.inspect({ documentId });
+        const result = await knowledge.inspect({
+          documentId,
+          scopeContext: localKnowledgeScope(),
+        });
         notifyWhenUiAvailable(
           context,
           result === undefined ? "Document not found" : formatPiToolJson(result),
@@ -368,14 +398,22 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
   let registered = false;
   pi.on("session_start", async (_event, context) => {
     await runtime.ready(context.signal);
-    if (registered || runtime.getMemory() !== undefined) return;
     const knowledge = runtime.getKnowledge<KnowledgeService>();
     if (knowledge === undefined) return;
+    await knowledge.recoverJobs(context.signal === undefined ? {} : { signal: context.signal });
+    await store?.collectSupersededGenerations(config.storage.generationRetentionMs);
+    if (registered || runtime.getMemory() !== undefined) return;
     registerKnowledgeTools(
       pi,
       knowledge,
       runtime.getRetrieval<RetrievalService>(),
       config.retrieval.manualSearchTimeoutMs,
+      () => ({
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis-knowledge",
+      }),
     );
     registerKnowledgeCommand(pi, runtime);
     registered = true;

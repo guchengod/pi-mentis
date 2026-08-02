@@ -9,12 +9,15 @@ import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+import prettier from "prettier";
+
 const root = path.resolve(import.meta.dirname, "..");
 const suite = process.argv[2] ?? "all";
 const allowedSuites = new Set([
   "all",
   "inference",
   "knowledge",
+  "webbook",
   "memory",
   "combined",
   "pi",
@@ -1355,6 +1358,66 @@ async function runKnowledge() {
   });
 }
 
+async function runWebBook() {
+  const started = performance.now();
+  const namespace = `e2e:${runId}:pi-book`;
+  const response = await runPi("@galvinsan/pi-mentis-knowledge", [
+    {
+      kind: "tool",
+      name: "commit_knowledge",
+      parameters: {
+        kind: "url",
+        value: "https://zhanghandong.github.io/pi-book/",
+        namespace,
+      },
+      waitForKnowledgeJob: true,
+    },
+    {
+      kind: "tool",
+      name: "search_knowledge",
+      parameters: {
+        query: "会话树为什么比聊天记录更适合作为数据模型？",
+        namespace,
+        limit: 20,
+      },
+    },
+    {
+      kind: "tool",
+      name: "search_knowledge",
+      parameters: {
+        query: "第 32 章：这套架构的适用边界，复杂多 agent 编排和极低延迟嵌入式场景是否适合？",
+        namespace,
+        limit: 20,
+      },
+    },
+  ]);
+  const job = response.results[0].job;
+  const middleChapter = searchPayload(response.results[1]);
+  const finalChapter = searchPayload(response.results[2]);
+  assert(
+    job?.result?.documentIds?.length >= 35,
+    `Ordered pi-book crawl indexed only ${String(job?.result?.documentIds?.length ?? 0)} documents`,
+  );
+  assert(
+    middleChapter.hits?.some((hit) =>
+      String(hit.metadata?.canonicalUri ?? "").endsWith("/ch11-session-tree.html"),
+    ),
+    "Ordered pi-book crawl did not retrieve the middle Session Tree chapter",
+  );
+  assert(
+    finalChapter.hits?.some((hit) =>
+      String(hit.metadata?.canonicalUri ?? "").endsWith("/ch32-boundaries.html"),
+    ),
+    "Ordered pi-book crawl did not retrieve the final architecture boundaries chapter",
+  );
+  scenario("W1 real ordered static-book full-menu crawl", started, {
+    rootUrl: "https://zhanghandong.github.io/pi-book/",
+    job,
+    middleChapter: middleChapter.hits[0]?.metadata?.canonicalUri,
+    finalChapter: finalChapter.hits[0]?.metadata?.canonicalUri,
+  });
+}
+
 async function runCombined() {
   const started = performance.now();
   const namespace = `e2e:${runId}`;
@@ -1425,6 +1488,7 @@ async function runCombined() {
         query: `当前项目 ${runId} 使用哪个 Pi 版本？`,
         namespace,
         limit: 20,
+        temporalMode: "all",
       },
     },
     {
@@ -1705,6 +1769,31 @@ async function runFaultRecovery() {
   assert(recovered.vectors[0]?.values.length === dimensions, "Credential recovery failed");
 
   const namespace = `e2e:${runId}`;
+  const faultCandidates = [
+    "当前持久化数据库使用 Zvec",
+    "数据库恢复后必须完成向量检索",
+    "远程排序故障时使用本地融合结果",
+    "恢复远程排序后清除降级诊断",
+  ];
+  const seeded = await runPi(
+    "@galvinsan/pi-mentis",
+    faultCandidates.map((content, index) => ({
+      kind: "tool",
+      name: "commit_memory",
+      parameters: {
+        content: `故障恢复基线 ${runId}：${content}。`,
+        type: "episodic",
+        confidence: 0.95,
+        importance: 0.9,
+        cardinality: "event",
+        idempotencyKey: `fault-recovery-${runId}-${index}`,
+      },
+    })),
+  );
+  assert(
+    seeded.results.every((entry) => toolPayload(entry).record?.id),
+    "Fault recovery baseline was not persisted",
+  );
   const invalidRerank = await runPi(
     "@galvinsan/pi-mentis",
     [
@@ -1743,14 +1832,16 @@ async function runFaultRecovery() {
   ]);
   const recoveredSearch = searchPayload(recoveredRerank.results[0]);
   assert(
-    recoveredSearch.hits?.some((hit) => hit.text.includes("Zvec")),
-    "Restored Rerank configuration did not recover retrieval",
+    recoveredSearch.hits?.length > 0 &&
+      !recoveredSearch.diagnostics?.degraded?.includes("rerank:unavailable") &&
+      (recoveredSearch.diagnostics?.rankings?.rerank?.length ?? 0) > 0,
+    "Restored Rerank configuration did not restore remote ranking",
   );
   scenario("E1-E3 real credential/model failure and Rerank recovery", started, {
     invalidKeyError: authenticationError.name,
     invalidModelError: invalidModelError.name,
     rerankFallback: degraded.diagnostics.degraded,
-    recoveryTrace: recovered.traceId ?? null,
+    recoveryTrace: recoveredSearch.traceId ?? null,
   });
 }
 
@@ -1772,6 +1863,7 @@ try {
   for (const name of selected) {
     if (name === "inference") await runInference();
     if (name === "knowledge") await runKnowledge();
+    if (name === "webbook") await runWebBook();
     if (name === "memory") await runMemory();
     if (name === "combined") await runCombined();
     if (name === "pi") await runPiSurfaces();
@@ -1941,13 +2033,14 @@ ${migrationCoverageNote}
 The complete sanitized evidence is in \`${path.relative(root, jsonReport)}\`.
 `;
 if (suite === "all" || suite === "migration") {
+  const formattedMarkdown = await prettier.format(markdown, { parser: "markdown" });
   await writeFile(
     path.join(
       root,
       "docs",
       suite === "migration" ? "live-migration-e2e-report.md" : "live-e2e-report.md",
     ),
-    markdown,
+    formattedMarkdown,
   );
 }
 console.log(JSON.stringify({ status: report.status, runId, artifactRoot, usage }, null, 2));

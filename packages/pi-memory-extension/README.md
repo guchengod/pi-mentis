@@ -34,6 +34,20 @@ pi
 
 记忆可以绑定 user、project、repository、task 和 topic 等 scope。代码仓库上下文是可选项，普通个人会话同样可以使用。自动召回默认开启，并把召回内容标记为不受信任证据，不能覆盖当前用户指令。
 
+查看完整 Intelligence 状态：
+
+```text
+/mentis status
+```
+
+输出包含当前 Context revision、Temporal 配置、相关 Project/User/Topic/Task View、检索 Trace
+Buffer、Effectiveness 汇总，以及 Active/Shadow/Canary/Fallback Policy。
+
+记忆支持 `single`、`set`、`ordered`、`event` 四种时间基数；迟到旧事实不会覆盖当前 Head，
+冲突会保留双方，Branch hypothesis 在验证或合并前不会污染主事实。检索前会执行严格身份、项目、
+环境、时间、前提、证据和指令安全 Gate。View 始终保留 Atomic Memory ID；自适应策略只能调整
+有界检索参数，不能关闭安全隔离、证据完整性或指令安全。
+
 ## 配置
 
 Pi Mentis 从 Pi 启动目录读取 `.pi-mentis/config.json`：
@@ -57,6 +71,13 @@ Pi Mentis 从 Pi 启动目录读取 `.pi-mentis/config.json`：
       "previewBytes": 4096
     }
   },
+  "intelligence": {
+    "context": { "persistSnapshots": true, "capabilityMaxAgeMs": 60000 },
+    "temporal": { "enabled": true, "repairOnStartup": true },
+    "views": { "enabled": true, "ttlMs": 300000 },
+    "effectiveness": { "enabled": true, "flushIntervalMs": 250, "maxBatch": 64 },
+    "adaptivePolicy": { "enabled": true, "cooldownMs": 1800000 }
+  },
   "storage": {
     "rootDir": "/Users/your-name/.pi/agent/pi-mentis/zvec"
   }
@@ -72,6 +93,12 @@ API Key 只放在环境变量中。默认存储路径是启动目录下的 `.pi-
 - MMR 减少重复结果。
 - 自动召回具有软/硬超时，不会无限阻塞回复。
 - 大型工具结果会保存为本地 Artifact，模型上下文只接收预览或引用。
+- `search_memory` 接受 `artifactId`、`offset`、`length`，可按响应的 `nextOffset` 分段精确读取；
+  `id + query` 会继续搜索 Memory 的 Event/Artifact 证据链。
+- Artifact 使用原子 manifest、1 MiB 哈希分块、启动恢复、TTL/GC 和严格身份二次校验；只有
+  `ready` Artifact 才会替换原始 Tool Result。
+- 每个 Episode 和 Tool Call 都同步到持久化 Task Graph；Steering 会中止旧计划未完成节点，
+  经过验证的分支经验在合并前仍保持 hypothesis。
 - Episode、Event 和 Artifact 保留证据来源；记忆是可演化的派生结论。
 
 ## 安全、备份与排障

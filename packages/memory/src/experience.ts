@@ -2,7 +2,9 @@ import {
   EvidenceAuthority,
   contentHash,
   stableHash,
+  systemClock,
   throwIfAborted,
+  type Clock,
   type OperationOptions,
 } from "@pi-mentis/pi-mentis-core";
 import { ZvecStore, type StoredRecord } from "@pi-mentis/pi-mentis-zvec";
@@ -20,13 +22,24 @@ export interface CreateExperienceLearningServiceOptions {
   readonly memory: MemoryService;
   readonly minimumOutcomes?: number;
   readonly minimumSuccessEstimate?: number;
+  readonly clock?: Clock;
 }
 
 function recordOf(candidate: ExperienceCandidate): StoredRecord {
+  const namespace = candidate.scopeContext
+    ? [
+        candidate.scopeContext.tenantId,
+        candidate.scopeContext.userId,
+        candidate.scopeContext.appId,
+        candidate.scopeContext.agentId,
+      ]
+        .map(encodeURIComponent)
+        .join(":")
+    : "local:local:pi:pi-mentis";
   return {
     id: candidate.id,
     kind: "experience-candidate",
-    namespace: "experience",
+    namespace,
     status: candidate.state,
     payload: candidate as unknown as Readonly<Record<string, unknown>>,
     createdAt: candidate.createdAt,
@@ -39,12 +52,14 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
   readonly #memory: MemoryService;
   readonly #minimumOutcomes: number;
   readonly #minimumSuccessEstimate: number;
+  readonly #clock: Clock;
 
   constructor(options: CreateExperienceLearningServiceOptions) {
     this.#store = options.store;
     this.#memory = options.memory;
     this.#minimumOutcomes = options.minimumOutcomes ?? 3;
     this.#minimumSuccessEstimate = options.minimumSuccessEstimate ?? 0.7;
+    this.#clock = options.clock ?? systemClock;
   }
 
   async observe(
@@ -71,9 +86,20 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
         "Experience environment must include embeddingModel, embeddingDimensions, and rerankModel",
       );
     }
-    const now = Date.now();
+    const now = this.#clock.now();
+    const namespace = input.scopeContext
+      ? [
+          input.scopeContext.tenantId,
+          input.scopeContext.userId,
+          input.scopeContext.appId,
+          input.scopeContext.agentId,
+        ]
+          .map(encodeURIComponent)
+          .join(":")
+      : "local:local:pi:pi-mentis";
     const id = stableHash(
       "experience:v1",
+      namespace,
       input.goal,
       JSON.stringify(Object.entries(input.environment).sort(([a], [b]) => a.localeCompare(b))),
       contentHash(input.steps.join("\n")),
@@ -124,7 +150,7 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
       cost: candidate.cost + outcome.cost,
       durationMs: candidate.durationMs + outcome.durationMs,
       state: "evaluating",
-      updatedAt: Date.now(),
+      updatedAt: this.#clock.now(),
     };
     await this.#store.upsertScalar("relationships_v1", [recordOf(updated)]);
     return updated;
@@ -143,7 +169,14 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     if (candidate.validationPlan.length === 0 || candidate.successEvidence.length === 0) {
       throw new Error("Experience qualification requires a validation plan and success evidence");
     }
-    const qualified = { ...candidate, state: "qualified" as const, updatedAt: Date.now() };
+    if (candidate.branchClaimState === "abandoned") {
+      throw new Error(`Experience ${id} belongs to an abandoned branch`);
+    }
+    const qualified = {
+      ...candidate,
+      state: "qualified" as const,
+      updatedAt: this.#clock.now(),
+    };
     await this.#store.upsertScalar("relationships_v1", [recordOf(qualified)]);
     return qualified;
   }
@@ -173,7 +206,15 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
         content,
         type: "procedural",
         domain: "procedure",
-        scope: { kind: "user", id: "experience" },
+        scope:
+          candidate.branchClaimState === "hypothesis" &&
+          candidate.scopeContext?.branchId !== undefined
+            ? { kind: "branch", id: candidate.scopeContext.branchId }
+            : { kind: "user", id: "experience" },
+        ...(candidate.scopeContext === undefined ? {} : { scopeContext: candidate.scopeContext }),
+        ...(candidate.branchClaimState === undefined
+          ? {}
+          : { branchClaimState: candidate.branchClaimState }),
         confidence: betaSuccessEstimate(candidate),
         importance: 0.7,
         authority: EvidenceAuthority.VerifiedToolObservation,
@@ -181,7 +222,11 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
       },
       options,
     );
-    const promoted = { ...candidate, state: "promoted" as const, updatedAt: Date.now() };
+    const promoted = {
+      ...candidate,
+      state: "promoted" as const,
+      updatedAt: this.#clock.now(),
+    };
     await this.#store.upsertScalar("relationships_v1", [recordOf(promoted)]);
     return result;
   }

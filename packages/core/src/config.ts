@@ -130,6 +130,7 @@ export interface PerformanceConfig {
     readonly maxQueuedTasks: number;
     readonly maxQueuedBytes: number;
     readonly maxActiveTasks: number;
+    readonly maxQueuedTaskAgeMs: number;
     readonly maxPendingEmbeddingTokens: number;
     readonly maxPendingRerankTokens: number;
   };
@@ -142,6 +143,30 @@ export interface ObservabilityConfig {
   readonly logLevel: "silent" | "error" | "warn" | "info" | "debug";
 }
 
+export interface IntelligenceConfig {
+  readonly context: {
+    readonly persistSnapshots: boolean;
+    readonly capabilityMaxAgeMs: number;
+  };
+  readonly temporal: {
+    readonly enabled: true;
+    readonly repairOnStartup: boolean;
+  };
+  readonly views: {
+    readonly enabled: boolean;
+    readonly ttlMs: number;
+  };
+  readonly effectiveness: {
+    readonly enabled: boolean;
+    readonly flushIntervalMs: number;
+    readonly maxBatch: number;
+  };
+  readonly adaptivePolicy: {
+    readonly enabled: boolean;
+    readonly cooldownMs: number;
+  };
+}
+
 export interface PiMentisConfig {
   readonly runtime: RuntimeConfig;
   readonly knowledge: KnowledgeConfig;
@@ -151,6 +176,7 @@ export interface PiMentisConfig {
   readonly storage: StorageConfig;
   readonly performance: PerformanceConfig;
   readonly observability: ObservabilityConfig;
+  readonly intelligence: IntelligenceConfig;
 }
 
 export function createDefaultConfig(cwd: string): PiMentisConfig {
@@ -254,6 +280,7 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
         maxQueuedTasks: 2_000,
         maxQueuedBytes: 128 * 1024 * 1024,
         maxActiveTasks: 8,
+        maxQueuedTaskAgeMs: 30 * 60_000,
         maxPendingEmbeddingTokens: 2_000_000,
         maxPendingRerankTokens: 1_000_000,
       },
@@ -276,6 +303,13 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
       includeContentHashes: true,
       logLevel: "warn",
     },
+    intelligence: {
+      context: { persistSnapshots: true, capabilityMaxAgeMs: 60_000 },
+      temporal: { enabled: true, repairOnStartup: true },
+      views: { enabled: true, ttlMs: 5 * 60_000 },
+      effectiveness: { enabled: true, flushIntervalMs: 250, maxBatch: 64 },
+      adaptivePolicy: { enabled: true, cooldownMs: 30 * 60_000 },
+    },
   };
 }
 
@@ -295,11 +329,42 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
       retryable: false,
     });
   }
+  if (config.intelligence.temporal.enabled !== true) {
+    throw new ConfigurationError(
+      "intelligence.temporal.enabled is a protected truth-safety invariant and must be true",
+      { operation: "configuration-validate", retryable: false },
+    );
+  }
   requireRange(
     "inference.siliconflow.embedding.dimensions",
     config.inference.siliconflow.embedding.dimensions,
     768,
     4_096,
+  );
+  requireRange(
+    "intelligence.context.capabilityMaxAgeMs",
+    config.intelligence.context.capabilityMaxAgeMs,
+    1_000,
+    86_400_000,
+  );
+  requireRange("intelligence.views.ttlMs", config.intelligence.views.ttlMs, 1_000, 86_400_000);
+  requireRange(
+    "intelligence.effectiveness.flushIntervalMs",
+    config.intelligence.effectiveness.flushIntervalMs,
+    10,
+    60_000,
+  );
+  requireRange(
+    "intelligence.effectiveness.maxBatch",
+    config.intelligence.effectiveness.maxBatch,
+    1,
+    1_024,
+  );
+  requireRange(
+    "intelligence.adaptivePolicy.cooldownMs",
+    config.intelligence.adaptivePolicy.cooldownMs,
+    1_000,
+    7 * 86_400_000,
   );
   requireRange(
     "inference.siliconflow.rerank.maxInputTokens",
@@ -333,6 +398,12 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
     1e9,
   );
   requireRange("memory.offload.previewBytes", config.memory.offload.previewBytes, 128, 1e7);
+  requireRange(
+    "performance.queue.maxQueuedTaskAgeMs",
+    config.performance.queue.maxQueuedTaskAgeMs,
+    1_000,
+    7 * 86_400_000,
+  );
   requireRange(
     "performance.resources.maxWebPages",
     config.performance.resources.maxWebPages,

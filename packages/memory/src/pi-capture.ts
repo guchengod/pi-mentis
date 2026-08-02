@@ -1,4 +1,10 @@
-import { operationId, stableHash, type OperationOptions } from "@pi-mentis/pi-mentis-core";
+import {
+  operationId,
+  stableHash,
+  systemClock,
+  type Clock,
+  type OperationOptions,
+} from "@pi-mentis/pi-mentis-core";
 
 import { offloadToolResult } from "./offload.js";
 import type {
@@ -8,6 +14,7 @@ import type {
   PiEvent,
   PiEvidenceStore,
   PiScopeContext,
+  TaskGraphService,
   ToolResultEnvelope,
   ToolResultOffloadPolicy,
 } from "./types.js";
@@ -39,8 +46,14 @@ export class PiCaptureSession {
   readonly #policy: ToolResultOffloadPolicy;
   readonly #tools = new Map<string, StartedTool>();
   readonly #onFinished: PiEpisodeFinishedHandler | undefined;
+  readonly #taskGraph: TaskGraphService | undefined;
+  readonly #clock: Clock;
   readonly #events: PiEvent[] = [];
+  readonly #toolTaskNodes = new Map<string, string>();
   #episode?: PiEpisode;
+  #taskNamespace?: string;
+  #rootTaskNodeId?: string;
+  #goalEventId: string | undefined;
   #sequence = 0;
   #previousGoal?: string;
   #lastExecutionFailed = false;
@@ -50,25 +63,42 @@ export class PiCaptureSession {
     evidence: PiEvidenceStore,
     policy: ToolResultOffloadPolicy,
     onFinished?: PiEpisodeFinishedHandler,
+    taskGraph?: TaskGraphService,
+    clock: Clock = systemClock,
   ) {
     this.#evidence = evidence;
     this.#policy = policy;
     this.#onFinished = onFinished;
+    this.#taskGraph = taskGraph;
+    this.#clock = clock;
   }
 
   get episode(): PiEpisode | undefined {
     return this.#episode;
   }
 
+  get goalEventId(): string | undefined {
+    return this.#goalEventId;
+  }
+
   async start(input: StartPiEpisodeInput, options: OperationOptions = {}): Promise<PiEpisode> {
     if (this.#episode?.status === "running") {
       await this.finish("partial", options);
     }
-    const startedAt = input.startedAt ?? Date.now();
+    const startedAt = input.startedAt ?? this.#clock.now();
     const sessionId = input.scope.sessionId ?? "unknown-session";
     const runId = input.scope.runId ?? operationId("operation");
+    const securityNamespace = [
+      input.scope.tenantId,
+      input.scope.userId,
+      input.scope.appId,
+      input.scope.agentId,
+    ]
+      .map(encodeURIComponent)
+      .join(":");
     const id = stableHash(
       "pi-episode:v1",
+      securityNamespace,
       sessionId,
       input.scope.branchId ?? "root",
       runId,
@@ -76,13 +106,16 @@ export class PiCaptureSession {
     );
     this.#sequence = 0;
     this.#tools.clear();
+    this.#toolTaskNodes.clear();
     this.#events.length = 0;
+    this.#goalEventId = undefined;
     this.#lastExecutionFailed = false;
     this.#verificationStatus = "not_run";
     this.#previousGoal = input.goal;
     const episode: PiEpisode = {
       id,
       sessionId,
+      securityNamespace,
       ...(input.scope.branchId === undefined ? {} : { branchId: input.scope.branchId }),
       ...(input.scope.parentBranchId === undefined
         ? {}
@@ -108,22 +141,60 @@ export class PiCaptureSession {
       lastSequence: 1,
     };
     this.#episode = episode;
+    this.#taskNamespace = [
+      input.scope.tenantId,
+      input.scope.userId,
+      input.scope.appId,
+      input.scope.agentId,
+    ]
+      .map(encodeURIComponent)
+      .join(":");
+    this.#rootTaskNodeId = episode.id;
+    if (this.#taskGraph !== undefined) {
+      await this.#taskGraph.create({
+        id: episode.id,
+        namespace: this.#taskNamespace,
+        goal: input.goal,
+        ...(input.scope.branchId === undefined ? {} : { branchId: input.scope.branchId }),
+      });
+      const root = await this.#taskGraph.get(episode.id);
+      if (root?.state === "pending" || root?.state === "failed" || root?.state === "blocked") {
+        await this.#taskGraph.transition(episode.id, "running");
+      }
+    }
     await this.#evidence.createEpisode(episode, options);
-    await this.#append("goal", { goal: input.goal }, startedAt, undefined, options);
+    const goalEvent = await this.#append(
+      "goal",
+      { goal: input.goal },
+      startedAt,
+      undefined,
+      options,
+    );
+    this.#goalEventId = goalEvent.id;
     return episode;
   }
 
   async steer(updatedGoal: string, options: OperationOptions = {}): Promise<void> {
     const episode = this.#episode;
     if (episode === undefined || episode.status !== "running") return;
+    const invalidatedPlanIds = [...this.#toolTaskNodes.values()];
+    if (this.#taskGraph !== undefined) {
+      for (const taskNodeId of invalidatedPlanIds) {
+        const node = await this.#taskGraph.get(taskNodeId);
+        if (node?.state === "pending" || node?.state === "running" || node?.state === "blocked") {
+          await this.#taskGraph.transition(taskNodeId, "aborted");
+        }
+      }
+    }
+    this.#toolTaskNodes.clear();
     await this.#append(
       "steering",
       {
         ...(this.#previousGoal === undefined ? {} : { previousGoal: this.#previousGoal }),
         updatedGoal,
-        invalidatedPlanIds: [],
+        invalidatedPlanIds,
       },
-      Date.now(),
+      this.#clock.now(),
       undefined,
       options,
     );
@@ -134,18 +205,49 @@ export class PiCaptureSession {
     toolCallId: string,
     toolName: string,
     input: Readonly<Record<string, unknown>>,
-    timestamp = Date.now(),
+    timestamp?: number,
     options: OperationOptions = {},
   ): Promise<void> {
     if (this.#episode === undefined) return;
+    const observedAt = timestamp ?? this.#clock.now();
     const event = await this.#append(
       "tool_call",
       { toolName, input },
-      timestamp,
+      observedAt,
       toolCallId,
       options,
     );
-    this.#tools.set(toolCallId, { toolName, input, startedAt: timestamp, callEventId: event.id });
+    this.#tools.set(toolCallId, {
+      toolName,
+      input,
+      startedAt: observedAt,
+      callEventId: event.id,
+    });
+    if (
+      this.#taskGraph !== undefined &&
+      this.#taskNamespace !== undefined &&
+      this.#rootTaskNodeId !== undefined
+    ) {
+      const taskNodeId = `task-node:${stableHash(
+        "pi-tool-task:v1",
+        this.#rootTaskNodeId,
+        toolCallId,
+      )}`;
+      await this.#taskGraph.create({
+        id: taskNodeId,
+        namespace: this.#taskNamespace,
+        goal: `${toolName}: ${this.#summarizeInput(input)}`,
+        parentId: this.#rootTaskNodeId,
+        ...(this.#episode.branchId === undefined ? {} : { branchId: this.#episode.branchId }),
+      });
+      const task = await this.#taskGraph.get(taskNodeId);
+      if (task?.state === "pending" || task?.state === "failed" || task?.state === "blocked") {
+        await this.#taskGraph.transition(taskNodeId, "running", [
+          { kind: "event", id: event.id, observedAt: event.timestamp },
+        ]);
+      }
+      this.#toolTaskNodes.set(toolCallId, taskNodeId);
+    }
   }
 
   async toolResult(
@@ -172,11 +274,12 @@ export class PiCaptureSession {
       },
       this.#policy,
     );
-    await this.#append(
+    const resultEvent = await this.#append(
       envelope.toolName === "edit" || envelope.toolName === "write" ? "file_edit" : "tool_result",
       {
         input: envelope.input,
         result: result.symbolic,
+        tokenAccounting: result.tokenAccounting,
         ...(result.mode === "inline" ? { inlineText: envelope.text } : {}),
       },
       envelope.completedAt,
@@ -186,6 +289,16 @@ export class PiCaptureSession {
       result.artifact,
       eventId,
     );
+    const taskNodeId = this.#toolTaskNodes.get(envelope.toolCallId);
+    if (taskNodeId !== undefined && this.#taskGraph !== undefined) {
+      const task = await this.#taskGraph.get(taskNodeId);
+      if (task?.state === "running") {
+        await this.#taskGraph.transition(taskNodeId, envelope.isError ? "failed" : "succeeded", [
+          { kind: "event", id: resultEvent.id, observedAt: resultEvent.timestamp },
+        ]);
+      }
+      this.#toolTaskNodes.delete(envelope.toolCallId);
+    }
     this.#lastExecutionFailed = envelope.isError;
     const command = typeof envelope.input["command"] === "string" ? envelope.input["command"] : "";
     if (envelope.toolName === "bash" && VERIFICATION_COMMAND.test(command)) {
@@ -212,7 +325,7 @@ export class PiCaptureSession {
     await this.#append(
       "compaction",
       { summary, reason, willRetry, longTermCandidate: false },
-      Date.now(),
+      this.#clock.now(),
       undefined,
       options,
     );
@@ -236,7 +349,13 @@ export class PiCaptureSession {
               ? "failed"
               : "partial",
     };
-    await this.#append("outcome", { ...outcome }, Date.now(), undefined, options);
+    const outcomeEvent = await this.#append(
+      "outcome",
+      { ...outcome },
+      this.#clock.now(),
+      undefined,
+      options,
+    );
     const status =
       requestedStatus ??
       (outcome.taskStatus === "completed"
@@ -249,11 +368,27 @@ export class PiCaptureSession {
     const updated: PiEpisode = {
       ...episode,
       status,
-      endedAt: Date.now(),
+      endedAt: this.#clock.now(),
       lastSequence: this.#sequence,
     };
     this.#episode = updated;
     await this.#evidence.updateEpisode(updated, options);
+    if (this.#taskGraph !== undefined && this.#rootTaskNodeId !== undefined) {
+      const root = await this.#taskGraph.get(this.#rootTaskNodeId);
+      if (root?.state === "running") {
+        await this.#taskGraph.transition(
+          this.#rootTaskNodeId,
+          outcome.taskStatus === "completed"
+            ? "succeeded"
+            : outcome.taskStatus === "aborted"
+              ? "aborted"
+              : outcome.taskStatus === "partial"
+                ? "blocked"
+                : "failed",
+          [{ kind: "event", id: outcomeEvent.id, observedAt: outcomeEvent.timestamp }],
+        );
+      }
+    }
     this.#onFinished?.(updated, [...this.#events], outcome);
     return outcome;
   }
@@ -275,6 +410,7 @@ export class PiCaptureSession {
       id:
         forcedId ?? stableHash("pi-event:v1", episode.id, String(sequence), kind, toolCallId ?? ""),
       episodeId: episode.id,
+      securityNamespace: episode.securityNamespace,
       sequence,
       kind,
       timestamp,
@@ -295,5 +431,11 @@ export class PiCaptureSession {
     this.#events.push(event);
     this.#episode = { ...episode, lastSequence: sequence };
     return event;
+  }
+
+  #summarizeInput(input: Readonly<Record<string, unknown>>): string {
+    const preferred = input["command"] ?? input["path"] ?? input["query"] ?? input["url"];
+    const summary = typeof preferred === "string" ? preferred : JSON.stringify(input);
+    return summary.length <= 160 ? summary : `${summary.slice(0, 157)}...`;
   }
 }

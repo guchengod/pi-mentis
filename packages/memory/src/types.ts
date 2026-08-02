@@ -4,6 +4,7 @@ import type {
   OperationOptions,
   SearchResult,
 } from "@pi-mentis/pi-mentis-core";
+import type { MaterializedView, ViewKind } from "./views.js";
 
 export interface MemoryScope {
   readonly kind:
@@ -47,6 +48,11 @@ export type MemoryDomain =
 export type MemoryType =
   "preference" | "requirement" | "fact" | "decision" | "procedural" | "episodic" | "task";
 
+export type TemporalCardinality = "single" | "set" | "ordered" | "event";
+export type TemporalState =
+  "current" | "historical" | "conflicted" | "retracted" | "pending" | "rejected";
+export type BranchClaimState = "global" | "hypothesis" | "verified" | "merged" | "abandoned";
+
 export interface MemoryRecord {
   readonly id: string;
   readonly content: string;
@@ -75,6 +81,15 @@ export interface MemoryRecord {
   readonly lastAccessedAt: number;
   readonly reinforceCount: number;
   readonly revision: number;
+  readonly factKey?: string;
+  readonly cardinality?: TemporalCardinality;
+  readonly temporalState?: TemporalState;
+  readonly branchClaimState?: BranchClaimState;
+  readonly idempotencyKey?: string;
+  readonly applicability?: MemoryApplicability;
+  readonly premises?: readonly MemoryPremise[];
+  readonly contentOrigin?: MemoryContentOrigin;
+  readonly evidenceIntegrity?: "valid" | "missing" | "invalid";
 }
 
 export interface CommitMemoryCommand {
@@ -88,6 +103,37 @@ export interface CommitMemoryCommand {
   readonly authority: EvidenceAuthority;
   readonly evidenceRefs?: readonly EvidenceRef[];
   readonly supersedesIds?: readonly string[];
+  readonly factKey?: string;
+  readonly cardinality?: TemporalCardinality;
+  readonly observedAt?: number;
+  readonly retractsFact?: boolean;
+  readonly branchClaimState?: BranchClaimState;
+  readonly idempotencyKey?: string;
+  readonly applicability?: MemoryApplicability;
+  readonly premises?: readonly MemoryPremise[];
+  readonly contentOrigin?: MemoryContentOrigin;
+}
+
+export type MemoryContentOrigin =
+  "user" | "workspace" | "tool" | "knowledge" | "external" | "model";
+
+export interface MemoryApplicability {
+  readonly os?: readonly string[];
+  readonly strictOs?: boolean;
+  readonly architecture?: readonly string[];
+  readonly strictArchitecture?: boolean;
+  readonly runtime?: string;
+  readonly runtimeVersionMin?: string;
+  readonly runtimeVersionMax?: string;
+  readonly packageManager?: string;
+  readonly repositoryId?: string;
+  readonly projectId?: string;
+}
+
+export interface MemoryPremise {
+  readonly kind: "manifest" | "tool" | "package-manager" | "context";
+  readonly value: string;
+  readonly required: boolean;
 }
 
 export interface CommitMemoryResult {
@@ -99,8 +145,9 @@ export interface CommitMemoryResult {
 export interface MemoryQuery {
   readonly text: string;
   readonly scopes?: readonly MemoryScope[];
-  readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+  readonly scopeContext?: PiScopeContext;
   readonly limit?: number;
+  readonly temporalMode?: "current" | "historical" | "all";
 }
 
 export interface MemorySearchOptions extends OperationOptions {
@@ -111,6 +158,10 @@ export interface MemoryGetOptions extends OperationOptions {
   readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
 }
 
+export interface MemoryMutationOptions extends OperationOptions {
+  readonly scopeContext: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+}
+
 export interface MemoryService {
   commit(command: CommitMemoryCommand, options?: OperationOptions): Promise<CommitMemoryResult>;
   search(query: MemoryQuery, options?: MemorySearchOptions): Promise<SearchResult>;
@@ -118,9 +169,52 @@ export interface MemoryService {
   markConflicted?(
     id: string,
     evidence: EvidenceRef,
-    options?: OperationOptions,
+    options: MemoryMutationOptions,
   ): Promise<Omit<MemoryRecord, "embedding"> | undefined>;
-  tombstone(id: string, options?: OperationOptions): Promise<boolean>;
+  tombstone(id: string, options: MemoryMutationOptions): Promise<boolean>;
+  temporalHead?(
+    factKey: string,
+    scope: MemoryScope,
+    scopeContext?: PiScopeContext,
+  ): Promise<TemporalHead | undefined>;
+  repairTemporal?(options?: OperationOptions): Promise<TemporalRepairResult>;
+  getView?(
+    kind: ViewKind,
+    scopeId: string,
+    scopeContext?: PiScopeContext,
+  ): Promise<MaterializedView | undefined>;
+  repairViews?(): Promise<{
+    readonly inspected: number;
+    readonly repaired: number;
+    readonly failed: number;
+  }>;
+  flushBackground?(): Promise<void>;
+  abandonBranch?(branchId: string, scopeContext: PiScopeContext): Promise<number>;
+}
+
+export interface TemporalClaimPointer {
+  readonly memoryId: string;
+  readonly contentHash: string;
+  readonly authority: EvidenceAuthority;
+  readonly observedAt: number;
+  readonly branchId?: string;
+}
+
+export interface TemporalHead {
+  readonly id: string;
+  readonly factKey: string;
+  readonly namespace: string;
+  readonly cardinality: TemporalCardinality;
+  readonly state: "resolved" | "conflicted" | "retracted";
+  readonly currentClaims: readonly TemporalClaimPointer[];
+  readonly revision: number;
+  readonly updatedAt: number;
+}
+
+export interface TemporalRepairResult {
+  readonly inspected: number;
+  readonly repaired: number;
+  readonly failed: number;
 }
 
 export interface CapturedToolEvent {
@@ -149,6 +243,7 @@ export type PiEpisodeStatus = "running" | "completed" | "failed" | "aborted" | "
 export interface PiEpisode {
   readonly id: string;
   readonly sessionId: string;
+  readonly securityNamespace: string;
   readonly branchId?: string;
   readonly parentBranchId?: string;
   readonly runId?: string;
@@ -180,6 +275,7 @@ export type PiEventKind =
 export interface PiEvent {
   readonly id: string;
   readonly episodeId: string;
+  readonly securityNamespace: string;
   readonly sequence: number;
   readonly kind: PiEventKind;
   readonly timestamp: number;
@@ -205,16 +301,94 @@ export interface OutcomeStatus {
   readonly taskStatus: "completed" | "failed" | "partial" | "aborted";
 }
 
+export type TaskNodeState = "pending" | "running" | "succeeded" | "failed" | "blocked" | "aborted";
+
+export interface TaskNode {
+  readonly id: string;
+  readonly namespace: string;
+  readonly goal: string;
+  readonly state: TaskNodeState;
+  readonly dependencies: readonly string[];
+  readonly branchId?: string;
+  readonly parentId?: string;
+  readonly attempts: number;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly revision: number;
+}
+
+export interface TaskGraphService {
+  create(input: {
+    readonly namespace: string;
+    readonly goal: string;
+    readonly branchId?: string;
+    readonly parentId?: string;
+    readonly dependencies?: readonly string[];
+    readonly id?: string;
+  }): Promise<TaskNode>;
+  transition(
+    id: string,
+    next: TaskNodeState,
+    evidenceRefs?: readonly EvidenceRef[],
+  ): Promise<TaskNode>;
+  addDependency(id: string, dependencyId: string): Promise<TaskNode>;
+  get(id: string): Promise<TaskNode | undefined>;
+  list(namespace: string): Promise<readonly TaskNode[]>;
+  abortBranch(branchId: string, namespace: string): Promise<number>;
+  mermaid(namespace: string): Promise<string>;
+}
+
 export interface ArtifactRecord {
   readonly id: string;
   readonly episodeId: string;
+  readonly securityNamespace: string;
   readonly eventId?: string;
   readonly toolCallId?: string;
   readonly mediaType: string;
   readonly byteLength: number;
   readonly contentHash: string;
   readonly relativePath: string;
+  readonly state: "pending" | "persisting" | "ready" | "failed" | "expired" | "deleted";
+  readonly chunks: readonly ArtifactChunk[];
+  readonly expiresAt?: number;
+  readonly failure?: string;
   readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface ArtifactChunk {
+  readonly ordinal: number;
+  readonly relativePath: string;
+  readonly byteOffset: number;
+  readonly byteLength: number;
+  readonly contentHash: string;
+}
+
+export interface ArtifactReadOptions extends OperationOptions {
+  readonly scopeContext?: PiScopeContext;
+  readonly offset?: number;
+  readonly length?: number;
+}
+
+export interface ArtifactRange {
+  readonly content: string;
+  readonly offset: number;
+  readonly nextOffset: number;
+  readonly byteLength: number;
+  readonly eof: boolean;
+}
+
+export interface EvidenceReadOptions extends OperationOptions {
+  readonly scopeContext?: PiScopeContext;
+  readonly artifactMaxBytes?: number;
+}
+
+export interface EvidenceSearchMatch {
+  readonly kind: "event" | "artifact";
+  readonly id: string;
+  readonly text: string;
+  readonly artifactOffset?: number;
 }
 
 export interface ToolSymbolicResult {
@@ -255,7 +429,15 @@ export interface OffloadedToolResult {
   readonly mode: "inline" | "truncated" | "artifact";
   readonly symbolic: ToolSymbolicResult;
   readonly modelText: string;
+  readonly tokenAccounting: ToolResultTokenAccounting;
   readonly artifact?: ArtifactRecord;
+}
+
+export interface ToolResultTokenAccounting {
+  readonly estimator: "conservative-utf8-v1";
+  readonly originalTokens: number;
+  readonly retainedTokens: number;
+  readonly offloadedTokens: number;
 }
 
 export interface PiEvidenceStore {
@@ -265,24 +447,49 @@ export interface PiEvidenceStore {
   writeArtifact(
     input: Omit<
       ArtifactRecord,
-      "id" | "contentHash" | "relativePath" | "byteLength" | "createdAt"
+      | "id"
+      | "contentHash"
+      | "relativePath"
+      | "byteLength"
+      | "state"
+      | "chunks"
+      | "failure"
+      | "createdAt"
+      | "updatedAt"
+      | "securityNamespace"
     > & {
       readonly content: string;
     },
     options?: OperationOptions,
   ): Promise<ArtifactRecord>;
-  getEpisode(id: string, options?: OperationOptions): Promise<PiEpisode | undefined>;
-  getEvent(id: string, options?: OperationOptions): Promise<PiEvent | undefined>;
-  getArtifact(id: string, options?: OperationOptions): Promise<ArtifactRecord | undefined>;
+  getEpisode(id: string, options?: EvidenceReadOptions): Promise<PiEpisode | undefined>;
+  getEvent(id: string, options?: EvidenceReadOptions): Promise<PiEvent | undefined>;
+  getArtifact(id: string, options?: EvidenceReadOptions): Promise<ArtifactRecord | undefined>;
+  readArtifact(id: string, options?: ArtifactReadOptions): Promise<string | undefined>;
+  readArtifactRange(id: string, options?: ArtifactReadOptions): Promise<ArtifactRange | undefined>;
+  recoverArtifacts(options?: OperationOptions): Promise<{
+    readonly inspected: number;
+    readonly recovered: number;
+    readonly failed: number;
+  }>;
+  deleteArtifact(id: string, options?: ArtifactReadOptions): Promise<boolean>;
+  collectExpiredArtifacts(now?: number, options?: OperationOptions): Promise<number>;
   readEvidence(
     refs: readonly EvidenceRef[],
-    options?: OperationOptions,
+    options?: EvidenceReadOptions,
   ): Promise<readonly unknown[]>;
+  searchEvidence(
+    refs: readonly EvidenceRef[],
+    query: string,
+    options?: EvidenceReadOptions,
+  ): Promise<readonly EvidenceSearchMatch[]>;
 }
 
 export interface ExperienceCandidate {
   readonly id: string;
   readonly goal: string;
+  readonly scopeContext?: PiScopeContext;
+  readonly branchClaimState?: BranchClaimState;
   readonly environment: Readonly<Record<string, string>>;
   readonly prerequisites: readonly string[];
   readonly steps: readonly string[];

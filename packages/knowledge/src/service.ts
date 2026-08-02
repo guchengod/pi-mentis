@@ -8,7 +8,9 @@ import {
   documentId,
   operationId,
   stableHash,
+  systemClock,
   throwIfAborted,
+  type Clock,
   type JobReceipt,
   type OperationOptions,
   type ResourceLimits,
@@ -47,6 +49,7 @@ import type {
   KnowledgeChunk,
   KnowledgeDocument,
   KnowledgeDocumentView,
+  KnowledgeJobRecoveryResult,
   KnowledgeQuery,
   KnowledgeSearchResult,
   KnowledgeService,
@@ -56,6 +59,85 @@ import type {
   SearchOptions,
   SyncKnowledgeSourceCommand,
 } from "./types.js";
+import { recoverKnowledgeEmbeddingMigrationJobs } from "./migration.js";
+
+type KnowledgeJobState = "queued" | "leased" | "running" | "succeeded" | "failed" | "dead";
+
+interface PersistedKnowledgeJob {
+  readonly jobId: string;
+  readonly deduplicationKey: string;
+  readonly commandHash: string;
+  readonly commandJson: string;
+  readonly namespace: string;
+  readonly state: KnowledgeJobState;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly leaseOwner?: string;
+  readonly leaseExpiresAt?: number;
+  readonly result?: IngestKnowledgeResult;
+  readonly error?: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+const JOB_LEASE_MS = 5 * 60_000;
+const JOB_MAX_ATTEMPTS = 3;
+
+function serializeIngestCommand(command: IngestKnowledgeCommand): string {
+  return JSON.stringify(command, (_key, value: unknown) =>
+    value instanceof Uint8Array
+      ? { __piMentisBytes: Buffer.from(value).toString("base64") }
+      : value,
+  );
+}
+
+function parseIngestCommand(commandJson: string): IngestKnowledgeCommand {
+  const value = JSON.parse(commandJson, (_key, candidate: unknown) => {
+    if (
+      typeof candidate === "object" &&
+      candidate !== null &&
+      !Array.isArray(candidate) &&
+      typeof (candidate as Record<string, unknown>)["__piMentisBytes"] === "string"
+    ) {
+      return Uint8Array.from(
+        Buffer.from((candidate as Record<string, string>)["__piMentisBytes"] ?? "", "base64"),
+      );
+    }
+    return candidate;
+  }) as unknown;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    typeof (value as Record<string, unknown>)["source"] !== "object"
+  ) {
+    throw new Error("Persisted knowledge command is invalid");
+  }
+  return value as IngestKnowledgeCommand;
+}
+
+function retryableJobError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("context" in error)) return true;
+  const context = (error as { readonly context?: unknown }).context;
+  if (typeof context !== "object" || context === null || !("retryable" in context)) return true;
+  return (context as { readonly retryable?: unknown }).retryable !== false;
+}
+
+function secureNamespace(
+  namespace: string,
+  scope: import("./types.js").KnowledgeSecurityScope | undefined,
+): string {
+  if (scope === undefined) return namespace;
+  return `${[scope.tenantId, scope.userId, scope.appId, scope.agentId]
+    .map(encodeURIComponent)
+    .join(":")}::${namespace}`;
+}
+
+function securityBoundary(scope: import("./types.js").KnowledgeSecurityScope): string {
+  return [scope.tenantId, scope.userId, scope.appId, scope.agentId]
+    .map(encodeURIComponent)
+    .join(":");
+}
 
 export interface CreateKnowledgeServiceOptions {
   readonly store: ZvecStore;
@@ -69,6 +151,7 @@ export interface CreateKnowledgeServiceOptions {
   readonly defaultNamespace?: string;
   readonly queryCacheEntries?: number;
   readonly queryCacheTtlMs?: number;
+  readonly clock?: Clock;
 }
 
 function quoteFilter(value: string): string {
@@ -113,6 +196,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
   readonly #defaultNamespace: string;
   readonly #queryCache: BoundedTtlCache<EmbeddingVector>;
   readonly #foreground = new ForegroundExecutor();
+  readonly #workerId = `knowledge-worker:${operationId("operation")}`;
+  readonly #clock: Clock;
+  #recoveryPerformed = false;
 
   constructor(options: CreateKnowledgeServiceOptions) {
     this.#store = options.store;
@@ -129,13 +215,15 @@ export class DefaultKnowledgeService implements KnowledgeService {
       options.queryCacheEntries ?? 512,
       options.queryCacheTtlMs ?? 300_000,
     );
+    this.#clock = options.clock ?? systemClock;
   }
 
   async ingest(
     command: IngestKnowledgeCommand,
     options: OperationOptions = {},
   ): Promise<IngestKnowledgeResult> {
-    const namespace = command.namespace ?? this.#defaultNamespace;
+    const logicalNamespace = command.namespace ?? this.#defaultNamespace;
+    const namespace = secureNamespace(logicalNamespace, command.scopeContext);
     const authority = command.authority ?? EvidenceAuthority.UserKnowledge;
     const sourceIds: string[] = [];
     const documentIds: string[] = [];
@@ -159,7 +247,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
         unchanged++;
         continue;
       }
-      const now = Date.now();
+      const now = this.#clock.now();
       const knowledgeSource: KnowledgeSource = {
         id: resolved.source.id,
         kind: command.source.kind,
@@ -171,9 +259,18 @@ export class DefaultKnowledgeService implements KnowledgeService {
           typeof existingSource?.["createdAt"] === "number" ? existingSource["createdAt"] : now,
         updatedAt: now,
         fingerprint: resolved.fingerprint,
-        ...(resolved.source.attributes === undefined
-          ? {}
-          : { attributes: resolved.source.attributes }),
+        attributes: {
+          ...(resolved.source.attributes ?? {}),
+          logicalNamespace,
+          ...(command.scopeContext === undefined
+            ? {}
+            : {
+                tenantId: command.scopeContext.tenantId,
+                userId: command.scopeContext.userId,
+                appId: command.scopeContext.appId,
+                agentId: command.scopeContext.agentId,
+              }),
+        },
       };
       await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(knowledgeSource)]);
       const mediaType = detectMediaType(
@@ -206,7 +303,11 @@ export class DefaultKnowledgeService implements KnowledgeService {
       const parsedDocument: StructuredDocument | undefined = parsed.document;
       diagnostics.push(...parsed.diagnostics);
       if (parsedDocument === undefined) {
-        const failed = { ...knowledgeSource, state: "failed" as const, updatedAt: Date.now() };
+        const failed = {
+          ...knowledgeSource,
+          state: "failed" as const,
+          updatedAt: this.#clock.now(),
+        };
         await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(failed)]);
         continue;
       }
@@ -309,7 +410,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
       ]);
       await this.#store.upsertVectors(
         "knowledge",
-        chunks.map((chunk) => this.#chunkRecord(chunk)),
+        chunks
+          .filter((chunk) => !persisted.has(chunk.id))
+          .map((chunk) => this.#chunkRecord(chunk, "preparing")),
       );
       const previousChunks =
         previousRevision === 0
@@ -318,11 +421,6 @@ export class DefaultKnowledgeService implements KnowledgeService {
               "knowledge",
               `document_id = ${quoteFilter(identifier)} AND revision = ${previousRevision}`,
             );
-      const nextIds = new Set(chunks.map((chunk) => chunk.id));
-      const staleIds = previousChunks
-        .map((document) => document.id)
-        .filter((id) => !nextIds.has(id));
-      await this.#store.deleteVectors("knowledge", staleIds);
       const activeDocument: KnowledgeDocument = {
         ...knowledgeDocument,
         activeRevision: revision,
@@ -331,8 +429,21 @@ export class DefaultKnowledgeService implements KnowledgeService {
       await this.#store.upsertScalar("knowledge_documents_v1", [
         this.#documentRecord(activeDocument),
       ]);
+      await this.#store.upsertVectors(
+        "knowledge",
+        chunks.map((chunk) => this.#chunkRecord(chunk, "active")),
+      );
+      const nextIds = new Set(chunks.map((chunk) => chunk.id));
+      const staleIds = previousChunks
+        .map((document) => document.id)
+        .filter((id) => !nextIds.has(id));
+      await this.#store.deleteVectors("knowledge", staleIds);
       await this.#store.upsertScalar("knowledge_sources_v1", [
-        this.#sourceRecord({ ...knowledgeSource, state: "active", updatedAt: Date.now() }),
+        this.#sourceRecord({
+          ...knowledgeSource,
+          state: "active",
+          updatedAt: this.#clock.now(),
+        }),
       ]);
       chunkCount += chunks.length;
       await options.onProgress?.({
@@ -349,83 +460,144 @@ export class DefaultKnowledgeService implements KnowledgeService {
     command: IngestKnowledgeCommand,
     options: EnqueueOptions = {},
   ): Promise<JobReceipt> {
+    const commandJson = serializeIngestCommand(command);
+    const commandHash = stableHash("knowledge-ingest-command:v1", commandJson);
+    const deduplicationKey = stableHash("knowledge-ingest-job:v2", commandHash);
+    const existing = await this.#findActiveJob(deduplicationKey);
+    if (existing !== undefined) {
+      const scheduled = this.#scheduleJob(
+        existing,
+        parseIngestCommand(existing.commandJson),
+        options,
+      );
+      void scheduled.promise.catch(() => undefined);
+      return {
+        jobId: existing.jobId,
+        accepted: true,
+        deduplicated: true,
+        state: existing.state === "running" || existing.state === "leased" ? "running" : "queued",
+      };
+    }
     const jobId = operationId("job");
-    const deduplicationKey = stableHash("knowledge-ingest-job:v1", JSON.stringify(command));
-    const now = Date.now();
-    await this.#store.upsertScalar("jobs_v1", [
-      {
-        id: jobId,
-        kind: "knowledge-ingest",
-        namespace: command.namespace ?? this.#defaultNamespace,
-        status: "queued",
-        payload: { jobId, command, state: "queued", createdAt: now },
-        createdAt: now,
-        updatedAt: now,
-      },
-    ]);
-    const scheduled = this.#scheduler.schedule({
-      id: jobId,
+    const now = this.#clock.now();
+    const jobNamespace = secureNamespace(
+      command.namespace ?? this.#defaultNamespace,
+      command.scopeContext,
+    );
+    const job: PersistedKnowledgeJob = {
+      jobId,
       deduplicationKey,
-      priority:
-        options.priority === "background"
-          ? TaskPriority.BackgroundSync
-          : TaskPriority.UserRequested,
-      estimatedBytes: Buffer.byteLength(JSON.stringify(command), "utf8"),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      run: async (signal) => {
-        const started = Date.now();
-        await this.#store.upsertScalar("jobs_v1", [
-          {
-            id: jobId,
-            kind: "knowledge-ingest",
-            namespace: command.namespace ?? this.#defaultNamespace,
-            status: "running",
-            payload: { jobId, command, state: "running", startedAt: started },
-            createdAt: now,
-            updatedAt: started,
-          },
-        ]);
-        try {
-          const result = await this.ingest(command, { ...options, signal });
-          await this.#store.upsertScalar("jobs_v1", [
-            {
-              id: jobId,
-              kind: "knowledge-ingest",
-              namespace: command.namespace ?? this.#defaultNamespace,
-              status: "completed",
-              payload: { jobId, state: "completed", result, completedAt: Date.now() },
-              createdAt: now,
-              updatedAt: Date.now(),
-            },
-          ]);
-          return result;
-        } catch (error: unknown) {
-          await this.#store.upsertScalar("jobs_v1", [
-            {
-              id: jobId,
-              kind: "knowledge-ingest",
-              namespace: command.namespace ?? this.#defaultNamespace,
-              status: "failed",
-              payload: {
-                jobId,
-                state: "failed",
-                error: error instanceof Error ? error.message : String(error),
-                failedAt: Date.now(),
-              },
-              createdAt: now,
-              updatedAt: Date.now(),
-            },
-          ]);
-          throw error;
-        }
-      },
-    });
+      commandHash,
+      commandJson,
+      namespace: jobNamespace,
+      state: "queued",
+      attempts: 0,
+      maxAttempts: JOB_MAX_ATTEMPTS,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await this.#persistJob(job);
+    const scheduled = this.#scheduleJob(job, command, options);
     void scheduled.promise.catch(() => undefined);
     return {
       jobId,
       accepted: true,
       deduplicated: scheduled.deduplicated,
       state: "queued",
+    };
+  }
+
+  async recoverJobs(options: OperationOptions = {}): Promise<KnowledgeJobRecoveryResult> {
+    if (this.#recoveryPerformed) {
+      return { inspected: 0, recovered: 0, dead: 0, invalid: 0 };
+    }
+    this.#recoveryPerformed = true;
+    const documents = await this.#store.filterScalar(
+      "jobs_v1",
+      'kind = "knowledge-ingest" AND (status = "queued" OR status = "leased" OR status = "running" OR status = "failed")',
+      10_000,
+    );
+    let recovered = 0;
+    let dead = 0;
+    let invalid = 0;
+    for (const document of documents) {
+      throwIfAborted(options.signal, "knowledge-job-recovery");
+      const payload = decodeStoredPayload(document);
+      const job = this.#decodeJob(payload);
+      if (job === undefined) {
+        const now = this.#clock.now();
+        await this.#store.upsertScalar("jobs_v1", [
+          {
+            id: document.id,
+            kind: "knowledge-ingest",
+            namespace: stringField(fieldsOf(document), "namespace", this.#defaultNamespace),
+            status: "dead",
+            payload: {
+              ...payload,
+              state: "dead",
+              error: "Persisted job payload cannot be recovered",
+              updatedAt: now,
+            },
+            createdAt: numericField(fieldsOf(document), "created_at", now),
+            updatedAt: now,
+          },
+        ]);
+        invalid++;
+        continue;
+      }
+      if (job.attempts >= job.maxAttempts) {
+        await this.#persistJob({
+          ...this.#withoutLease(job),
+          state: "dead",
+          error: job.error ?? "Maximum attempts exhausted before recovery",
+          updatedAt: this.#clock.now(),
+        });
+        dead++;
+        continue;
+      }
+      let command: IngestKnowledgeCommand;
+      try {
+        command = parseIngestCommand(job.commandJson);
+      } catch (error: unknown) {
+        await this.#persistJob({
+          ...this.#withoutLease(job),
+          state: "dead",
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: this.#clock.now(),
+        });
+        invalid++;
+        continue;
+      }
+      const recoveredJob: PersistedKnowledgeJob = {
+        ...this.#withoutLease(job),
+        state: "queued",
+        ...(job.state === "leased" || job.state === "running"
+          ? { error: `Lease taken over from ${job.leaseOwner ?? "unknown worker"}` }
+          : {}),
+        updatedAt: this.#clock.now(),
+      };
+      await this.#persistJob(recoveredJob);
+      const scheduled = this.#scheduleJob(recoveredJob, command, {
+        priority: "background",
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      });
+      void scheduled.promise.catch(() => undefined);
+      recovered++;
+    }
+    const migrations = await recoverKnowledgeEmbeddingMigrationJobs(
+      this.#store,
+      this.#scheduler,
+      this.#embedding,
+      {
+        clock: this.#clock,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      },
+    );
+    return {
+      inspected: documents.length + migrations.inspected,
+      recovered: recovered + migrations.recovered,
+      dead: dead + migrations.dead,
+      invalid,
     };
   }
 
@@ -439,20 +611,29 @@ export class DefaultKnowledgeService implements KnowledgeService {
         const stages: Record<string, number> = {};
         const degraded: string[] = [];
         const embeddingStarted = performance.now();
-        const queryVector = await this.#queryEmbedding(query.text, { ...options, signal });
+        let queryVector: EmbeddingVector | undefined;
+        try {
+          queryVector = await this.#queryEmbedding(query.text, { ...options, signal });
+        } catch (error: unknown) {
+          throwIfAborted(signal, "knowledge-search");
+          degraded.push(`embedding:${error instanceof Error ? error.name : "error"}`);
+        }
         stages["embedding"] = performance.now() - embeddingStarted;
-        const filter =
-          query.namespace === undefined
-            ? undefined
-            : `namespace = ${quoteFilter(query.namespace)} AND status = "active"`;
+        const namespace = secureNamespace(
+          query.namespace ?? this.#defaultNamespace,
+          query.scopeContext,
+        );
+        const filter = `namespace = ${quoteFilter(namespace)} AND status = "active"`;
         const zvecStarted = performance.now();
         const searches = await Promise.allSettled([
-          this.#store.vectorSearch({
-            kind: "knowledge",
-            vector: queryVector.values,
-            topK: limit * 2,
-            ...(filter === undefined ? {} : { filter }),
-          }),
+          queryVector === undefined
+            ? Promise.resolve([])
+            : this.#store.vectorSearch({
+                kind: "knowledge",
+                vector: queryVector.values,
+                topK: limit * 2,
+                ...(filter === undefined ? {} : { filter }),
+              }),
           this.#store.ftsSearch({
             kind: "knowledge",
             query: query.text,
@@ -469,6 +650,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
           }
           for (const [rank, document] of result.value.entries()) {
             const payload = decodeStoredPayload(document);
+            if (stringField(fieldsOf(document), "namespace", "") !== namespace) continue;
             const text =
               typeof payload["text"] === "string"
                 ? payload["text"]
@@ -494,6 +676,21 @@ export class DefaultKnowledgeService implements KnowledgeService {
         const hits = [...fused.values()]
           .sort((left, right) => right.score - left.score)
           .slice(0, limit);
+        if (
+          hits.length === 0 &&
+          query.scopeContext?.tenantId === "local" &&
+          query.scopeContext.userId === "local" &&
+          query.scopeContext.appId === "pi"
+        ) {
+          return this.search(
+            {
+              text: query.text,
+              ...(query.namespace === undefined ? {} : { namespace: query.namespace }),
+              limit,
+            },
+            options,
+          );
+        }
         return {
           hits,
           diagnostics: {
@@ -517,16 +714,28 @@ export class DefaultKnowledgeService implements KnowledgeService {
     const sourcePayload = (
       await this.#store.fetchScalar("knowledge_sources_v1", [command.sourceId])
     ).get(command.sourceId);
+    const sourceNamespace = sourcePayload?.["namespace"];
+    if (
+      sourcePayload !== undefined &&
+      (typeof sourceNamespace !== "string" ||
+        !sourceNamespace.startsWith(`${securityBoundary(command.scopeContext)}::`))
+    ) {
+      return { sourceId: command.sourceId, removedChunks: 0 };
+    }
     const chunks = await this.#store.filterVectors(
       "knowledge",
-      `source_id = ${quoteFilter(command.sourceId)}`,
+      `source_id = ${quoteFilter(command.sourceId)} AND namespace = ${quoteFilter(
+        typeof sourceNamespace === "string"
+          ? sourceNamespace
+          : secureNamespace(this.#defaultNamespace, command.scopeContext),
+      )}`,
     );
     await this.#store.deleteVectors(
       "knowledge",
       chunks.map((document) => document.id),
     );
     if (sourcePayload !== undefined) {
-      const now = Date.now();
+      const now = this.#clock.now();
       await this.#store.upsertScalar("knowledge_sources_v1", [
         {
           id: command.sourceId,
@@ -552,6 +761,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
       {
         source: command.source,
         ...(command.namespace === undefined ? {} : { namespace: command.namespace }),
+        ...(command.scopeContext === undefined ? {} : { scopeContext: command.scopeContext }),
       },
       options,
     );
@@ -570,7 +780,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
     );
     const chunks = chunkDocuments
       .map((stored) => decodeStoredPayload(stored) as unknown as Omit<KnowledgeChunk, "embedding">)
+      .filter((chunk) => chunk.namespace.startsWith(`${securityBoundary(query.scopeContext)}::`))
       .sort((left, right) => left.ordinal - right.ordinal);
+    if (chunks.length === 0) return undefined;
     return { document, chunks };
   }
 
@@ -641,6 +853,145 @@ export class DefaultKnowledgeService implements KnowledgeService {
     if (vector === undefined) throw new Error("Query Embedding response is empty");
     this.#queryCache.set(key, vector);
     return vector;
+  }
+
+  #scheduleJob(
+    initial: PersistedKnowledgeJob,
+    command: IngestKnowledgeCommand,
+    options: EnqueueOptions,
+  ): ReturnType<BackgroundScheduler["schedule"]> {
+    return this.#scheduler.schedule({
+      id: initial.jobId,
+      deduplicationKey: initial.deduplicationKey,
+      priority:
+        options.priority === "background"
+          ? TaskPriority.BackgroundSync
+          : TaskPriority.UserRequested,
+      estimatedBytes: Buffer.byteLength(initial.commandJson, "utf8"),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      run: async (signal) => {
+        let job = initial;
+        let lastError: unknown;
+        while (job.attempts < job.maxAttempts) {
+          throwIfAborted(signal, "knowledge-ingest-job");
+          const leasedAt = this.#clock.now();
+          job = {
+            ...this.#withoutLease(job),
+            state: "leased",
+            attempts: job.attempts + 1,
+            leaseOwner: this.#workerId,
+            leaseExpiresAt: leasedAt + JOB_LEASE_MS,
+            updatedAt: leasedAt,
+          };
+          await this.#persistJob(job);
+          job = { ...job, state: "running", updatedAt: this.#clock.now() };
+          await this.#persistJob(job);
+          try {
+            const result = await this.ingest(command, { ...options, signal });
+            const succeeded: PersistedKnowledgeJob = {
+              ...this.#withoutLease(job),
+              state: "succeeded",
+              result,
+              updatedAt: this.#clock.now(),
+            };
+            await this.#persistJob(succeeded);
+            return result;
+          } catch (error: unknown) {
+            lastError = error;
+            const message = error instanceof Error ? error.message : String(error);
+            const failed: PersistedKnowledgeJob = {
+              ...this.#withoutLease(job),
+              state: "failed",
+              error: message,
+              updatedAt: this.#clock.now(),
+            };
+            await this.#persistJob(failed);
+            if (signal.aborted) throw error;
+            if (!retryableJobError(error) || failed.attempts >= failed.maxAttempts) {
+              await this.#persistJob({
+                ...failed,
+                state: "dead",
+                updatedAt: this.#clock.now(),
+              });
+              throw error;
+            }
+            job = { ...failed, state: "queued", updatedAt: this.#clock.now() };
+            await this.#persistJob(job);
+            await this.#retryDelay(250 * 2 ** Math.max(0, job.attempts - 1), signal);
+          }
+        }
+        throw lastError instanceof Error ? lastError : new Error("Knowledge job exhausted retries");
+      },
+    });
+  }
+
+  async #findActiveJob(deduplicationKey: string): Promise<PersistedKnowledgeJob | undefined> {
+    const documents = await this.#store.filterScalar(
+      "jobs_v1",
+      'kind = "knowledge-ingest" AND (status = "queued" OR status = "leased" OR status = "running" OR status = "failed")',
+      10_000,
+    );
+    for (const document of documents) {
+      const job = this.#decodeJob(decodeStoredPayload(document));
+      if (job?.deduplicationKey === deduplicationKey) return job;
+    }
+    return undefined;
+  }
+
+  #decodeJob(payload: Readonly<Record<string, unknown>>): PersistedKnowledgeJob | undefined {
+    if (
+      typeof payload["jobId"] !== "string" ||
+      typeof payload["deduplicationKey"] !== "string" ||
+      typeof payload["commandHash"] !== "string" ||
+      typeof payload["commandJson"] !== "string" ||
+      typeof payload["namespace"] !== "string" ||
+      typeof payload["state"] !== "string" ||
+      !["queued", "leased", "running", "succeeded", "failed", "dead"].includes(payload["state"]) ||
+      typeof payload["attempts"] !== "number" ||
+      typeof payload["maxAttempts"] !== "number" ||
+      typeof payload["createdAt"] !== "number" ||
+      typeof payload["updatedAt"] !== "number"
+    ) {
+      return undefined;
+    }
+    return payload as unknown as PersistedKnowledgeJob;
+  }
+
+  #withoutLease(
+    job: PersistedKnowledgeJob,
+  ): Omit<PersistedKnowledgeJob, "leaseOwner" | "leaseExpiresAt"> {
+    const { leaseOwner: _leaseOwner, leaseExpiresAt: _leaseExpiresAt, ...rest } = job;
+    void _leaseOwner;
+    void _leaseExpiresAt;
+    return rest;
+  }
+
+  async #persistJob(job: PersistedKnowledgeJob): Promise<void> {
+    await this.#store.upsertScalar("jobs_v1", [
+      {
+        id: job.jobId,
+        kind: "knowledge-ingest",
+        namespace: job.namespace,
+        status: job.state,
+        payload: job as unknown as Readonly<Record<string, unknown>>,
+        createdAt: job.createdAt,
+        updatedAt: job.updatedAt,
+      },
+    ]);
+  }
+
+  async #retryDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          reject(signal.reason instanceof Error ? signal.reason : new Error("Job cancelled"));
+        },
+        { once: true },
+      );
+    });
   }
 
   async #embedDrafts(
@@ -729,13 +1080,13 @@ export class DefaultKnowledgeService implements KnowledgeService {
     };
   }
 
-  #chunkRecord(chunk: KnowledgeChunk): StoredVectorRecord {
+  #chunkRecord(chunk: KnowledgeChunk, status: "preparing" | "active"): StoredVectorRecord {
     const { embedding, ...payload } = chunk;
     return {
       id: chunk.id,
       kind: "knowledge",
       namespace: chunk.namespace,
-      status: "active",
+      status,
       payload: payload as unknown as Readonly<Record<string, unknown>>,
       searchableText: chunk.searchableText,
       contentHash: chunk.contentHash,
