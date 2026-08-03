@@ -1,12 +1,9 @@
 import { arch, platform } from "node:os";
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 import {
   BackgroundScheduler,
-  EvidenceAuthority,
   MentisContextResolver,
   ProviderPriority,
   TaskPriority,
@@ -29,13 +26,13 @@ import type {
 } from "@pi-mentis/pi-mentis-inference";
 import {
   ContextStateService,
+  DefaultRememberCoordinator,
   PiCaptureSession,
   createExperienceLearningService,
   createPiEvidenceStore,
   createTaskGraphService,
   createMemoryService,
   deriveExperienceObservation,
-  memoryContentGroundedInUserPrompt,
   referencedMemoryIds,
   resolvePiProjectIdentity,
   taskIdentityId,
@@ -48,10 +45,11 @@ import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
   formatPiToolJson,
   notifyWhenUiAvailable,
-  PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
+  registerMemoryToolPair,
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 import {
   AdaptivePolicyService,
+  DefaultRecallCoordinator,
   EffectivenessService,
   createRetrievalService,
   evaluateReplayCandidate,
@@ -94,343 +92,42 @@ function registerMemoryTools(
   pi: ExtensionAPI,
   memory: MemoryService,
   retrieval: RetrievalService | undefined,
-  evidence: PiEvidenceStore,
-  currentScopeContext: () => PiScopeContext,
-  currentContextSnapshot: () => MentisContextSnapshot | undefined,
-  currentEvidenceRef: () => EvidenceRef | undefined,
-  onTrace: (traceId: string) => void,
+  _evidence: PiEvidenceStore,
+  getScopeContext: () => PiScopeContext,
+  getContextSnapshot: () => MentisContextSnapshot | undefined,
+  getEvidenceRef: () => EvidenceRef | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _onTrace: (traceId: string) => void,
 ): void {
-  pi.registerTool({
-    name: "commit_memory",
-    label: "Commit memory",
-    description: `Commit evidence-bound durable memory with scope, type, confidence, and conflict handling. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
-    parameters: Type.Object({
-      content: Type.String({ minLength: 3 }),
-      type: StringEnum([
-        "preference",
-        "requirement",
-        "fact",
-        "decision",
-        "procedural",
-        "episodic",
-        "task",
-      ] as const),
-      scopeKind: StringEnum([
-        "user",
-        "workspace",
-        "project",
-        "repository",
-        "topic",
-        "task",
-        "session",
-        "branch",
-        "run",
-      ] as const),
-      scopeId: Type.String({ minLength: 1 }),
-      confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-      importance: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
-      authority: Type.Optional(
-        Type.Union([
-          Type.Literal(10),
-          Type.Literal(20),
-          Type.Literal(30),
-          Type.Literal(40),
-          Type.Literal(50),
-          Type.Literal(60),
-          Type.Literal(70),
-          Type.Literal(80),
-          Type.Literal(90),
-          Type.Literal(100),
-        ]),
-      ),
-      supersedesIds: Type.Optional(Type.Array(Type.String())),
-      factKey: Type.Optional(Type.String({ minLength: 1 })),
-      cardinality: Type.Optional(StringEnum(["single", "set", "ordered", "event"] as const)),
-      observedAt: Type.Optional(Type.Integer({ minimum: 0 })),
-      idempotencyKey: Type.Optional(Type.String({ minLength: 1 })),
-      branchClaimState: Type.Optional(
-        StringEnum(["global", "hypothesis", "verified", "merged", "abandoned"] as const),
-      ),
-      retractsFact: Type.Optional(Type.Boolean()),
-      applicability: Type.Optional(
-        Type.Object({
-          os: Type.Optional(Type.Array(Type.String())),
-          strictOs: Type.Optional(Type.Boolean()),
-          architecture: Type.Optional(Type.Array(Type.String())),
-          strictArchitecture: Type.Optional(Type.Boolean()),
-          runtime: Type.Optional(Type.String()),
-          runtimeVersionMin: Type.Optional(Type.String()),
-          runtimeVersionMax: Type.Optional(Type.String()),
-          packageManager: Type.Optional(Type.String()),
-          repositoryId: Type.Optional(Type.String()),
-          projectId: Type.Optional(Type.String()),
-        }),
-      ),
-      premises: Type.Optional(
-        Type.Array(
-          Type.Object({
-            kind: StringEnum(["manifest", "tool", "package-manager", "context"] as const),
-            value: Type.String({ minLength: 1 }),
-            required: Type.Boolean(),
-          }),
-        ),
-      ),
-    }),
-    async execute(_toolCallId, parameters, signal) {
-      const current = currentScopeContext();
-      const observedAt = parameters.observedAt ?? Date.now();
-      const userGrounded = memoryContentGroundedInUserPrompt(
-        parameters.content,
-        currentContextSnapshot()?.situation.activeGoal,
-      );
-      const activeContext = currentContextSnapshot();
-      const inferredApplicability =
-        parameters.applicability ??
-        (parameters.type === "procedural"
-          ? {
-              ...(current.repositoryId === undefined ? {} : { repositoryId: current.repositoryId }),
-              ...(current.projectId === undefined ? {} : { projectId: current.projectId }),
-              ...(activeContext?.environment?.os === undefined
-                ? {}
-                : { os: [activeContext.environment.os] }),
-              ...(activeContext?.environment?.architecture === undefined
-                ? {}
-                : { architecture: [activeContext.environment.architecture] }),
-              ...(activeContext?.environment?.runtime === undefined
-                ? {}
-                : { runtime: activeContext.environment.runtime }),
-              ...(activeContext?.environment?.packageManager === undefined
-                ? {}
-                : { packageManager: activeContext.environment.packageManager }),
-            }
-          : undefined);
-      const result = await memory.commit(
+  // Build coordinators and register shared tool pair.
+  const rememberCoord = new DefaultRememberCoordinator(memory);
+  const recallCoord =
+    retrieval !== undefined ? new DefaultRecallCoordinator(memory, retrieval) : undefined;
+
+  registerMemoryToolPair(pi, {
+    async remember(content, signal) {
+      const ctxSnapshot = getContextSnapshot();
+      const evRef = getEvidenceRef();
+      return rememberCoord.remember(
+        { content },
         {
-          content: parameters.content,
-          type: parameters.type,
-          scope: { kind: parameters.scopeKind, id: parameters.scopeId },
-          scopeContext: current,
-          authority: Math.min(
-            parameters.authority ??
-              (userGrounded
-                ? EvidenceAuthority.UserCurrentInstruction
-                : EvidenceAuthority.AssistantInference),
-            userGrounded
-              ? EvidenceAuthority.UserCurrentInstruction
-              : EvidenceAuthority.AssistantInference,
-          ) as 10 | 20 | 30 | 40 | 50 | 60 | 70 | 80 | 90 | 100,
-          ...(parameters.confidence === undefined ? {} : { confidence: parameters.confidence }),
-          ...(parameters.importance === undefined ? {} : { importance: parameters.importance }),
-          ...(parameters.supersedesIds === undefined
-            ? {}
-            : { supersedesIds: parameters.supersedesIds }),
-          ...(parameters.factKey === undefined ? {} : { factKey: parameters.factKey }),
-          ...(parameters.cardinality === undefined ? {} : { cardinality: parameters.cardinality }),
-          observedAt,
-          ...(parameters.idempotencyKey === undefined
-            ? {}
-            : { idempotencyKey: parameters.idempotencyKey }),
-          ...(parameters.branchClaimState === undefined
-            ? {}
-            : { branchClaimState: parameters.branchClaimState }),
-          ...(parameters.retractsFact === undefined
-            ? {}
-            : { retractsFact: parameters.retractsFact }),
-          ...(inferredApplicability === undefined ? {} : { applicability: inferredApplicability }),
-          ...(parameters.premises === undefined ? {} : { premises: parameters.premises }),
-          contentOrigin: userGrounded ? "user" : "model",
-          evidenceRefs: [
-            currentEvidenceRef() ?? {
-              kind: userGrounded ? "user" : "event",
-              id: current.contextSnapshotId ?? current.runId ?? current.sessionId ?? "current-user",
-              observedAt,
-            },
-          ],
+          scopeContext: getScopeContext(),
+          ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
+          ...(evRef !== undefined ? { evidenceRef: evRef } : {}),
+          ...(signal !== undefined ? { signal } : {}),
         },
-        signal === undefined ? {} : { signal },
       );
-      return {
-        content: [{ type: "text", text: formatPiToolJson(result) }],
-        details: result,
-      };
     },
-  });
-  pi.registerTool({
-    name: "search_memory",
-    label: "Search memory",
-    description:
-      retrieval === undefined
-        ? `Search durable Pi Mentis memory. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`
-        : `Search Pi Mentis knowledge first, then knowledge-guided durable memory. ${PI_TOOL_OUTPUT_LIMIT_DESCRIPTION}`,
-    parameters: Type.Object({
-      id: Type.Optional(Type.String({ minLength: 1 })),
-      artifactId: Type.Optional(Type.String({ minLength: 1 })),
-      offset: Type.Optional(Type.Integer({ minimum: 0 })),
-      length: Type.Optional(Type.Integer({ minimum: 1, maximum: 65_536 })),
-      query: Type.Optional(Type.String({ minLength: 1 })),
-      limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-      scopeKind: Type.Optional(
-        StringEnum([
-          "user",
-          "workspace",
-          "project",
-          "repository",
-          "topic",
-          "task",
-          "session",
-          "branch",
-          "run",
-        ] as const),
-      ),
-      scopeId: Type.Optional(Type.String({ minLength: 1 })),
-      temporalMode: Type.Optional(StringEnum(["current", "historical", "all"] as const)),
-    }),
-    async execute(_toolCallId, parameters, signal) {
-      if (
-        parameters.id === undefined &&
-        parameters.query === undefined &&
-        parameters.artifactId === undefined
-      ) {
-        throw new Error("search_memory requires id, artifactId, query, or a combination");
+    async recall(request, signal) {
+      if (recallCoord === undefined) {
+        return { found: false, hits: [] };
       }
-      if (parameters.artifactId !== undefined) {
-        const scopeContext = currentScopeContext();
-        const artifact = await evidence.getArtifact(parameters.artifactId, {
-          ...(signal === undefined ? {} : { signal }),
-          scopeContext,
-        });
-        const range = await evidence.readArtifactRange(parameters.artifactId, {
-          ...(signal === undefined ? {} : { signal }),
-          scopeContext,
-          offset: parameters.offset ?? 0,
-          length: parameters.length ?? 32_768,
-        });
-        const result = {
-          artifact,
-          range,
-          content: range?.content,
-        };
-        return {
-          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
-          details: undefined,
-        };
-      }
-      const exact =
-        parameters.id === undefined
-          ? undefined
-          : await memory.get(parameters.id, {
-              ...(signal === undefined ? {} : { signal }),
-              scopeContext: currentScopeContext(),
-            });
-      const exactEvidence =
-        exact === undefined
-          ? []
-          : await evidence.readEvidence(exact.evidenceRefs, {
-              ...(signal === undefined ? {} : { signal }),
-              scopeContext: currentScopeContext(),
-            });
-      if (parameters.query === undefined) {
-        const result = { exact, evidence: exactEvidence };
-        return {
-          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
-          details: undefined,
-        };
-      }
-      if (parameters.id !== undefined) {
-        const relatedIds = [
-          ...(exact?.supersedesIds ?? []),
-          ...(exact?.supersededById === undefined ? [] : [exact.supersededById]),
-          ...(exact?.conflictsWithIds ?? []),
-        ];
-        const evolution = (
-          await Promise.all(
-            relatedIds.map((id) =>
-              memory.get(id, {
-                ...(signal === undefined ? {} : { signal }),
-                scopeContext: currentScopeContext(),
-                ...(parameters.temporalMode === undefined
-                  ? {}
-                  : { temporalMode: parameters.temporalMode }),
-              }),
-            ),
-          )
-        ).filter((record) => record !== undefined);
-        const evidenceMatches = await evidence.searchEvidence(
-          exact?.evidenceRefs ?? [],
-          parameters.query,
-          {
-            ...(signal === undefined ? {} : { signal }),
-            scopeContext: currentScopeContext(),
-          },
-        );
-        const result = { exact, evolution, evidence: evidenceMatches };
-        return {
-          content: [{ type: "text" as const, text: formatPiToolJson(result) }],
-          details: undefined,
-        };
-      }
-      const current = currentScopeContext();
-      const scopes =
-        parameters.scopeKind === undefined || parameters.scopeId === undefined
-          ? [
-              ...(current.repositoryId === undefined
-                ? []
-                : [
-                    {
-                      kind: "repository" as const,
-                      id: current.repositoryId,
-                    },
-                  ]),
-              ...(current.projectId === undefined
-                ? []
-                : [{ kind: "project" as const, id: current.projectId }]),
-              ...(current.taskId === undefined
-                ? []
-                : [{ kind: "task" as const, id: current.taskId }]),
-              ...(current.topicIds ?? []).map((id) => ({
-                kind: "topic" as const,
-                id,
-              })),
-              { kind: "user" as const, id: current.userId },
-            ]
-          : [{ kind: parameters.scopeKind, id: parameters.scopeId }];
-      const activeSnapshot = currentContextSnapshot();
-      const result =
-        retrieval === undefined
-          ? await memory.search(
-              {
-                text: parameters.query,
-                ...(parameters.limit === undefined ? {} : { limit: parameters.limit }),
-                scopes,
-                scopeContext: currentScopeContext(),
-              },
-              signal === undefined ? {} : { signal },
-            )
-          : await retrieval.search(
-              {
-                text: parameters.query,
-                ...(parameters.limit === undefined ? {} : { limit: parameters.limit }),
-                memoryScopes: scopes,
-                memoryScopeContext: currentScopeContext(),
-                ...(parameters.temporalMode === undefined
-                  ? {}
-                  : { temporalMode: parameters.temporalMode }),
-                ...(activeSnapshot === undefined ? {} : { contextSnapshot: activeSnapshot }),
-              },
-              { ...(signal === undefined ? {} : { signal }), allowRerank: true, onTrace },
-            );
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatPiToolJson({
-              ...(parameters.id === undefined ? {} : { exact, evidence: exactEvidence }),
-              search: result,
-            }),
-          },
-        ],
-        details: undefined,
-      };
+      const ctxSnapshot = getContextSnapshot();
+      return recallCoord.recall(request, {
+        scopeContext: getScopeContext(),
+        ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
+        ...(signal !== undefined ? { signal } : {}),
+      });
     },
   });
 }
