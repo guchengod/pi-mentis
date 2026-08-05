@@ -74,7 +74,7 @@ function planAction(content: string): MemoryAction {
   const lower = content.toLowerCase();
 
   if (
-    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant|更正.*之前/.test(
+    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant|改成|现在使用|切换到|换成|修改.*是/i.test(
       lower,
     )
   ) {
@@ -96,6 +96,20 @@ function planAction(content: string): MemoryAction {
 
 function inferType(content: string): MemoryType {
   const lower = content.toLowerCase();
+
+  // Correction/retraction signals must be checked first to avoid
+  // being misclassified as episodic (because "错误" matches the episodic keyword).
+  if (
+    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant/.test(
+      lower,
+    )
+  ) {
+    return "fact";
+  }
+
+  if (/忘掉|删除.*记忆|清除|forget|remove.*memory|撤销/.test(lower)) {
+    return "fact";
+  }
 
   if (
     /喜欢|偏好|prefer|like|preference|风格|回答.*方式|习惯|通常|一般.*喜欢|说.*方式/.test(lower)

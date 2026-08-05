@@ -23,12 +23,12 @@ import type {
   EvidenceReadOptions,
 } from "@pi-mentis/pi-mentis-memory-core";
 
-export type MentisResourceType =
-  | "memory"
-  | "artifact"
-  | "evidence"
-  | "search"
-  | "unknown";
+export interface ResourceResolverServices {
+  getMemory(): MemoryService | undefined;
+  getEvidence(): PiEvidenceStore | undefined;
+}
+
+export type MentisResourceType = "memory" | "artifact" | "evidence" | "search" | "unknown";
 
 export interface ResolvedMentisReference {
   readonly id: string;
@@ -40,13 +40,7 @@ export interface ResolvedMentisReference {
   readonly scopeAllowed: boolean;
 
   readonly reason:
-    | "resolved"
-    | "not_found"
-    | "scope_denied"
-    | "not_ready"
-    | "expired"
-    | "failed"
-    | "ambiguous";
+    "resolved" | "not_found" | "scope_denied" | "not_ready" | "expired" | "failed" | "ambiguous";
 }
 
 export interface ResourceReferenceResolverContext {
@@ -55,10 +49,7 @@ export interface ResourceReferenceResolverContext {
 }
 
 export interface MentisResourceReferenceResolver {
-  resolve(
-    id: string,
-    context: ResourceReferenceResolverContext,
-  ): Promise<ResolvedMentisReference>;
+  resolve(id: string, context: ResourceReferenceResolverContext): Promise<ResolvedMentisReference>;
 }
 
 const PREFIX_MAP: Readonly<Record<string, MentisResourceType>> = {
@@ -82,10 +73,7 @@ function resolvePrefix(id: string): MentisResourceType | undefined {
   return undefined;
 }
 
-function memoryGetOptions(
-  scopeContext: PiScopeContext,
-  signal?: AbortSignal,
-): MemoryGetOptions {
+function memoryGetOptions(scopeContext: PiScopeContext, signal?: AbortSignal): MemoryGetOptions {
   if (signal === undefined) return { scopeContext };
   return { scopeContext, signal };
 }
@@ -140,13 +128,11 @@ function publicReason(
 }
 
 export class DefaultMentisResourceReferenceResolver implements MentisResourceReferenceResolver {
-  readonly #memory: MemoryService;
-  readonly #evidence: PiEvidenceStore;
+  readonly #services: ResourceResolverServices;
   readonly #cache = new Map<string, CacheEntry>();
 
-  constructor(memory: MemoryService, evidence: PiEvidenceStore) {
-    this.#memory = memory;
-    this.#evidence = evidence;
+  constructor(services: ResourceResolverServices) {
+    this.#services = services;
   }
 
   async resolve(
@@ -186,45 +172,85 @@ export class DefaultMentisResourceReferenceResolver implements MentisResourceRef
     const prefixType = resolvePrefix(id);
     const unprefixed = id.replace(/^(?:mem_|art_|ev_)/, "");
 
+    const memory = this.#services.getMemory();
+    const evidence = this.#services.getEvidence();
+
     if (prefixType === "memory") {
-      const record = await this.#memory.get(unprefixed, memOpts).catch(() => undefined);
+      if (memory === undefined) {
+        return { id, type: "memory", ...UNRESOLVED, reason: "failed" };
+      }
+      const record = await memory.get(unprefixed, memOpts).catch(() => undefined);
       if (record !== undefined) {
         return {
-          id, type: "memory", readable: true, queryable: true, scopeAllowed: true, reason: "resolved",
+          id,
+          type: "memory",
+          readable: true,
+          queryable: true,
+          scopeAllowed: true,
+          reason: "resolved",
         };
       }
       return { id, type: "memory", ...UNRESOLVED, reason: "not_found" };
     }
 
     if (prefixType === "artifact") {
-      const artifact = await this.#evidence.getArtifact(unprefixed, evOpts).catch(() => undefined);
+      if (evidence === undefined) {
+        return { id, type: "artifact", ...UNRESOLVED, reason: "failed" };
+      }
+      const artifact = await evidence.getArtifact(unprefixed, evOpts).catch(() => undefined);
       if (artifact !== undefined) {
         if (!isAlive(artifact.state, artifact.expiresAt)) {
           const reason = expiredReason(artifact.expiresAt) ? "expired" : "not_ready";
-          return { id, type: "artifact", readable: false, queryable: false, scopeAllowed: true, reason };
+          return {
+            id,
+            type: "artifact",
+            readable: false,
+            queryable: false,
+            scopeAllowed: true,
+            reason,
+          };
         }
         return {
-          id, type: "artifact", readable: true, queryable: true, scopeAllowed: true, reason: "resolved",
+          id,
+          type: "artifact",
+          readable: true,
+          queryable: true,
+          scopeAllowed: true,
+          reason: "resolved",
         };
       }
       return { id, type: "artifact", ...UNRESOLVED, reason: "not_found" };
     }
 
     if (prefixType === "evidence") {
-      const event = await this.#evidence.getEvent(unprefixed, evOpts).catch(() => undefined);
+      if (evidence === undefined) {
+        return { id, type: "evidence", ...UNRESOLVED, reason: "failed" };
+      }
+      const event = await evidence.getEvent(unprefixed, evOpts).catch(() => undefined);
       if (event !== undefined) {
         return {
-          id, type: "evidence", readable: true, queryable: false, scopeAllowed: true, reason: "resolved",
+          id,
+          type: "evidence",
+          readable: true,
+          queryable: false,
+          scopeAllowed: true,
+          reason: "resolved",
         };
       }
       return { id, type: "evidence", ...UNRESOLVED, reason: "not_found" };
     }
 
     // Unprefixed ID → probe all stores in parallel
+    const memoryPromise =
+      memory?.get(id, memOpts).catch(() => undefined) ?? Promise.resolve(undefined);
+    const artifactPromise =
+      evidence?.getArtifact(id, evOpts).catch(() => undefined) ?? Promise.resolve(undefined);
+    const eventPromise =
+      evidence?.getEvent(id, evOpts).catch(() => undefined) ?? Promise.resolve(undefined);
     const [memoryResult, artifactResult, eventResult] = await Promise.all([
-      this.#memory.get(id, memOpts).catch(() => undefined),
-      this.#evidence.getArtifact(id, evOpts).catch(() => undefined),
-      this.#evidence.getEvent(id, evOpts).catch(() => undefined),
+      memoryPromise,
+      artifactPromise,
+      eventPromise,
     ]);
 
     const hits: MentisResourceType[] = [];
@@ -245,23 +271,45 @@ export class DefaultMentisResourceReferenceResolver implements MentisResourceRef
     const type = hits[0];
     if (type === "memory" && memoryResult !== undefined) {
       return {
-        id, type: "memory", readable: true, queryable: true, scopeAllowed: true, reason: "resolved",
+        id,
+        type: "memory",
+        readable: true,
+        queryable: true,
+        scopeAllowed: true,
+        reason: "resolved",
       };
     }
 
     if (type === "artifact" && artifactResult !== undefined) {
       if (!isAlive(artifactResult.state, artifactResult.expiresAt)) {
         const reason = expiredReason(artifactResult.expiresAt) ? "expired" : "not_ready";
-        return { id, type: "artifact", readable: false, queryable: false, scopeAllowed: true, reason };
+        return {
+          id,
+          type: "artifact",
+          readable: false,
+          queryable: false,
+          scopeAllowed: true,
+          reason,
+        };
       }
       return {
-        id, type: "artifact", readable: true, queryable: true, scopeAllowed: true, reason: "resolved",
+        id,
+        type: "artifact",
+        readable: true,
+        queryable: true,
+        scopeAllowed: true,
+        reason: "resolved",
       };
     }
 
     if (type === "evidence" && eventResult !== undefined) {
       return {
-        id, type: "evidence", readable: true, queryable: false, scopeAllowed: true, reason: "resolved",
+        id,
+        type: "evidence",
+        readable: true,
+        queryable: false,
+        scopeAllowed: true,
+        reason: "resolved",
       };
     }
 

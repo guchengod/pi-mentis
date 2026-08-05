@@ -55,6 +55,7 @@ import {
   evaluateReplayCandidate,
   type CreateRetrievalServiceOptions,
   type RetrievalService,
+  type MentisServiceAccess,
 } from "@pi-mentis/pi-mentis-retrieval";
 import {
   SiliconFlowEmbeddingProvider,
@@ -90,9 +91,7 @@ function fallbackProjectIdentity(cwd: string): PiProjectIdentity {
 
 function registerMemoryTools(
   pi: ExtensionAPI,
-  memory: MemoryService,
-  retrieval: RetrievalService | undefined,
-  evidence: PiEvidenceStore,
+  services: MentisServiceAccess,
   getScopeContext: () => PiScopeContext,
   getContextSnapshot: () => MentisContextSnapshot | undefined,
   getEvidenceRef: () => EvidenceRef | undefined,
@@ -100,12 +99,20 @@ function registerMemoryTools(
   _onTrace: (traceId: string) => void,
 ): void {
   // Build coordinators and register shared tool pair.
-  const rememberCoord = new DefaultRememberCoordinator(memory);
+  const memory = services.getMemory();
+  const rememberCoord = memory !== undefined ? new DefaultRememberCoordinator(memory) : undefined;
   const recallCoord =
-    retrieval !== undefined ? new DefaultRecallCoordinator(memory, retrieval, evidence) : undefined;
+    services.getRetrieval() !== undefined ? new DefaultRecallCoordinator(services) : undefined;
 
   registerMemoryToolPair(pi, {
     async remember(content, signal) {
+      if (rememberCoord === undefined) {
+        return {
+          outcome: "unavailable" as const,
+          summary: "Memory service unavailable.",
+          readable: false,
+        };
+      }
       const ctxSnapshot = getContextSnapshot();
       const evRef = getEvidenceRef();
       return rememberCoord.remember(
@@ -272,14 +279,23 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       );
     }
     const memory = runtime.getMemory<MemoryService>();
+
+    // Create evidence store BEFORE tool registration so coordinators
+    // receive a valid reference through dynamic accessors.
+    if (storeHandle !== undefined && evidenceStore === undefined) {
+      evidenceStore = createPiEvidenceStore(storeHandle.store);
+    }
+
     // Always register tools — even if store init failed.
     // Tools return structured errors when services are unavailable.
     if (!registered) {
       registerMemoryTools(
         pi,
-        memory!,
-        runtime.getRetrieval<RetrievalService>() ?? undefined,
-        evidenceStore ?? undefined!,
+        {
+          getMemory: () => runtime.getMemory<MemoryService>(),
+          getRetrieval: () => runtime.getRetrieval<RetrievalService>(),
+          getEvidence: () => evidenceStore,
+        },
         () => scopeContext,
         () => contextSnapshot,
         () =>

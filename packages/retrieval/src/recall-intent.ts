@@ -91,7 +91,7 @@ export function classifyIntent(input: string): IntentClassification {
 
   // ─── Current project fact: how to build? what's the package manager? ───
   if (
-    /怎么(?:构建|编译|测试|部署|打包|安装|运行)|how (?:to|do I) (?:build|compile|test|deploy|run|install)|(?:build|test|deploy) command|用什么.*(?:构建|包管理|测试|部署)|这个项目|this project/i.test(
+    /怎么\s*(?:构建|编译|测试|部署|打包|安装|运行|build|test|deploy)|how (?:to|do I) (?:build|compile|test|deploy|run|install)|(?:build|test|deploy|构建|编译|测试)命令|用什么.*(?:构建|包管理|测试|部署|数据库)|这个项目|this project|数据库.*(?:什么|哪个|用的)/i.test(
       normalized,
     )
   ) {
@@ -103,7 +103,7 @@ export function classifyIntent(input: string): IntentClassification {
 
   // ─── Historical event: why did build fail last time? ───
   if (
-    /上次|上[个次回]|之前|为什么.*失败|上次.*构建|之前.*错误|上一次|what happened|last time|previous/i.test(
+    /上次|上[个次回]|之前|以前|为什么.*失败|上次.*构建|之前.*错误|上一次|what happened|last time|previous/i.test(
       normalized,
     )
   ) {

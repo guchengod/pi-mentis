@@ -163,7 +163,7 @@ function detectProfileSignal(content: string): ProfileSignal {
 
   // Response style: 回答风格 / 喜欢先看结论 / 简洁
   if (
-    /回答.*风格|回复.*方式|先看.*结论|简洁|详细|啰嗦|简练|response\s+style|回答方式|说.*方式|讲.*方式/.test(
+    /回答.*风格|回复.*方式|先(?:看|给).*结论|简洁|详细|啰嗦|简练|response\s+style|回答方式|说.*方式|讲.*方式|先.*结论/.test(
       normalized,
     )
   ) {
@@ -194,18 +194,23 @@ function detectProjectSignal(
 ): { projectRelated: boolean; predicate: KnownPredicate | undefined; confidence: number } {
   const normalized = normalizeText(content).toLowerCase();
 
-  // Explicit project scope markers
-  if (/这个项目|this project|当前项目|仓库|this repo|代码库|codebase/.test(normalized)) {
-    return { projectRelated: true, predicate: undefined, confidence: 0.85 };
+  // Check for specific project predicates first (even with explicit markers present)
+  // Build command checked BEFORE package_manager: "pnpm build" should detect build_command
+  if (/\b(?:build|构建|编译|pnpm build|npm run build|tsc|turbo build)\b/i.test(normalized)) {
+    return { projectRelated: true, predicate: "project_build_command", confidence: 0.8 };
+  }
+
+  // Test command checked BEFORE package_manager: "pnpm test" should detect test_command
+  if (/\b(?:test|测试|vitest|jest|pnpm test|npm test)\b/i.test(normalized)) {
+    return { projectRelated: true, predicate: "project_test_command", confidence: 0.8 };
   }
 
   // Package manager
   if (/\b(?:pnpm|npm|yarn|bun|包管理|包管理器)\b/i.test(normalized)) {
-    // Distinguish general preference from project-specific
-    if (
+    const isGeneral =
       /一般|通常|默认|一般.*项目|prefer|usually|default/i.test(normalized) &&
-      !/这个项目|this project/i.test(normalized)
-    ) {
+      !/这个项目|this project/i.test(normalized);
+    if (isGeneral) {
       return {
         projectRelated: false,
         predicate: "general_package_manager_preference",
@@ -213,16 +218,6 @@ function detectProjectSignal(
       };
     }
     return { projectRelated: true, predicate: "project_package_manager", confidence: 0.8 };
-  }
-
-  // Build command
-  if (/\b(?:build|构建|编译|pnpm build|npm run build|tsc|turbo build)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_build_command", confidence: 0.8 };
-  }
-
-  // Test command
-  if (/\b(?:test|测试|vitest|jest|pnpm test|npm test)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_test_command", confidence: 0.8 };
   }
 
   // Database
@@ -233,6 +228,11 @@ function detectProjectSignal(
   // Deployment
   if (/\b(?:deploy|部署|发布|上线|production|staging)\b/i.test(normalized)) {
     return { projectRelated: true, predicate: "project_deployment_target", confidence: 0.75 };
+  }
+
+  // Explicit project scope markers (checked AFTER specific predicates)
+  if (/这个项目|this project|当前项目|仓库|this repo|代码库|codebase/.test(normalized)) {
+    return { projectRelated: true, predicate: undefined, confidence: 0.85 };
   }
 
   // General project language in repo context
@@ -278,7 +278,7 @@ function detectEpisodicSignal(content: string): { episodic: boolean; confidence:
 function detectCorrectionSignal(content: string): { isCorrection: boolean; confidence: number } {
   const normalized = normalizeText(content).toLowerCase();
   if (
-    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant|更正.*之前/.test(
+    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant|更正.*之前|改成|现在使用|切换到/i.test(
       normalized,
     )
   ) {

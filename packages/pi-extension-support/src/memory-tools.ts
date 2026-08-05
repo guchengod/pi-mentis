@@ -122,12 +122,7 @@ export interface PublicRecallResult {
   readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
   readonly anchored: boolean;
   readonly reason?:
-    | "not_found"
-    | "scope_denied"
-    | "not_ready"
-    | "expired"
-    | "failed"
-    | "ambiguous";
+    "not_found" | "scope_denied" | "not_ready" | "expired" | "failed" | "ambiguous" | "unavailable";
   readonly summary?: string;
   readonly hits: readonly PublicRecallHit[];
   readonly traceId?: string;
@@ -176,9 +171,10 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     parameters: CommitMemoryParameters,
     promptGuidelines: [
       "Use commit_memory for explicit remember/update/forget requests and for durable, verified information that will likely matter in future sessions.",
-      "Suitable memories include stable user preferences, project conventions, architectural decisions, and verified reusable solutions.",
+      "Suitable memories include stable user preferences (nicknames, aliases, response styles), project conventions (package manager, build commands, test commands, database), architectural decisions, and verified reusable solutions.",
       "Do not persist guesses, transient task details, routine outputs, temporary paths, or timestamps unless explicitly requested.",
       "Never submit raw passwords, tokens, API keys, cookies, private keys, or other secrets.",
+      'The system automatically detects corrections ("刚才说错了", "改成", "正确是", "不是X是Y") and handles temporal state transitions — do not manually retract old entries.',
     ],
     async execute(_toolCallId, toolParams, abortSignal) {
       if (typeof toolParams.content !== "string") {
@@ -201,14 +197,13 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     promptGuidelines: [
       "Use search_memory when the request depends on durable context from earlier sessions that is not already available.",
       "Use it for explicit memory questions, previous work, saved preferences, project history, past decisions, fixes, or task continuation.",
+      "When the user pastes a Mentis-returned record ID and asks about its content, history, corrections, or evidence, use search_memory with the id parameter for anchored retrieval.",
       "Use id for exact retrieval and id plus query for history, evidence, correction, or conflicts.",
       "Do not search automatically at every session start, for trivial queries, or merely to verify a successful commit.",
     ],
     async execute(_toolCallId, toolParams, abortSignal) {
-      const query =
-        typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;
-      const id =
-        typeof toolParams.id === "string" ? toolParams.id.trim() : undefined;
+      const query = typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;
+      const id = typeof toolParams.id === "string" ? toolParams.id.trim() : undefined;
       if (query === undefined && id === undefined) {
         throw new Error("search_memory requires query, id, or both");
       }

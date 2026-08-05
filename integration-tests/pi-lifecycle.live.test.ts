@@ -74,10 +74,7 @@ interface ExtensionRunner {
   createContext(): unknown;
   onError(_handler: (error: Error) => void): void;
   setUIContext(_ui: Record<string, unknown>, _transport: string): void;
-  bindCore(
-    _appCore: Record<string, unknown>,
-    _sessionCore: Record<string, unknown>,
-  ): void;
+  bindCore(_appCore: Record<string, unknown>, _sessionCore: Record<string, unknown>): void;
 }
 
 function stubUiContext(): Record<string, unknown> {
@@ -99,8 +96,7 @@ function stubAppCore(sessionManager: {
 }): Record<string, unknown> {
   return {
     sendMessage: () => undefined,
-    appendEntry: (_type: string, data: unknown) =>
-      sessionManager.appendCustomEntry(_type, data),
+    appendEntry: (_type: string, data: unknown) => sessionManager.appendCustomEntry(_type, data),
     getActiveTools: () => [] as string[],
     setActiveTools: () => undefined,
     refreshTools: () => undefined,
@@ -122,9 +118,7 @@ function stubSessionCore(): Record<string, unknown> {
 async function createMiniSessionManager(workspace: string, sessionId: string) {
   const { SessionManager } = await import(
     pathToFileURL(
-      path.resolve(
-        "node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js",
-      ),
+      path.resolve("node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js"),
     ).href
   );
   const sessionDir = path.join(workspace, ".pi-sessions");
@@ -134,16 +128,12 @@ async function createMiniSessionManager(workspace: string, sessionId: string) {
 async function createModelRegistry() {
   const { ModelRuntime } = await import(
     pathToFileURL(
-      path.resolve(
-        "node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js",
-      ),
+      path.resolve("node_modules/@earendil-works/pi-coding-agent/dist/core/model-runtime.js"),
     ).href
   );
   const { ModelRegistry: ModelReg } = await import(
     pathToFileURL(
-      path.resolve(
-        "node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js",
-      ),
+      path.resolve("node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js"),
     ).href
   );
   const authPath = path.join(tmpdir(), ".pi-auth-live-test.json");
@@ -242,94 +232,89 @@ describe.skipIf(!LIVE_GATE)("Pi lifecycle with real embedding", () => {
         expect(toolNames).toContain("commit_memory");
         expect(toolNames).toContain("search_memory");
 
-        const commands = runner.getRegisteredCommands().map((c) => c.name).sort();
+        const commands = runner
+          .getRegisteredCommands()
+          .map((c) => c.name)
+          .sort();
         expect(commands).toContain("kb");
 
         await runner.emit({ type: "session_shutdown", reason: "quit" });
       },
     );
 
-    it(
-      "registers kb command",
-      { timeout: 30_000 },
-      async () => {
-        const ws = await mkdtemp(path.join(piHome, "kb-cmd-"));
-        tempRoots.push(ws);
-        const { runner } = await loadExtension(ws);
-        await runner.emit({ type: "session_start", reason: "startup" });
+    it("registers kb command", { timeout: 30_000 }, async () => {
+      const ws = await mkdtemp(path.join(piHome, "kb-cmd-"));
+      tempRoots.push(ws);
+      const { runner } = await loadExtension(ws);
+      await runner.emit({ type: "session_start", reason: "startup" });
 
-        const kbCommand = runner.getCommand("kb");
-        expect(kbCommand).toBeDefined();
+      const kbCommand = runner.getCommand("kb");
+      expect(kbCommand).toBeDefined();
 
-        await runner.emit({ type: "session_shutdown", reason: "quit" });
-      },
-    );
+      await runner.emit({ type: "session_shutdown", reason: "quit" });
+    });
   });
 
   describe("commit_memory with real embedding", () => {
-    it(
-      "commits a memory and retrieves it via search_memory",
-      { timeout: 60_000 },
-      async () => {
-        const workspace = await mkdtemp(path.join(piHome, "mem-"));
-        tempRoots.push(workspace);
-        const { runner } = await loadExtension(workspace);
+    it("commits a memory and retrieves it via search_memory", { timeout: 60_000 }, async () => {
+      const workspace = await mkdtemp(path.join(piHome, "mem-"));
+      tempRoots.push(workspace);
+      const { runner } = await loadExtension(workspace);
 
-        await runner.emit({ type: "session_start", reason: "startup" });
-        await runner.emit({ type: "session_tree", oldLeafId: null, newLeafId: "test-branch" });
+      await runner.emit({ type: "session_start", reason: "startup" });
+      await runner.emit({ type: "session_tree", oldLeafId: null, newLeafId: "test-branch" });
 
-        await runner.emitBeforeAgentStart(
-          "Please remember that the project uses TypeScript strict mode",
-          undefined,
-          "",
-          { cwd: workspace },
-        );
+      await runner.emitBeforeAgentStart(
+        "Please remember that the project uses TypeScript strict mode",
+        undefined,
+        "",
+        { cwd: workspace },
+      );
 
-        const commitTool = runner.getToolDefinition("commit_memory");
-        expect(commitTool).toBeDefined();
+      const commitTool = runner.getToolDefinition("commit_memory");
+      expect(commitTool).toBeDefined();
 
-        const commitResult = await commitTool!.execute(
-          "tool-call-commit-1",
-          {
-            content:
-              "This project uses TypeScript strict mode with noUncheckedIndexedAccess and exactOptionalPropertyTypes enabled. The module system is ESM NodeNext.",
-          },
-          undefined,
-          undefined,
-          runner.createContext(),
-        );
-        expect(commitResult).toBeDefined();
-        expect(commitResult).not.toHaveProperty("error");
+      const commitResult = await commitTool!.execute(
+        "tool-call-commit-1",
+        {
+          content:
+            "This project uses TypeScript strict mode with noUncheckedIndexedAccess and exactOptionalPropertyTypes enabled. The module system is ESM NodeNext.",
+        },
+        undefined,
+        undefined,
+        runner.createContext(),
+      );
+      expect(commitResult).toBeDefined();
+      expect(commitResult).not.toHaveProperty("error");
 
-        await runner.emit({
-          type: "tool_execution_end",
-          toolCallId: "tool-call-commit-1",
-          toolName: "commit_memory",
-          result: commitResult,
-          isError: false,
-        });
+      await runner.emit({
+        type: "tool_execution_end",
+        toolCallId: "tool-call-commit-1",
+        toolName: "commit_memory",
+        result: commitResult,
+        isError: false,
+      });
 
-        const searchTool = runner.getToolDefinition("search_memory");
-        expect(searchTool).toBeDefined();
+      const searchTool = runner.getToolDefinition("search_memory");
+      expect(searchTool).toBeDefined();
 
-        const searchResult = await searchTool!.execute(
-          "tool-call-search-1",
-          { query: "TypeScript strict mode configuration" },
-          undefined,
-          undefined,
-          runner.createContext(),
-        );
+      const searchResult = await searchTool!.execute(
+        "tool-call-search-1",
+        { query: "TypeScript strict mode configuration" },
+        undefined,
+        undefined,
+        runner.createContext(),
+      );
 
-        expect(searchResult).toBeDefined();
-        expect(searchResult).toHaveProperty("items");
-        const items = (searchResult as { items?: unknown[] }).items;
-        expect(Array.isArray(items)).toBe(true);
-        expect(items!.length).toBeGreaterThan(0);
+      expect(searchResult).toBeDefined();
+      expect(searchResult).toHaveProperty("items");
+      const items = (searchResult as { items?: unknown[] }).items;
+      expect(Array.isArray(items)).toBe(true);
+      expect(items!.length).toBeGreaterThan(0);
 
-        await runner.emit({ type: "agent_settled" });
-        await runner.emit({ type: "session_shutdown", reason: "quit" });
-      },
-    );
+      await runner.emit({ type: "agent_settled" });
+      await runner.emit({ type: "session_shutdown", reason: "quit" });
+    });
 
     it(
       "commits two distinct memories and retrieves each via targeted search",
@@ -342,12 +327,9 @@ describe.skipIf(!LIVE_GATE)("Pi lifecycle with real embedding", () => {
         await runner.emit({ type: "session_start", reason: "startup" });
         await runner.emit({ type: "session_tree", oldLeafId: null, newLeafId: "recall-branch" });
 
-        await runner.emitBeforeAgentStart(
-          "Remember project configuration details",
-          undefined,
-          "",
-          { cwd: workspace },
-        );
+        await runner.emitBeforeAgentStart("Remember project configuration details", undefined, "", {
+          cwd: workspace,
+        });
 
         const commitTool = runner.getToolDefinition("commit_memory");
         expect(commitTool).toBeDefined();
@@ -387,7 +369,11 @@ describe.skipIf(!LIVE_GATE)("Pi lifecycle with real embedding", () => {
           runner.createContext(),
         );
         const apiItems = (searchApiResult as { items?: Array<{ content?: string }> }).items;
-        const apiContent = apiItems?.map((i) => i.content ?? "").join(" ").toLowerCase() ?? "";
+        const apiContent =
+          apiItems
+            ?.map((i) => i.content ?? "")
+            .join(" ")
+            .toLowerCase() ?? "";
         expect(apiContent).toMatch(/8080|api|bearer|token|authentication/);
 
         const searchDbResult = await searchTool!.execute(
@@ -398,7 +384,11 @@ describe.skipIf(!LIVE_GATE)("Pi lifecycle with real embedding", () => {
           runner.createContext(),
         );
         const dbItems = (searchDbResult as { items?: Array<{ content?: string }> }).items;
-        const dbContent = dbItems?.map((i) => i.content ?? "").join(" ").toLowerCase() ?? "";
+        const dbContent =
+          dbItems
+            ?.map((i) => i.content ?? "")
+            .join(" ")
+            .toLowerCase() ?? "";
         expect(dbContent).toMatch(/database|connection|databas_url|environment/);
 
         await runner.emit({ type: "agent_settled" });
@@ -477,37 +467,33 @@ describe.skipIf(!LIVE_GATE)("Pi lifecycle with real embedding", () => {
   });
 
   describe("error handling", () => {
-    it(
-      "search_memory handles unmatched queries gracefully",
-      { timeout: 60_000 },
-      async () => {
-        const workspace = await mkdtemp(path.join(piHome, "empty-"));
-        tempRoots.push(workspace);
-        const { runner } = await loadExtension(workspace);
+    it("search_memory handles unmatched queries gracefully", { timeout: 60_000 }, async () => {
+      const workspace = await mkdtemp(path.join(piHome, "empty-"));
+      tempRoots.push(workspace);
+      const { runner } = await loadExtension(workspace);
 
-        await runner.emit({ type: "session_start", reason: "startup" });
-        await runner.emit({ type: "session_tree", oldLeafId: null, newLeafId: "empty-branch" });
+      await runner.emit({ type: "session_start", reason: "startup" });
+      await runner.emit({ type: "session_tree", oldLeafId: null, newLeafId: "empty-branch" });
 
-        await runner.emitBeforeAgentStart("Test empty search", undefined, "", {
-          cwd: workspace,
-        });
+      await runner.emitBeforeAgentStart("Test empty search", undefined, "", {
+        cwd: workspace,
+      });
 
-        const searchTool = runner.getToolDefinition("search_memory");
-        const result = await searchTool!.execute(
-          "tool-call-empty",
-          { query: "xyzzy_nonexistent_query_that_matches_nothing_1234567890" },
-          undefined,
-          undefined,
-          runner.createContext(),
-        );
-        expect(result).toBeDefined();
-        const items = (result as { items?: unknown[] }).items ?? [];
-        // Unmatched queries should still return a well-formed response
-        expect(Array.isArray(items)).toBe(true);
+      const searchTool = runner.getToolDefinition("search_memory");
+      const result = await searchTool!.execute(
+        "tool-call-empty",
+        { query: "xyzzy_nonexistent_query_that_matches_nothing_1234567890" },
+        undefined,
+        undefined,
+        runner.createContext(),
+      );
+      expect(result).toBeDefined();
+      const items = (result as { items?: unknown[] }).items ?? [];
+      // Unmatched queries should still return a well-formed response
+      expect(Array.isArray(items)).toBe(true);
 
-        await runner.emit({ type: "agent_settled" });
-        await runner.emit({ type: "session_shutdown", reason: "quit" });
-      },
-    );
+      await runner.emit({ type: "agent_settled" });
+      await runner.emit({ type: "session_shutdown", reason: "quit" });
+    });
   });
 });

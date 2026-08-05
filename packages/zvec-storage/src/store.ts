@@ -356,7 +356,11 @@ export class ZvecStore {
           "updated_at",
         ],
         ...(options.filter === undefined ? {} : { filter: options.filter }),
-        params: { indexType: ZVecIndexType.HNSW, ef: Math.max(200, options.topK * 10), isUsingRefiner: true },
+        params: {
+          indexType: ZVecIndexType.HNSW,
+          ef: Math.max(200, options.topK * 10),
+          isUsingRefiner: true,
+        },
       })
     ).map(logicalDocument);
   }
@@ -391,7 +395,10 @@ export class ZvecStore {
     ids: readonly string[],
   ): Promise<ReadonlyMap<string, ZVecDoc>> {
     if (ids.length === 0) return new Map();
-    const collection = await this.#tryVectorCollection(kind, activeGenerationFor(this.manifest, kind));
+    const collection = await this.#tryVectorCollection(
+      kind,
+      activeGenerationFor(this.manifest, kind),
+    );
     if (collection === undefined) return new Map();
     const physicalIds = ids.map(physicalDocumentId);
     const documents = collection.fetchSync({ ids: physicalIds, includeVector: true });
@@ -435,7 +442,9 @@ export class ZvecStore {
     now = Date.now(),
   ): Promise<EmbeddingIndexGeneration> {
     return this.#withWriteGuard(async () => {
-      if (this.manifest.generations.some((generation) => generation.generationId === generationId)) {
+      if (
+        this.manifest.generations.some((generation) => generation.generationId === generationId)
+      ) {
         throw new Error(`Generation ${generationId} already exists`);
       }
       const generation: EmbeddingIndexGeneration = {
@@ -637,7 +646,10 @@ export class ZvecStore {
     return this.#openCollectionOnce(name, () => scalarCollectionSchema(name));
   }
 
-  async #tryVectorCollection(kind: GenerationKind, generationId: string): Promise<ZVecCollection | undefined> {
+  async #tryVectorCollection(
+    kind: GenerationKind,
+    generationId: string,
+  ): Promise<ZVecCollection | undefined> {
     const name = generationCollectionName(kind, generationId);
     const existing = this.#collections.get(name);
     if (existing !== undefined) return existing;

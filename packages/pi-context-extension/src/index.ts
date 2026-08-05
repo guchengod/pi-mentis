@@ -67,6 +67,7 @@ import {
   decideRecall,
   evaluateReplayCandidate,
   type RetrievalService,
+  type MentisServiceAccess,
 } from "@pi-mentis/pi-mentis-retrieval";
 import {
   SiliconFlowEmbeddingProvider,
@@ -117,9 +118,7 @@ async function knowledgeCommandSource(target: string) {
 
 function registerIntegratedTools(
   pi: ExtensionAPI,
-  memory: MemoryService,
-  retrieval: RetrievalService,
-  evidence: PiEvidenceStore,
+  services: MentisServiceAccess,
   _currentScope: () => MemoryScope,
   _currentScopes: () => readonly MemoryScope[],
   getScopeContext: () => PiScopeContext,
@@ -128,12 +127,19 @@ function registerIntegratedTools(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _onTrace: (traceId: string) => void,
 ): void {
-  // Build coordinators and register shared tool pair.
-  const rememberCoord = new DefaultRememberCoordinator(memory);
-  const recallCoord = new DefaultRecallCoordinator(memory, retrieval, evidence);
+  const memory = services.getMemory();
+  const rememberCoord = memory !== undefined ? new DefaultRememberCoordinator(memory) : undefined;
+  const recallCoord = new DefaultRecallCoordinator(services);
 
   registerMemoryToolPair(pi, {
     async remember(content, signal) {
+      if (rememberCoord === undefined) {
+        return {
+          outcome: "unavailable" as const,
+          summary: "Memory service unavailable.",
+          readable: false,
+        };
+      }
       const ctxSnapshot = getContextSnapshot();
       const evRef = getEvidenceRef();
       return rememberCoord.remember(
@@ -443,14 +449,22 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     const memory = runtime.getMemory<MemoryService>();
     const retrieval = runtime.getRetrieval<RetrievalService>();
 
+    // Create evidence store BEFORE tool registration so coordinators
+    // receive a valid reference through dynamic accessors.
+    if (memoryStore !== undefined && evidenceStore === undefined) {
+      evidenceStore = createPiEvidenceStore(memoryStore.store);
+    }
+
     // Always register tools — even if store init failed.
     // Tools return structured errors when services are unavailable.
     if (!registered) {
       registerIntegratedTools(
         pi,
-        memory!,
-        retrieval!,
-        evidenceStore ?? undefined!,
+        {
+          getMemory: () => runtime.getMemory<MemoryService>(),
+          getRetrieval: () => runtime.getRetrieval<RetrievalService>(),
+          getEvidence: () => evidenceStore,
+        },
         () => {
           if (scopeContext.repositoryId !== undefined) {
             return { kind: "repository", id: scopeContext.repositoryId };

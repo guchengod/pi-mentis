@@ -43,83 +43,85 @@ interface PredicatePattern {
 
 const PREDICATE_PATTERNS: readonly PredicatePattern[] = [
   {
-    predicate: "package_manager",
-    pattern: /\b(?:pnpm|npm|yarn|bun|package manager|包管理器|包管理)\b/i,
-  },
-  {
-    predicate: "build_command",
-    pattern: /\b(?:build|compile|tsc|turbo build|npm run build|pnpm build|构建|编译)\b/i,
-  },
-  {
-    predicate: "test_command",
-    pattern: /\b(?:test|vitest|jest|npm test|pnpm test|测试命令)\b/i,
-  },
-  {
-    predicate: "runtime",
-    pattern: /\b(?:node|deno|bun|runtime|运行时)\b/i,
-  },
-  {
-    predicate: "runtime_version",
-    pattern:
-      /\b(?:(?:node|deno|bun|runtime)\s+(?:v?\d+\.\d+|version)|运行时.*版本|版本.*\d+\.\d+)\b/i,
-  },
-  {
-    predicate: "language",
-    pattern: /\b(?:typescript|javascript|python|rust|go|golang|java|语言|编程语言)\b/i,
-  },
-  {
-    predicate: "storage_engine",
-    pattern: /\b(?:storage|database|zvec|sqlite|postgres|存储|数据库)\b/i,
-  },
-  {
-    predicate: "deployment_target",
-    pattern: /\b(?:deploy|production|staging|release|发布|部署|上线|生产环境|预发布)\b/i,
-  },
-  {
-    predicate: "project_purpose",
-    pattern: /\b(?:purpose|goal|this project is|这个项目是|目标|用途|做什么|用于)\b/i,
-  },
-  {
-    predicate: "architecture_decision",
-    pattern: /\b(?:architecture|design decision|pattern|架构|设计决定|设计模式)\b/i,
-  },
-  {
-    predicate: "user_preference",
-    pattern: /\b(?:prefer|like|want|preference|喜欢|偏好|习惯|倾向)\b/i,
-  },
-  {
-    predicate: "task_status",
-    pattern: /\b(?:task status|progress|任务状态|进度|完成|进行中|待办)\b/i,
-  },
-  {
-    predicate: "capability_state",
-    pattern: /\b(?:capability|can |cannot |able to|能力|可以|不能|支持)\b/i,
-  },
-  {
-    predicate: "verified_procedure",
-    pattern: /\b(?:verified|procedure|steps|workflow|已验证|步骤|流程|经过验证)\b/i,
-  },
-  {
-    predicate: "known_failure",
-    pattern: /\b(?:failure|error|bug|issue|problem|known issue|失败|错误|已知问题|故障)\b/i,
+    predicate: "assistant_alias",
+    pattern: /(?:记住你叫|你叫|叫你|你的名字是|call yourself|your name is|称呼|喊你)/i,
   },
   {
     predicate: "user_name",
-    pattern: /\b(?:我(?:叫|的?名字是)|my name is|i am|我是|用户(?:名|姓名)|我叫)\b/i,
-  },
-  {
-    predicate: "assistant_alias",
-    pattern: /\b(?:记住你叫|你叫|叫你|你的名字是|call yourself|your name is|称呼|喊你)\b/i,
+    pattern: /(?:我叫|我的名字是|my name is|i am|我是|用户名|用户姓名)/i,
   },
   {
     predicate: "response_style",
     pattern:
-      /\b(?:回答.*风格|回复.*方式|先看.*结论|简洁|详细|啰嗦|简练|response style|回答方式|说.*方式|讲.*方式)\b/i,
+      /(?:回答.*风格|回复.*方式|先(?:看|给).*结论|简洁|详细|啰嗦|简练|response style|回答方式|说.*方式|讲.*方式|回答.*先)/i,
   },
   {
     predicate: "general_package_manager_preference",
     pattern:
-      /\b(?:一般.*包管理|默认.*包管理|general.*package.*manager|常用.*包管理|always.*(?:pnpm|npm|yarn))\b/i,
+      /(?:一般.*包管理|默认.*包管理|general.*package.*manager|常用.*包管理|always.*(?:pnpm|npm|yarn))/i,
+  },
+  // build_command before package_manager: "pnpm build" should detect build_command
+  {
+    predicate: "build_command",
+    pattern: /\b(?:build|compile|tsc|turbo build|npm run build|pnpm build)\b|(?:构建|编译)/i,
+  },
+  // test_command before package_manager: "pnpm test" should detect test_command
+  {
+    predicate: "test_command",
+    pattern: /\b(?:test|vitest|jest|npm test|pnpm test)\b|(?:测试命令)/i,
+  },
+  {
+    predicate: "package_manager",
+    pattern: /\b(?:pnpm|npm|yarn|bun|package manager)\b|(?:包管理器|包管理)/i,
+  },
+  {
+    predicate: "runtime",
+    pattern: /\b(?:node|deno|bun|runtime)\b|(?:运行时)/i,
+  },
+  {
+    predicate: "runtime_version",
+    pattern:
+      /(?:(?:node|deno|bun|runtime)\s+(?:v?\d+\.\d+|version))|(?:运行时.*版本|版本.*\d+\.\d+)/i,
+  },
+  {
+    predicate: "language",
+    pattern: /\b(?:typescript|javascript|python|rust|go|golang|java)\b|(?:语言|编程语言)/i,
+  },
+  {
+    predicate: "storage_engine",
+    pattern: /\b(?:storage|database|zvec|sqlite|postgres)\b|(?:存储|数据库)/i,
+  },
+  {
+    predicate: "deployment_target",
+    pattern: /\b(?:deploy|production|staging|release)\b|(?:发布|部署|上线|生产环境|预发布)/i,
+  },
+  {
+    predicate: "project_purpose",
+    pattern: /\b(?:purpose|goal|this project is)\b|(?:这个项目是|目标|用途|做什么|用于)/i,
+  },
+  {
+    predicate: "architecture_decision",
+    pattern: /\b(?:architecture|design decision|pattern)\b|(?:架构|设计决定|设计模式)/i,
+  },
+  {
+    predicate: "user_preference",
+    pattern: /\b(?:prefer|like|want|preference)\b|(?:喜欢|偏好|习惯|倾向)/i,
+  },
+  {
+    predicate: "task_status",
+    pattern: /\b(?:task status|progress)\b|(?:任务状态|进度|完成|进行中|待办)/i,
+  },
+  {
+    predicate: "capability_state",
+    pattern: /\b(?:capability|can |cannot |able to)\b|(?:能力|可以|不能|支持)/i,
+  },
+  {
+    predicate: "verified_procedure",
+    pattern: /\b(?:verified|procedure|steps|workflow)\b|(?:已验证|步骤|流程|经过验证)/i,
+  },
+  {
+    predicate: "known_failure",
+    pattern: /\b(?:failure|error|bug|issue|problem|known issue)\b|(?:失败|错误|已知问题|故障)/i,
   },
 ];
 

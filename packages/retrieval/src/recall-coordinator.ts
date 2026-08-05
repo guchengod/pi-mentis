@@ -28,10 +28,7 @@ import {
   type ResolvedMentisReference,
   type MentisResourceType,
 } from "./resource-reference-resolver.js";
-import {
-  DefaultArtifactQueryService,
-  type ArtifactQueryService,
-} from "./artifact-query.js";
+import { DefaultArtifactQueryService, type ArtifactQueryService } from "./artifact-query.js";
 
 // ─── Public Types ─────────────────────────────────────────────────
 
@@ -60,12 +57,7 @@ export interface PublicRecallResult {
   readonly resourceType: MentisResourceType;
   readonly anchored: boolean;
   readonly reason?:
-    | "not_found"
-    | "scope_denied"
-    | "not_ready"
-    | "expired"
-    | "failed"
-    | "ambiguous";
+    "not_found" | "scope_denied" | "not_ready" | "expired" | "failed" | "ambiguous" | "unavailable";
   readonly summary?: string;
   readonly hits: readonly PublicRecallHit[];
   readonly traceId?: string;
@@ -148,10 +140,7 @@ function buildSummary(hits: readonly PublicRecallHit[]): string | undefined {
 
 type NonResolvedReason = Exclude<ResolvedMentisReference["reason"], "resolved">;
 
-function referenceFailure(
-  reason: NonResolvedReason,
-  type: MentisResourceType,
-): PublicRecallResult {
+function referenceFailure(reason: NonResolvedReason, type: MentisResourceType): PublicRecallResult {
   return {
     found: false,
     resourceType: type,
@@ -455,7 +444,11 @@ async function evidenceSummary(
     });
     if (event === undefined) {
       return {
-        found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [],
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
       };
     }
     return {
@@ -480,19 +473,21 @@ async function evidenceSummary(
 
 // ─── Implementation ───────────────────────────────────────────────
 
+export interface MentisServiceAccess {
+  getMemory(): MemoryService | undefined;
+  getRetrieval(): RetrievalService | undefined;
+  getEvidence(): PiEvidenceStore | undefined;
+}
+
 export class DefaultRecallCoordinator implements RecallCoordinator {
-  readonly #memory: MemoryService;
-  readonly #retrieval: RetrievalService;
-  readonly #evidence: PiEvidenceStore;
+  readonly #services: MentisServiceAccess;
   readonly #resolver: MentisResourceReferenceResolver;
   readonly #artifactQuery: ArtifactQueryService;
 
-  constructor(memory: MemoryService, retrieval: RetrievalService, evidence: PiEvidenceStore) {
-    this.#memory = memory;
-    this.#retrieval = retrieval;
-    this.#evidence = evidence;
-    this.#resolver = new DefaultMentisResourceReferenceResolver(memory, evidence);
-    this.#artifactQuery = new DefaultArtifactQueryService(evidence);
+  constructor(services: MentisServiceAccess) {
+    this.#services = services;
+    this.#resolver = new DefaultMentisResourceReferenceResolver(services);
+    this.#artifactQuery = new DefaultArtifactQueryService(services);
   }
 
   async recall(
@@ -502,6 +497,10 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
     const { query, id } = request;
     const { scopeContext, contextSnapshot, signal } = context;
 
+    const evidence = this.#services.getEvidence();
+    const memory = this.#services.getMemory();
+    const retrieval = this.#services.getRetrieval();
+
     // ── MODE 1: ID only → resolve type → route ──
     if (id !== undefined && query === undefined) {
       const ref = await this.#resolver.resolve(id, resolverContext(scopeContext, signal));
@@ -510,25 +509,64 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
       }
 
       if (ref.type === "memory") {
-        return exactMemoryRead(this.#memory, id);
+        if (memory === undefined) {
+          return {
+            found: false,
+            resourceType: "unknown",
+            anchored: true,
+            reason: "unavailable" as NonResolvedReason,
+            hits: [],
+          };
+        }
+        return exactMemoryRead(memory, id);
       }
 
       if (ref.type === "artifact") {
-        const artifact = await this.#evidence.getArtifact(id, {
+        if (evidence === undefined) {
+          return {
+            found: false,
+            resourceType: "unknown",
+            anchored: true,
+            reason: "unavailable" as NonResolvedReason,
+            hits: [],
+          };
+        }
+        const artifact = await evidence.getArtifact(id, {
           scopeContext,
           ...(signal !== undefined ? { signal } : {}),
         });
         if (artifact === undefined) {
-          return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
+          return {
+            found: false,
+            resourceType: "unknown",
+            anchored: true,
+            reason: "not_found",
+            hits: [],
+          };
         }
         return artifactSummary(artifact);
       }
 
       if (ref.type === "evidence") {
-        return evidenceSummary(this.#evidence, id, scopeContext, signal);
+        if (evidence === undefined) {
+          return {
+            found: false,
+            resourceType: "unknown",
+            anchored: true,
+            reason: "unavailable" as NonResolvedReason,
+            hits: [],
+          };
+        }
+        return evidenceSummary(evidence, id, scopeContext, signal);
       }
 
-      return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
+      return {
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
     }
 
     // ── MODE 2: ID + Query → anchored search, NEVER fall back ──
@@ -543,12 +581,19 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
       }
 
       if (ref.type === "memory") {
-        // Memory ID with query: evolution chain (supersedes, conflicts, evidence)
-        return memoryEvolutionChain(this.#memory, this.#evidence, id, query, scopeContext, signal);
+        if (memory === undefined || evidence === undefined) {
+          return {
+            found: false,
+            resourceType: "unknown",
+            anchored: true,
+            reason: "unavailable" as NonResolvedReason,
+            hits: [],
+          };
+        }
+        return memoryEvolutionChain(memory, evidence, id, query, scopeContext, signal);
       }
 
       if (ref.type === "evidence") {
-        // Evidence is not queryable
         return {
           found: false,
           resourceType: "evidence",
@@ -559,7 +604,13 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         };
       }
 
-      return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
+      return {
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
     }
 
     // ── MODE 3: Query only → intent-based lane routing ──
@@ -581,26 +632,147 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
       const isMemoryOnly =
         intent.primary === "agent_profile" ||
         intent.primary === "user_profile" ||
-        intent.primary === "explicit_memory_lookup";
+        intent.primary === "explicit_memory_lookup" ||
+        intent.primary === "current_project_fact";
 
       try {
-        if (isMemoryOnly) {
-          const memResult = await this.#memory.search(
+        if (isMemoryOnly && memory !== undefined) {
+          // Profile/Project queries: first check views for exact fact matches
+          if (intent.primary === "agent_profile" || intent.primary === "user_profile") {
+            const view = await memory.getView?.("user", scopeContext.userId, scopeContext);
+            if (view !== undefined && view.facts !== undefined) {
+              const profileHits: PublicRecallHit[] = [];
+              const profileFactKeys =
+                intent.primary === "agent_profile"
+                  ? ["assistant_alias", "response_style", "language_preference"]
+                  : ["user_name", "response_style", "language_preference"];
+              for (const factKey of profileFactKeys) {
+                const allKey = Object.keys(view.facts).find((k) => k.includes(factKey));
+                if (allKey !== undefined) {
+                  const fact = view.facts[allKey];
+                  if (fact !== undefined && fact.currentMemoryIds.length > 0) {
+                    for (const memId of fact.currentMemoryIds.slice(0, 2)) {
+                      const record = await memory.get(memId).catch(() => undefined);
+                      if (record !== undefined) {
+                        const { text: s, sanitized: sanitized } = sanitize(record.content);
+                        profileHits.push({
+                          id: record.id,
+                          content: trimContent(s),
+                          kind: intent.primary === "agent_profile" ? "agent" : "user",
+                          status: "current",
+                          match: "exact",
+                          resourceType: "memory",
+                          sanitized,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+              if (profileHits.length > 0) {
+                const summary = buildSummary(profileHits);
+                const result: PublicRecallResult = {
+                  found: true,
+                  resourceType: "search",
+                  anchored: false,
+                  hits: profileHits.slice(0, MAX_HITS),
+                };
+                if (summary !== undefined) {
+                  (result as { summary?: string }).summary = summary;
+                }
+                return result;
+              }
+            }
+          }
+
+          if (intent.primary === "current_project_fact") {
+            const view =
+              scopeContext.repositoryId !== undefined
+                ? await memory.getView?.("project", scopeContext.repositoryId, scopeContext)
+                : scopeContext.projectId !== undefined
+                  ? await memory.getView?.("project", scopeContext.projectId, scopeContext)
+                  : undefined;
+            if (view !== undefined && view.facts !== undefined) {
+              const projectHits: PublicRecallHit[] = [];
+              const projectFactKeys = [
+                "build_command",
+                "package_manager",
+                "test_command",
+                "database",
+                "deployment_target",
+              ];
+              for (const factKey of projectFactKeys) {
+                const allKey = Object.keys(view.facts).find((k) => k.includes(factKey));
+                if (allKey !== undefined) {
+                  const fact = view.facts[allKey];
+                  if (fact !== undefined && fact.currentMemoryIds.length > 0) {
+                    for (const memId of fact.currentMemoryIds.slice(0, 2)) {
+                      const record = await memory.get(memId).catch(() => undefined);
+                      if (record !== undefined) {
+                        const { text: s, sanitized: sanitized } = sanitize(record.content);
+                        projectHits.push({
+                          id: record.id,
+                          content: trimContent(s),
+                          kind: "project",
+                          status: "current",
+                          match: "exact",
+                          resourceType: "memory",
+                          sanitized,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+              if (projectHits.length > 0) {
+                const summary = buildSummary(projectHits);
+                const result: PublicRecallResult = {
+                  found: true,
+                  resourceType: "search",
+                  anchored: false,
+                  hits: projectHits.slice(0, MAX_HITS),
+                };
+                if (summary !== undefined) {
+                  (result as { summary?: string }).summary = summary;
+                }
+                return result;
+              }
+            }
+          }
+
+          const memResult = await memory.search(
             { text: query, limit: MAX_HITS, scopeContext },
             { ...(signal !== undefined ? { signal } : {}) },
           );
           const hits = buildHits(memResult);
           const summary = buildSummary(hits);
-          return {
+          const memRecallResult: PublicRecallResult = {
             found: hits.length > 0,
             resourceType: "search",
             anchored: false,
-            ...(summary !== undefined ? { summary } : {}),
             hits,
+          };
+          if (summary !== undefined) {
+            (memRecallResult as { summary?: string }).summary = summary;
+          }
+          return memRecallResult;
+        }
+
+        if (isMemoryOnly && memory === undefined) {
+          return {
+            found: false,
+            resourceType: "search",
+            anchored: false,
+            reason: "unavailable" as NonResolvedReason,
+            hits: [],
           };
         }
 
-        const result = await this.#retrieval.search(
+        if (retrieval === undefined) {
+          return { found: false, resourceType: "search", anchored: false, hits: [] };
+        }
+
+        const result = await retrieval.search(
           {
             text: query,
             limit: MAX_HITS,
@@ -616,13 +788,16 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
 
         const hits = buildHits(result);
         const summary = buildSummary(hits);
-        return {
+        const retrievalResult: PublicRecallResult = {
           found: hits.length > 0,
           resourceType: "search",
           anchored: false,
-          ...(summary !== undefined ? { summary } : {}),
           hits,
         };
+        if (summary !== undefined) {
+          (retrievalResult as { summary?: string }).summary = summary;
+        }
+        return retrievalResult;
       } catch {
         return { found: false, resourceType: "search", anchored: false, hits: [] };
       }

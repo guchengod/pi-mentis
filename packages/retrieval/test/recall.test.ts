@@ -13,6 +13,7 @@ import {
   type RecallQueryContext,
   type FastRecallCandidate,
 } from "../src/recall.js";
+import { classifyIntent } from "../src/recall-intent.js";
 
 function signals(overrides: Partial<RecallSignals> = {}): RecallSignals {
   return {
@@ -329,5 +330,102 @@ describe("evaluateRecallDecision", () => {
     );
     // With margin < 0.08, it should go to quality_search, not inject_fast
     expect(result.kind).not.toBe("inject_fast");
+  });
+});
+
+// ─── Intent Classification (from recall-intent.ts) ─────────────────
+
+describe("classifyIntent — profile routes", () => {
+  it('routes "你叫什么？" to agent_profile', () => {
+    const result = classifyIntent("你叫什么？");
+    expect(result.primary).toBe("agent_profile");
+    expect(result.scores["agent_profile"]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it('routes "你的名字是什么？" to agent_profile', () => {
+    const result = classifyIntent("你的名字是什么？");
+    expect(result.primary).toBe("agent_profile");
+  });
+
+  it('routes "怎么称呼你？" to agent_profile', () => {
+    const result = classifyIntent("怎么称呼你？");
+    expect(result.primary).toBe("agent_profile");
+  });
+
+  it('routes "我叫什么？" to user_profile', () => {
+    const result = classifyIntent("我叫什么？");
+    expect(result.primary).toBe("user_profile");
+  });
+
+  it('routes "你记得我的名字吗？" to user_profile (via preference)', () => {
+    const result = classifyIntent("你记得我的名字吗？");
+    // Contains 我...名字 → user_profile
+    expect(result.primary).not.toBe("no_recall");
+  });
+
+  it('routes "我喜欢什么样的回答？" to user_profile', () => {
+    const result = classifyIntent("我喜欢什么样的回答？");
+    expect(result.primary).toBe("user_profile");
+    expect(result.scores["user_profile"]).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it('routes "我喜欢什么样的回答方式？" to user_profile', () => {
+    const result = classifyIntent("我喜欢什么样的回答方式？");
+    expect(result.primary).toBe("user_profile");
+  });
+
+  it("does NOT skip short profile questions", () => {
+    const result = classifyIntent("你叫什么？");
+    expect(result.primary).not.toBe("no_recall");
+  });
+
+  it("does NOT skip short project questions", () => {
+    const result = classifyIntent("怎么构建？");
+    // "怎么构建" matches "怎么(构建)" pattern in current_project_fact
+    expect(result.primary).not.toBe("no_recall");
+  });
+});
+
+describe("classifyIntent — project routes", () => {
+  it('routes "这个项目怎么构建？" to current_project_fact', () => {
+    const result = classifyIntent("这个项目怎么构建？");
+    expect(result.primary).toBe("current_project_fact");
+  });
+
+  it('routes "构建命令是什么？" to current_project_fact', () => {
+    const result = classifyIntent("构建命令是什么？");
+    expect(result.primary).toBe("current_project_fact");
+  });
+
+  it('routes "这个项目用 npm 还是 pnpm？" to current_project_fact', () => {
+    const result = classifyIntent("这个项目用 npm 还是 pnpm？");
+    expect(result.primary).toBe("current_project_fact");
+  });
+
+  it('routes "怎么 build？" to a recall lane (not no_recall)', () => {
+    const result = classifyIntent("怎么 build？");
+    expect(result.primary).not.toBe("no_recall");
+  });
+
+  it('routes "数据库用的什么？" to a recall lane (not no_recall)', () => {
+    const result = classifyIntent("数据库用的什么？");
+    expect(result.primary).not.toBe("no_recall");
+  });
+
+  it('routes "这个项目怎么测试？" to current_project_fact', () => {
+    const result = classifyIntent("这个项目怎么测试？");
+    expect(result.primary).toBe("current_project_fact");
+  });
+});
+
+describe("classifyIntent — correction / update routes", () => {
+  it('routes "刚才说错了" content to unknown (not blocked)', () => {
+    const result = classifyIntent("刚才说错了，数据库实际是 PostgreSQL");
+    expect(result.primary).not.toBe("no_recall");
+  });
+
+  it("natural correction query about history", () => {
+    const result = classifyIntent("数据库以前发生过什么变化？");
+    expect(result.primary).not.toBe("no_recall");
   });
 });

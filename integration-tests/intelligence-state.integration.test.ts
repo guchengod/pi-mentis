@@ -45,9 +45,9 @@ async function temporaryStore(): Promise<{ root: string; store: ZvecStore }> {
 
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map((root) =>
-      rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }),
-    ),
+    roots
+      .splice(0)
+      .map((root) => rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })),
   );
 });
 
@@ -224,57 +224,61 @@ describe("P8-P13 real-Zvec invariant runtime", () => {
     await store.close();
   });
 
-  it("maintains temporal invariants for arbitrary event orderings", { timeout: 180_000 }, async () => {
-    const { store } = await temporaryStore();
-    let caseIndex = 0;
-    await fc.assert(
-      fc.asyncProperty(
-        fc.array(
-          fc.record({
-            value: fc.constantFrom("npm", "pnpm", "yarn", "bun"),
-            observedAt: fc.integer({ min: 1, max: 1_000 }),
-            authority: fc.constantFrom(
-              EvidenceAuthority.AssistantInference,
-              EvidenceAuthority.VerifiedToolObservation,
-              EvidenceAuthority.WorkspaceCurrent,
-            ),
-          }),
-          { minLength: 1, maxLength: 8 },
+  it(
+    "maintains temporal invariants for arbitrary event orderings",
+    { timeout: 180_000 },
+    async () => {
+      const { store } = await temporaryStore();
+      let caseIndex = 0;
+      await fc.assert(
+        fc.asyncProperty(
+          fc.array(
+            fc.record({
+              value: fc.constantFrom("npm", "pnpm", "yarn", "bun"),
+              observedAt: fc.integer({ min: 1, max: 1_000 }),
+              authority: fc.constantFrom(
+                EvidenceAuthority.AssistantInference,
+                EvidenceAuthority.VerifiedToolObservation,
+                EvidenceAuthority.WorkspaceCurrent,
+              ),
+            }),
+            { minLength: 1, maxLength: 8 },
+          ),
+          async (events) => {
+            const engine = new TemporalTruthEngine(store, new VirtualClock());
+            const project = { kind: "project" as const, id: `property:${caseIndex++}` };
+            let previousRevision = 0;
+            const known = new Set<string>();
+            for (const [index, event] of events.entries()) {
+              const id = `memory:${project.id}:${index}`;
+              known.add(id);
+              const plan = await engine.prepare({
+                factKey: "package_manager",
+                cardinality: "single",
+                scope: project,
+                scopeContext: scope,
+                memoryId: id,
+                contentHash: event.value,
+                authority: event.authority,
+                observedAt: event.observedAt,
+              });
+              await engine.apply(plan);
+              const head = await engine.head("package_manager", project, scope);
+              expect(head).toBeDefined();
+              expect(head?.revision).toBeGreaterThanOrEqual(previousRevision);
+              previousRevision = head?.revision ?? previousRevision;
+              expect(head?.currentClaims.every((claim) => known.has(claim.memoryId))).toBe(true);
+              if (head?.state === "resolved")
+                expect(head.currentClaims.length).toBeLessThanOrEqual(1);
+              if ((head?.currentClaims.length ?? 0) > 1) expect(head?.state).toBe("conflicted");
+            }
+          },
         ),
-        async (events) => {
-          const engine = new TemporalTruthEngine(store, new VirtualClock());
-          const project = { kind: "project" as const, id: `property:${caseIndex++}` };
-          let previousRevision = 0;
-          const known = new Set<string>();
-          for (const [index, event] of events.entries()) {
-            const id = `memory:${project.id}:${index}`;
-            known.add(id);
-            const plan = await engine.prepare({
-              factKey: "package_manager",
-              cardinality: "single",
-              scope: project,
-              scopeContext: scope,
-              memoryId: id,
-              contentHash: event.value,
-              authority: event.authority,
-              observedAt: event.observedAt,
-            });
-            await engine.apply(plan);
-            const head = await engine.head("package_manager", project, scope);
-            expect(head).toBeDefined();
-            expect(head?.revision).toBeGreaterThanOrEqual(previousRevision);
-            previousRevision = head?.revision ?? previousRevision;
-            expect(head?.currentClaims.every((claim) => known.has(claim.memoryId))).toBe(true);
-            if (head?.state === "resolved")
-              expect(head.currentClaims.length).toBeLessThanOrEqual(1);
-            if ((head?.currentClaims.length ?? 0) > 1) expect(head?.state).toBe("conflicted");
-          }
-        },
-      ),
-      { numRuns: 30 },
-    );
-    await store.close();
-  });
+        { numRuns: 30 },
+      );
+      await store.close();
+    },
+  );
 
   it("applies idempotent memory evolution and builds evidence-backed views across restart", async () => {
     const { root, store } = await temporaryStore();

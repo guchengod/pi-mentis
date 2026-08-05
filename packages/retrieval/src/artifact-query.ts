@@ -10,10 +10,7 @@
  * All results pass through secret detection before return.
  */
 
-import type {
-  PiEvidenceStore,
-  EvidenceReadOptions,
-} from "@pi-mentis/pi-mentis-memory-core";
+import type { PiEvidenceStore, EvidenceReadOptions } from "@pi-mentis/pi-mentis-memory-core";
 import { detectSecrets, safeSummary } from "@pi-mentis/pi-mentis-memory-core";
 
 export interface ArtifactQueryHit {
@@ -65,11 +62,7 @@ function sanitizeContent(text: string): { text: string; sanitized: boolean } {
   return { text: safeSummary(text, text.length), sanitized: true };
 }
 
-function extractWindow(
-  text: string,
-  matchIndex: number,
-  matchLength: number,
-): string {
+function extractWindow(text: string, matchIndex: number, matchLength: number): string {
   const start = Math.max(0, matchIndex - CONTEXT_BEFORE);
   const end = Math.min(text.length, matchIndex + matchLength + CONTEXT_AFTER);
   return text.slice(start, end);
@@ -114,11 +107,15 @@ function lexicalSearch(
   return results;
 }
 
-export class DefaultArtifactQueryService implements ArtifactQueryService {
-  readonly #evidence: PiEvidenceStore;
+export interface ArtifactQueryServices {
+  getEvidence(): PiEvidenceStore | undefined;
+}
 
-  constructor(evidence: PiEvidenceStore) {
-    this.#evidence = evidence;
+export class DefaultArtifactQueryService implements ArtifactQueryService {
+  readonly #services: ArtifactQueryServices;
+
+  constructor(services: ArtifactQueryServices) {
+    this.#services = services;
   }
 
   async query(
@@ -126,8 +123,12 @@ export class DefaultArtifactQueryService implements ArtifactQueryService {
     query: string,
     context: ArtifactQueryContext,
   ): Promise<ArtifactQueryResult> {
+    const evidence = this.#services.getEvidence();
+    if (evidence === undefined) {
+      return { found: false, artifactId, hits: [], summary: "Evidence store unavailable" };
+    }
     const opts = evidenceReadOptions(context);
-    const artifact = await this.#evidence.getArtifact(artifactId, opts).catch(() => undefined);
+    const artifact = await evidence.getArtifact(artifactId, opts).catch(() => undefined);
 
     if (artifact === undefined || artifact.state !== "ready") {
       return {
@@ -146,7 +147,7 @@ export class DefaultArtifactQueryService implements ArtifactQueryService {
 
     if (artifact.byteLength <= SMALL_ARTIFACT_THRESHOLD) {
       // Small artifact: read full content and search
-      const content = await this.#evidence.readArtifact(artifactId, opts).catch(() => undefined);
+      const content = await evidence.readArtifact(artifactId, opts).catch(() => undefined);
       if (content === undefined) {
         return { found: false, artifactId, hits: [], summary: "Failed to read artifact content" };
       }
@@ -173,7 +174,7 @@ export class DefaultArtifactQueryService implements ArtifactQueryService {
       for (const chunk of chunks) {
         if (queryHits.length >= MAX_HITS) break;
 
-        const range = await this.#evidence
+        const range = await evidence
           .readArtifactRange(artifactId, {
             ...opts,
             offset: chunk.byteOffset,
