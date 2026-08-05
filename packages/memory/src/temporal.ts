@@ -14,6 +14,7 @@ import {
 
 import type {
   BranchClaimState,
+  MemoryRecord,
   MemoryScope,
   PiScopeContext,
   TemporalCardinality,
@@ -22,6 +23,37 @@ import type {
   TemporalRepairResult,
   TemporalState,
 } from "./types.js";
+import { decodeStoredPayload } from "@pi-mentis/pi-mentis-zvec";
+
+export type MemoryLifecycleStatus =
+  | "pending"
+  | "active"
+  | "superseded"
+  | "conflicted"
+  | "retracted"
+  | "tombstoned"
+  | "rejected"
+  | "expired";
+
+export type DerivedTemporalState = "current" | "historical" | "conflicted" | "invalid";
+
+/** Centralized temporal state derivation — single source of truth. */
+export function deriveTemporalState(status: MemoryLifecycleStatus): DerivedTemporalState {
+  switch (status) {
+    case "active":
+      return "current";
+    case "superseded":
+    case "retracted":
+    case "tombstoned":
+    case "expired":
+      return "historical";
+    case "conflicted":
+      return "conflicted";
+    case "pending":
+    case "rejected":
+      return "invalid";
+  }
+}
 
 export type TemporalDecision =
   | "create"
@@ -301,6 +333,82 @@ export class TemporalTruthEngine {
     }
     await this.#writeSaga({ sagaId: plan.sagaId, plan, stage: "head-written", attempts: 1 });
     await this.#writeSaga({ sagaId: plan.sagaId, plan, stage: "completed", attempts: 1 });
+  }
+
+  async repairConsistency(
+    store: ZvecStore,
+    options?: { signal?: AbortSignal; limit?: number },
+  ): Promise<{ inspected: number; repaired: number; errors: string[] }> {
+    const records = await store.filterVectors(
+      "memory",
+      "status != 'tombstoned' AND status != 'rejected'",
+      options?.limit ?? 10_000,
+    );
+    let scanned = 0;
+    let repaired = 0;
+    const errors: string[] = [];
+    const now = this.#clock.now();
+    const updates: Array<{
+      id: string;
+      payload: Record<string, unknown>;
+      embedding: Float32Array | number[];
+    }> = [];
+    for (const stored of records) {
+      if (options?.signal?.aborted === true) throw options.signal.reason;
+      scanned++;
+      try {
+        const payload = decodeStoredPayload(stored) as unknown as Omit<MemoryRecord, "embedding">;
+        const vector = stored.vectors["embedding"];
+        if (!(vector instanceof Float32Array) && !Array.isArray(vector)) continue;
+        const expectedTemporalState = deriveTemporalState(payload.status as MemoryLifecycleStatus);
+        if (payload.temporalState !== expectedTemporalState) {
+          updates.push({
+            id: stored.id,
+            payload: {
+              ...payload,
+              temporalState: expectedTemporalState,
+              updatedAt: now,
+              revision: (payload.revision ?? 0) + 1,
+            } as unknown as Record<string, unknown>,
+            embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+          });
+          repaired++;
+        }
+      } catch (error: unknown) {
+        errors.push(
+          `Record ${stored.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (updates.length > 0) {
+      await store.upsertVectors(
+        "memory",
+        updates.map((update) => ({
+          id: update.id,
+          kind: "memory" as const,
+          namespace: String(update.payload["namespace"] ?? ""),
+          status: (update.payload["status"] as string | undefined) ?? "active",
+          payload: update.payload,
+          searchableText: String(update.payload["normalizedContent"] ?? ""),
+          contentHash: String(update.payload["contentHash"] ?? ""),
+          sourceId: String(update.payload["namespace"] ?? update.payload["sourceId"] ?? ""),
+          documentId: update.id,
+          authority: (update.payload["authority"] as number) ?? 30,
+          tokenCount: Math.max(
+            1,
+            Buffer.byteLength(String(update.payload["normalizedContent"] ?? ""), "utf8"),
+          ),
+          revision: (update.payload["revision"] as number) ?? 1,
+          embedding:
+            update.embedding instanceof Float32Array
+              ? update.embedding
+              : Float32Array.from(update.embedding),
+          createdAt: (update.payload["createdAt"] as number) ?? now,
+          updatedAt: now,
+        })),
+      );
+    }
+    return { inspected: scanned, repaired, errors };
   }
 
   async repair(

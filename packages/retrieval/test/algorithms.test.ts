@@ -121,6 +121,6 @@ describe("retrieval algorithms", () => {
         remainingContextTokens: 4000,
         isCommand: false,
       }),
-    ).toMatchObject({ shouldRecall: true, sources: ["knowledge"], allowRerank: true });
+    ).toMatchObject({ shouldRecall: true, sources: ["memory"], allowRerank: false });
   });
 });

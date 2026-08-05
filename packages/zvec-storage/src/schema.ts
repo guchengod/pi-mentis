@@ -3,6 +3,7 @@ import {
   ZVecDataType,
   ZVecIndexType,
   ZVecMetricType,
+  ZVecQuantizeType,
   type ZVecFieldSchema,
 } from "@zvec/zvec";
 
@@ -33,6 +34,8 @@ export function vectorCollectionSchema(name: string, dimensions: number): ZVecCo
         metricType: ZVecMetricType.COSINE,
         m: 32,
         efConstruction: 300,
+        quantizeType: ZVecQuantizeType.INT8,
+        quantizerParams: { enableRotate: true },
       },
     },
     fields: [

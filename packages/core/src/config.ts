@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { ConfigurationError } from "./errors.js";
+import { resolveStorageRoot, globalConfigPath } from "./mentis-home.js";
 
 export interface EmbeddingBatchPolicy {
   readonly maxItems: number;
@@ -179,7 +180,7 @@ export interface PiMentisConfig {
   readonly intelligence: IntelligenceConfig;
 }
 
-export function createDefaultConfig(cwd: string): PiMentisConfig {
+export function createDefaultConfig(_cwd: string): PiMentisConfig {
   const availableProcessors = globalThis.navigator?.hardwareConcurrency ?? 2;
   return {
     runtime: { piVersion: "0.83.0" },
@@ -262,7 +263,7 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
       },
     },
     storage: {
-      rootDir: path.join(cwd, ".pi-mentis", "zvec"),
+      rootDir: path.join(resolveStorageRoot().zvecRoot),
       readOnly: false,
       lockTimeoutMs: 5_000,
       generationRetentionMs: 7 * 24 * 60 * 60 * 1_000,
@@ -536,11 +537,11 @@ function applySiliconFlowEnvironment(
 }
 
 export async function loadConfig(
-  cwd: string,
-  filename = path.join(cwd, ".pi-mentis", "config.json"),
+  _cwd: string,
+  filename = globalConfigPath(),
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<PiMentisConfig> {
-  const defaults = createDefaultConfig(cwd);
+  const defaults = createDefaultConfig(_cwd);
   let override: unknown;
   try {
     override = JSON.parse(await readFile(filename, "utf8")) as unknown;

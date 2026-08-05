@@ -19,8 +19,8 @@ const execFileAsync = promisify(execFile);
 
 export type KnowledgeSourceInput =
   | { readonly kind: "file"; readonly path: string }
-  | { readonly kind: "directory"; readonly path: string }
-  | { readonly kind: "workspace"; readonly path: string }
+  | { readonly kind: "directory"; readonly path: string; readonly maxDepth?: number }
+  | { readonly kind: "workspace"; readonly path: string; readonly maxDepth?: number }
   | { readonly kind: "git"; readonly path: string }
   | { readonly kind: "url"; readonly url: string }
   | { readonly kind: "text"; readonly text: string; readonly name?: string }
@@ -78,13 +78,16 @@ async function* walkDirectory(
   root: string,
   namespace: string,
   limits: ResourceLimits,
+  maxDepth = 1,
 ): AsyncIterable<ResolvedParserInput> {
   const canonicalRoot = await realpath(root);
-  const pending = [canonicalRoot];
+  const pending: Array<[string, number]> = [[canonicalRoot, 0]];
   const visited = new Set<string>();
   while (pending.length > 0) {
-    const directory = pending.pop();
-    if (directory === undefined || visited.has(directory)) continue;
+    const item = pending.pop();
+    if (item === undefined) continue;
+    const [directory, depth] = item;
+    if (visited.has(directory)) continue;
     visited.add(directory);
     const entries = await readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
@@ -95,7 +98,7 @@ async function* walkDirectory(
       const metadata = await lstat(target);
       if (metadata.isSymbolicLink()) continue;
       if (metadata.isDirectory()) {
-        pending.push(target);
+        if (depth < maxDepth) pending.push([target, depth + 1]);
       } else if (metadata.isFile()) {
         yield await fileInput(target, namespace, limits);
       }
@@ -129,7 +132,8 @@ export async function* resolveSource(
   options: ResolveOptions,
 ): AsyncIterable<ResolvedParserInput> {
   if (sourceInput.kind === "directory" || sourceInput.kind === "workspace") {
-    yield* walkDirectory(sourceInput.path, options.namespace, options.limits);
+    const depth = sourceInput.maxDepth ?? 1;
+    yield* walkDirectory(sourceInput.path, options.namespace, options.limits, depth);
     return;
   }
   if (sourceInput.kind === "git") {

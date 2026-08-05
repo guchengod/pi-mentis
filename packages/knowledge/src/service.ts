@@ -1,5 +1,5 @@
 import {
-  BackgroundScheduler,
+  type BackgroundScheduler,
   EvidenceAuthority,
   ForegroundExecutor,
   TaskPriority,
@@ -30,11 +30,12 @@ import {
   extensionOf,
   resolveSource,
   type ParserRegistry,
+  type ResolvedParserInput,
   type StructuredDocument,
 } from "@pi-mentis/pi-mentis-file-parsers";
 import { InMemoryTelemetry, measure } from "@pi-mentis/pi-mentis-observability";
 import {
-  ZvecStore,
+  type ZvecStore,
   decodeStoredPayload,
   type StoredRecord,
   type StoredVectorRecord,
@@ -60,6 +61,7 @@ import type {
   SyncKnowledgeSourceCommand,
 } from "./types.js";
 import { recoverKnowledgeEmbeddingMigrationJobs } from "./migration.js";
+import path from "node:path";
 
 type KnowledgeJobState = "queued" | "leased" | "running" | "succeeded" | "failed" | "dead";
 
@@ -183,6 +185,36 @@ function asKnowledgeDocument(
     : undefined;
 }
 
+function abbreviateSource(source: IngestKnowledgeCommand["source"]): string {
+  if (source.kind === "directory") {
+    const name = path.basename(source.path) || source.path;
+    return name.length > 20 ? `${name.slice(0, 18)}…/` : `${name}/`;
+  }
+  if (source.kind === "workspace") {
+    const name = path.basename(source.path) || source.path;
+    const short = name.length > 18 ? `${name.slice(0, 16)}…` : name;
+    return `ws:${short}`;
+  }
+  if (source.kind === "url") {
+    try {
+      const host = new URL(source.url).hostname;
+      return host.length > 22 ? `${host.slice(0, 20)}…` : host;
+    } catch {
+      return "url";
+    }
+  }
+  if (source.kind === "git") {
+    const name = path.basename(source.path) || source.path;
+    const short = name.length > 18 ? `${name.slice(0, 16)}…` : name;
+    return `git:${short}`;
+  }
+  if (source.kind === "file") {
+    const name = path.basename(source.path);
+    return name.length > 25 ? `${name.slice(0, 23)}…` : name;
+  }
+  return source.kind;
+}
+
 export class DefaultKnowledgeService implements KnowledgeService {
   readonly #store: ZvecStore;
   readonly #embedding: EmbeddingProvider;
@@ -230,229 +262,271 @@ export class DefaultKnowledgeService implements KnowledgeService {
     const diagnostics: string[] = [];
     let chunkCount = 0;
     let unchanged = 0;
+    const resolvedFiles: ResolvedParserInput[] = [];
     for await (const resolved of resolveSource(command.source, {
       namespace,
       limits: this.#limits,
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     })) {
       throwIfAborted(options.signal, "knowledge-ingest");
-      sourceIds.push(resolved.source.id);
-      const existingSource = (
-        await this.#store.fetchScalar("knowledge_sources_v1", [resolved.source.id])
-      ).get(resolved.source.id);
-      if (
-        existingSource?.["fingerprint"] === resolved.fingerprint &&
-        existingSource["state"] === "active"
-      ) {
-        unchanged++;
-        continue;
-      }
-      const now = this.#clock.now();
-      const knowledgeSource: KnowledgeSource = {
-        id: resolved.source.id,
-        kind: command.source.kind,
-        canonicalUri: resolved.source.canonicalUri,
-        namespace,
-        authority,
-        state: "syncing",
-        createdAt:
-          typeof existingSource?.["createdAt"] === "number" ? existingSource["createdAt"] : now,
-        updatedAt: now,
-        fingerprint: resolved.fingerprint,
-        attributes: {
-          ...(resolved.source.attributes ?? {}),
-          logicalNamespace,
-          ...(command.scopeContext === undefined
-            ? {}
-            : {
-                tenantId: command.scopeContext.tenantId,
-                userId: command.scopeContext.userId,
-                appId: command.scopeContext.appId,
-                agentId: command.scopeContext.agentId,
-              }),
-        },
-      };
-      await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(knowledgeSource)]);
-      const mediaType = detectMediaType(
-        resolved.input.bytes,
-        resolved.input.filename,
-        resolved.input.mediaType,
+      resolvedFiles.push(resolved);
+    }
+    const CONCURRENCY = 5;
+    const sourceLabel = abbreviateSource(command.source);
+    let failures = 0;
+    for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += CONCURRENCY) {
+      const batch = resolvedFiles.slice(batchStart, batchStart + CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map((resolved) => this.#ingestOne(resolved, command, namespace, authority, options)),
       );
-      const extension =
-        resolved.input.filename === undefined ? undefined : extensionOf(resolved.input.filename);
-      const selection = await this.#parsers.select({
-        canonicalUri: resolved.source.canonicalUri,
-        ...(resolved.input.filename === undefined
-          ? {}
-          : {
-              filename: resolved.input.filename,
-              ...(extension === undefined ? {} : { extension }),
-            }),
-        mediaType,
-        magic: resolved.input.bytes.subarray(0, 32),
-      });
-      const parsed = await this.#consumeParser(
-        selection.parser.parse(
-          { ...resolved.input, mediaType },
-          {
-            limits: this.#limits,
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-          },
-        ),
-      );
-      const parsedDocument: StructuredDocument | undefined = parsed.document;
-      diagnostics.push(...parsed.diagnostics);
-      if (parsedDocument === undefined) {
-        const failed = {
-          ...knowledgeSource,
-          state: "failed" as const,
-          updatedAt: this.#clock.now(),
-        };
-        await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(failed)]);
-        continue;
-      }
-      const identifier = documentId(
-        resolved.source.id,
-        resolved.input.filename ?? resolved.source.canonicalUri,
-      );
-      documentIds.push(identifier);
-      const previousDocument = (
-        await this.#store.fetchScalar("knowledge_documents_v1", [identifier])
-      ).get(identifier);
-      const previousRevision =
-        typeof previousDocument?.["activeRevision"] === "number"
-          ? previousDocument["activeRevision"]
-          : 0;
-      const revision = previousRevision + 1;
-      const drafts = chunkStructuredDocument(parsedDocument, undefined, undefined, 32_768);
-      const draftIds = drafts.map((draft) => {
-        const hash = contentHash(draft.text);
-        return chunkId(identifier, draft.semanticKey, hash);
-      });
-      const persisted = await this.#store.fetchVectors("knowledge", draftIds);
-      const missingIndexes: number[] = [];
-      const embedded: Array<EmbeddingVector | undefined> = drafts.map((_draft, index) => {
-        const stored = persisted.get(draftIds[index] ?? "");
-        const vector = stored?.vectors["embedding"];
-        if (vector instanceof Float32Array || Array.isArray(vector)) {
-          return {
-            values: vector instanceof Float32Array ? vector : Float32Array.from(vector),
-            dimensions: this.#dimensions,
-            normalized: false,
-          };
+      for (const result of results) {
+        if (result.status === "rejected") {
+          failures++;
+          diagnostics.push(
+            `File processing failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+          );
+          continue;
         }
-        missingIndexes.push(index);
-        return undefined;
-      });
-      const missingVectors = await this.#embedDrafts(
-        missingIndexes.map((index) => {
-          const draft = drafts[index];
-          if (draft === undefined) throw new Error("Missing chunk draft");
-          return { text: draft.text, tokenCount: draft.tokenCount };
-        }),
-        options,
-      );
-      for (const [offset, vector] of missingVectors.entries()) {
-        const index = missingIndexes[offset];
-        if (index !== undefined) embedded[index] = vector;
+        const r = result.value;
+        sourceIds.push(...r.sourceIds);
+        documentIds.push(...r.documentIds);
+        diagnostics.push(...r.diagnostics);
+        chunkCount += r.chunkCount;
+        unchanged += r.unchanged;
       }
-      const chunks: KnowledgeChunk[] = drafts.map((draft, index) => {
-        const hash = contentHash(draft.text);
-        const vector = embedded[index];
-        if (vector === undefined) throw new Error("Embedding batch returned incomplete vectors");
-        return {
-          id: draftIds[index] ?? chunkId(identifier, draft.semanticKey, hash),
-          documentId: identifier,
-          sourceId: resolved.source.id,
-          canonicalUri: resolved.source.canonicalUri,
-          semanticKey: draft.semanticKey,
-          text: draft.text,
-          searchableText: draft.searchableText,
-          embeddingSpaceId: this.#embeddingSpaceId,
-          embedding: vector.values,
-          revision,
-          ordinal: draft.ordinal,
-          headingPath: draft.headingPath,
-          tokenCount: draft.tokenCount,
-          contentHash: hash,
-          ...(draft.location === undefined ? {} : { location: draft.location }),
-          ...(draft.symbol === undefined ? {} : { symbol: draft.symbol }),
-          authority,
-          namespace,
-          createdAt: now,
-          updatedAt: now,
-          ...(resolved.source.attributes === undefined
-            ? {}
-            : { sourceAttributes: resolved.source.attributes }),
-        };
-      });
-      const knowledgeDocument: KnowledgeDocument = {
-        id: identifier,
-        sourceId: resolved.source.id,
-        canonicalUri: resolved.source.canonicalUri,
-        title: parsedDocument.metadata.title,
-        mediaType: parsedDocument.metadata.mediaType,
-        contentHash: resolved.fingerprint,
-        metadataHash: contentHash(JSON.stringify(parsedDocument.metadata)),
-        parser: selection.component,
-        chunker: { id: "structured-token-packer", version: "1.0.0" },
-        embeddingSpace: this.#embeddingSpace,
-        revision,
-        activeRevision: previousRevision,
-        status: "preparing",
-        indexedAt: now,
-        ...(parsedDocument.metadata.attributes === undefined
-          ? {}
-          : { attributes: parsedDocument.metadata.attributes }),
-      };
-      await this.#store.upsertScalar("knowledge_documents_v1", [
-        this.#documentRecord(knowledgeDocument),
-      ]);
-      await this.#store.upsertVectors(
-        "knowledge",
-        chunks
-          .filter((chunk) => !persisted.has(chunk.id))
-          .map((chunk) => this.#chunkRecord(chunk, "preparing")),
-      );
-      const previousChunks =
-        previousRevision === 0
-          ? []
-          : await this.#store.filterVectors(
-              "knowledge",
-              `document_id = ${quoteFilter(identifier)} AND revision = ${previousRevision}`,
-            );
-      const activeDocument: KnowledgeDocument = {
-        ...knowledgeDocument,
-        activeRevision: revision,
-        status: "active",
-      };
-      await this.#store.upsertScalar("knowledge_documents_v1", [
-        this.#documentRecord(activeDocument),
-      ]);
-      await this.#store.upsertVectors(
-        "knowledge",
-        chunks.map((chunk) => this.#chunkRecord(chunk, "active")),
-      );
-      const nextIds = new Set(chunks.map((chunk) => chunk.id));
-      const staleIds = previousChunks
-        .map((document) => document.id)
-        .filter((id) => !nextIds.has(id));
-      await this.#store.deleteVectors("knowledge", staleIds);
-      await this.#store.upsertScalar("knowledge_sources_v1", [
-        this.#sourceRecord({
-          ...knowledgeSource,
-          state: "active",
-          updatedAt: this.#clock.now(),
-        }),
-      ]);
-      chunkCount += chunks.length;
+      const completed = Math.min(batchStart + CONCURRENCY, resolvedFiles.length);
+      const failedSuffix = failures > 0 ? ` (${failures} fail)` : "";
       await options.onProgress?.({
         operation: "knowledge-ingest",
         phase: "indexed",
-        completed: documentIds.length,
-        message: parsedDocument.metadata.title,
+        completed,
+        total: resolvedFiles.length,
+        message: `${sourceLabel} ${completed}/${resolvedFiles.length}${failedSuffix}`,
       });
     }
+    return { sourceIds, documentIds, chunkCount, unchanged, diagnostics };
+  }
+
+  async #ingestOne(
+    resolved: ResolvedParserInput,
+    command: IngestKnowledgeCommand,
+    namespace: string,
+    authority: EvidenceAuthority,
+    options: OperationOptions,
+  ): Promise<IngestKnowledgeResult> {
+    const sourceIds: string[] = [];
+    const documentIds: string[] = [];
+    const diagnostics: string[] = [];
+    let chunkCount = 0;
+    const unchanged = 0;
+
+    sourceIds.push(resolved.source.id);
+    const existingSource = (
+      await this.#store.fetchScalar("knowledge_sources_v1", [resolved.source.id])
+    ).get(resolved.source.id);
+    if (
+      existingSource?.["fingerprint"] === resolved.fingerprint &&
+      existingSource["state"] === "active"
+    ) {
+      return { sourceIds, documentIds, chunkCount, unchanged: 1, diagnostics };
+    }
+    const now = this.#clock.now();
+    const knowledgeSource: KnowledgeSource = {
+      id: resolved.source.id,
+      kind: command.source.kind,
+      canonicalUri: resolved.source.canonicalUri,
+      namespace,
+      authority,
+      state: "syncing",
+      createdAt:
+        typeof existingSource?.["createdAt"] === "number" ? existingSource["createdAt"] : now,
+      updatedAt: now,
+      fingerprint: resolved.fingerprint,
+      attributes: {
+        ...(resolved.source.attributes ?? {}),
+        logicalNamespace: command.namespace ?? this.#defaultNamespace,
+        ...(command.scopeContext === undefined
+          ? {}
+          : {
+              tenantId: command.scopeContext.tenantId,
+              userId: command.scopeContext.userId,
+              appId: command.scopeContext.appId,
+              agentId: command.scopeContext.agentId,
+            }),
+      },
+    };
+    await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(knowledgeSource)]);
+    const mediaType = detectMediaType(
+      resolved.input.bytes,
+      resolved.input.filename,
+      resolved.input.mediaType,
+    );
+    const extension =
+      resolved.input.filename === undefined ? undefined : extensionOf(resolved.input.filename);
+    const selection = await this.#parsers.select({
+      canonicalUri: resolved.source.canonicalUri,
+      ...(resolved.input.filename === undefined
+        ? {}
+        : {
+            filename: resolved.input.filename,
+            ...(extension === undefined ? {} : { extension }),
+          }),
+      mediaType,
+      magic: resolved.input.bytes.subarray(0, 32),
+    });
+    const parsed = await this.#consumeParser(
+      selection.parser.parse(
+        { ...resolved.input, mediaType },
+        {
+          limits: this.#limits,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        },
+      ),
+    );
+    const parsedDocument: StructuredDocument | undefined = parsed.document;
+    diagnostics.push(...parsed.diagnostics);
+    if (parsedDocument === undefined) {
+      const failed = {
+        ...knowledgeSource,
+        state: "failed" as const,
+        updatedAt: this.#clock.now(),
+      };
+      await this.#store.upsertScalar("knowledge_sources_v1", [this.#sourceRecord(failed)]);
+      return { sourceIds, documentIds, chunkCount, unchanged, diagnostics };
+    }
+    const identifier = documentId(
+      resolved.source.id,
+      resolved.input.filename ?? resolved.source.canonicalUri,
+    );
+    documentIds.push(identifier);
+    const previousDocument = (
+      await this.#store.fetchScalar("knowledge_documents_v1", [identifier])
+    ).get(identifier);
+    const previousRevision =
+      typeof previousDocument?.["activeRevision"] === "number"
+        ? previousDocument["activeRevision"]
+        : 0;
+    const revision = previousRevision + 1;
+    const drafts = chunkStructuredDocument(parsedDocument, undefined, undefined, 32_768);
+    const draftIds = drafts.map((draft) => {
+      const hash = contentHash(draft.text);
+      return chunkId(identifier, draft.semanticKey, hash);
+    });
+    const persisted = await this.#store.fetchVectors("knowledge", draftIds);
+    const missingIndexes: number[] = [];
+    const embedded: Array<EmbeddingVector | undefined> = drafts.map((_draft, index) => {
+      const stored = persisted.get(draftIds[index] ?? "");
+      const vector = stored?.vectors["embedding"];
+      if (vector instanceof Float32Array || Array.isArray(vector)) {
+        return {
+          values: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+          dimensions: this.#dimensions,
+          normalized: false,
+        };
+      }
+      missingIndexes.push(index);
+      return undefined;
+    });
+    const missingVectors = await this.#embedDrafts(
+      missingIndexes.map((index) => {
+        const draft = drafts[index];
+        if (draft === undefined) throw new Error("Missing chunk draft");
+        return { text: draft.text, tokenCount: draft.tokenCount };
+      }),
+      options,
+    );
+    for (const [offset, vector] of missingVectors.entries()) {
+      const index = missingIndexes[offset];
+      if (index !== undefined) embedded[index] = vector;
+    }
+    const chunks: KnowledgeChunk[] = drafts.map((draft, index) => {
+      const hash = contentHash(draft.text);
+      const vector = embedded[index];
+      if (vector === undefined) throw new Error("Embedding batch returned incomplete vectors");
+      return {
+        id: draftIds[index] ?? chunkId(identifier, draft.semanticKey, hash),
+        documentId: identifier,
+        sourceId: resolved.source.id,
+        canonicalUri: resolved.source.canonicalUri,
+        semanticKey: draft.semanticKey,
+        text: draft.text,
+        searchableText: draft.searchableText,
+        embeddingSpaceId: this.#embeddingSpaceId,
+        embedding: vector.values,
+        revision,
+        ordinal: draft.ordinal,
+        headingPath: draft.headingPath,
+        tokenCount: draft.tokenCount,
+        contentHash: hash,
+        ...(draft.location === undefined ? {} : { location: draft.location }),
+        ...(draft.symbol === undefined ? {} : { symbol: draft.symbol }),
+        authority,
+        namespace,
+        createdAt: now,
+        updatedAt: now,
+        ...(resolved.source.attributes === undefined
+          ? {}
+          : { sourceAttributes: resolved.source.attributes }),
+      };
+    });
+    const knowledgeDocument: KnowledgeDocument = {
+      id: identifier,
+      sourceId: resolved.source.id,
+      canonicalUri: resolved.source.canonicalUri,
+      title: parsedDocument.metadata.title,
+      mediaType: parsedDocument.metadata.mediaType,
+      contentHash: resolved.fingerprint,
+      metadataHash: contentHash(JSON.stringify(parsedDocument.metadata)),
+      parser: selection.component,
+      chunker: { id: "structured-token-packer", version: "1.0.0" },
+      embeddingSpace: this.#embeddingSpace,
+      revision,
+      activeRevision: previousRevision,
+      status: "preparing",
+      indexedAt: now,
+      ...(parsedDocument.metadata.attributes === undefined
+        ? {}
+        : { attributes: parsedDocument.metadata.attributes }),
+    };
+    await this.#store.upsertScalar("knowledge_documents_v1", [
+      this.#documentRecord(knowledgeDocument),
+    ]);
+    await this.#store.upsertVectors(
+      "knowledge",
+      chunks
+        .filter((chunk) => !persisted.has(chunk.id))
+        .map((chunk) => this.#chunkRecord(chunk, "preparing")),
+    );
+    const previousChunks =
+      previousRevision === 0
+        ? []
+        : await this.#store.filterVectors(
+            "knowledge",
+            `document_id = ${quoteFilter(identifier)} AND revision = ${previousRevision}`,
+          );
+    const activeDocument: KnowledgeDocument = {
+      ...knowledgeDocument,
+      activeRevision: revision,
+      status: "active",
+    };
+    await this.#store.upsertScalar("knowledge_documents_v1", [
+      this.#documentRecord(activeDocument),
+    ]);
+    await this.#store.upsertVectors(
+      "knowledge",
+      chunks.map((chunk) => this.#chunkRecord(chunk, "active")),
+    );
+    const nextIds = new Set(chunks.map((chunk) => chunk.id));
+    const staleIds = previousChunks.map((document) => document.id).filter((id) => !nextIds.has(id));
+    await this.#store.deleteVectors("knowledge", staleIds);
+    await this.#store.upsertScalar("knowledge_sources_v1", [
+      this.#sourceRecord({
+        ...knowledgeSource,
+        state: "active",
+        updatedAt: this.#clock.now(),
+      }),
+    ]);
+    chunkCount += chunks.length;
     return { sourceIds, documentIds, chunkCount, unchanged, diagnostics };
   }
 
@@ -860,7 +934,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
     command: IngestKnowledgeCommand,
     options: EnqueueOptions,
   ): ReturnType<BackgroundScheduler["schedule"]> {
-    return this.#scheduler.schedule({
+    const scheduled = this.#scheduler.schedule({
       id: initial.jobId,
       deduplicationKey: initial.deduplicationKey,
       priority:
@@ -923,6 +997,14 @@ export class DefaultKnowledgeService implements KnowledgeService {
         throw lastError instanceof Error ? lastError : new Error("Knowledge job exhausted retries");
       },
     });
+    if (options.onDone) {
+      void scheduled.promise
+        .then((result) => options.onDone!(result))
+        .catch((error: unknown) =>
+          options.onDone!(error instanceof Error ? error : new Error(String(error))),
+        );
+    }
+    return scheduled;
   }
 
   async #findActiveJob(deduplicationKey: string): Promise<PersistedKnowledgeJob | undefined> {

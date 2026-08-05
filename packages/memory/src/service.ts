@@ -21,13 +21,16 @@ import {
 import { InMemoryTelemetry, measure } from "@pi-mentis/pi-mentis-observability";
 import {
   ZvecStateStore,
-  ZvecStore,
+  type ZvecStore,
   decodeStoredPayload,
   type StoredVectorRecord,
 } from "@pi-mentis/pi-mentis-zvec";
 
 import { TemporalTruthEngine, type TemporalPlan } from "./temporal.js";
 import { HierarchicalViewService, type ViewKind } from "./views.js";
+import { deriveFactKey as deriveFactKeyNew } from "./fact-key.js";
+import { planCommit } from "./commit-planner.js";
+import { shouldReject } from "./secret-detector.js";
 
 import type {
   CommitMemoryCommand,
@@ -98,37 +101,18 @@ function cosineSimilarity(score: number): number {
 
 function inferDomain(command: CommitMemoryCommand): MemoryDomain {
   if (command.domain !== undefined) return command.domain;
-  if (command.type === "preference") return "user";
-  if (command.type === "procedural") return "procedure";
-  if (command.type === "episodic") return "episodic";
-  if (command.type === "task") return "task";
-  if (
-    command.scope.kind === "repository" ||
-    command.scope.kind === "project" ||
-    command.scopeContext?.repositoryId !== undefined ||
-    command.scopeContext?.projectId !== undefined
-  ) {
-    return "project";
-  }
-  return "topic";
+  return planCommit(command.content, command.type, command.scopeContext, {
+    domain: command.domain,
+    scope: command.scope,
+  }).domain;
 }
 
 export function deriveFactKey(
   command: Pick<CommitMemoryCommand, "content" | "type" | "domain">,
 ): string {
-  const normalized = normalizeText(command.content).toLocaleLowerCase();
-  const statement = normalized.match(
-    /^(.{2,120}?)(?:\s+(?:is|uses?|became|changed to|switch(?:ed)? to)\s+|\s*[:=：]\s*|是|使用|改为|切换到)(.{1,120})$/iu,
-  );
-  const subject = statement?.[1]?.trim();
-  const anchor =
-    subject !== undefined && subject.length >= 2
-      ? subject
-      : normalized
-          .replace(/\bv?\d+(?:\.\d+){1,3}\b/gi, "<version>")
-          .replace(/\s+/g, " ")
-          .slice(0, 240);
-  return `fact:${stableHash("memory-fact-key:v1", command.domain ?? command.type, anchor)}`;
+  // Bridge: use the new fact-key registry under the hood
+  const domain = command.domain ?? "topic";
+  return deriveFactKeyNew(command.content, domain as MemoryDomain, undefined).factKey;
 }
 
 function defaultCardinality(type: CommitMemoryCommand["type"]) {
@@ -293,6 +277,14 @@ export class DefaultMemoryService implements MemoryService {
     options: OperationOptions = {},
   ): Promise<CommitMemoryResult> {
     throwIfAborted(options.signal, "memory-commit");
+    // ── Secret detection ─────────────────────────────────────
+    if (shouldReject(command.content)) {
+      return {
+        outcome: "rejected_sensitive",
+        record: undefined as unknown as Omit<MemoryRecord, "embedding">,
+        relatedIds: [],
+      };
+    }
     const evidenceIntegrity = await this.#evidenceIntegrity(
       command.evidenceRefs ?? [],
       command.scopeContext,
@@ -404,15 +396,28 @@ export class DefaultMemoryService implements MemoryService {
       topK: 5,
       filter: `namespace = ${quoteFilter(scopeKey)} AND status = "active"`,
     });
+    // Event guard: episodic events and event-cardinality records must NOT
+    // be deduplicated by semantic similarity — only by exact idempotency key
+    // or exact content hash match.
+    const commitDomain = inferDomain(command);
+    const isEvent =
+      commitDomain === "episodic" ||
+      command.cardinality === "event" ||
+      (command.cardinality === undefined &&
+        (command.type === "episodic" || command.type === "task"));
     const semanticDuplicate =
-      (command.supersedesIds?.length ?? 0) > 0 || command.cardinality === "single"
+      (command.supersedesIds?.length ?? 0) > 0 || command.cardinality === "single" || isEvent
         ? undefined
         : neighbors.find((neighbor) => {
-            const existingContent = decodeStoredPayload(neighbor)["content"];
+            const payload = decodeStoredPayload(neighbor);
+            const existingContent = payload["content"];
+            // Also skip if the neighbor itself is an event
+            const neighborCardinality = payload["cardinality"] as string | undefined;
+            const neighborDomain = payload["domain"] as string | undefined;
+            if (neighborCardinality === "event" || neighborDomain === "episodic") {
+              return false;
+            }
             return (
-              // BGE-M3 scores production paraphrases more conservatively than
-              // exact copies. Scope and polarity gates keep this threshold
-              // from merging unrelated records.
               cosineSimilarity(neighbor.score) >= 0.78 &&
               typeof existingContent === "string" &&
               polarity(existingContent) === polarity(normalizedContent)
@@ -498,7 +503,11 @@ export class DefaultMemoryService implements MemoryService {
     let supersedesIds = [...new Set(command.supersedesIds ?? [])];
     const confidence = Math.max(0, Math.min(1, command.confidence ?? 0.8));
     const importance = Math.max(0, Math.min(1, command.importance ?? 0.5));
-    const pending = confidence < 0.6 || command.authority <= EvidenceAuthority.AssistantInference;
+    // Only low-confidence or implicit model inferences enter pending.
+    // Explicit user writes (authority >= UserCurrentInstruction) are always active.
+    const pending =
+      command.authority < EvidenceAuthority.UserHistoricalStatement &&
+      (confidence < 0.6 || command.authority <= EvidenceAuthority.AssistantInference);
     const id = stableHash("memory:v1", scopeKey, hash);
     let conflicts = semanticConflicts;
     const factKey = command.factKey ?? deriveFactKey(command);

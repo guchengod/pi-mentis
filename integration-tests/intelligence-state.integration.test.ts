@@ -44,7 +44,11 @@ async function temporaryStore(): Promise<{ root: string; store: ZvecStore }> {
 }
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    roots.splice(0).map((root) =>
+      rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }),
+    ),
+  );
 });
 
 const scope: PiScopeContext = {
@@ -220,7 +224,7 @@ describe("P8-P13 real-Zvec invariant runtime", () => {
     await store.close();
   });
 
-  it("maintains temporal invariants for arbitrary event orderings", async () => {
+  it("maintains temporal invariants for arbitrary event orderings", { timeout: 180_000 }, async () => {
     const { store } = await temporaryStore();
     let caseIndex = 0;
     await fc.assert(

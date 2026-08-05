@@ -1,3 +1,538 @@
+/**
+ * Recall Planner — Retrieval-First Architecture
+ *
+ * KEY PRINCIPLE: Don't decide whether to search based on how the user phrased
+ * the question. Always run a cheap Fast Recall, then decide based on what the
+ * system actually found.
+ *
+ * Keywords and intent signals are WEAK boosters only (≤0.15 weight).
+ * Task continuity, scope affinity, and actual candidate similarity dominate.
+ */
+
+// ─── Intent Signals (weak, ≤0.15 weight) ──────────────────────────
+
+export type RecallIntent =
+  | "user_preference"
+  | "project_state"
+  | "task_continuation"
+  | "historical_reason"
+  | "topic_recall"
+  | "procedure_reuse"
+  | "capability_recall"
+  | "user_profile"
+  | "agent_profile"
+  | "current_project_fact"
+  | "knowledge_lookup"
+  | "credential_reference"
+  | "explicit_memory_lookup"
+  | "no_recall"
+  | "current_input_only";
+
+export type IntentScores = Record<RecallIntent, number>;
+
+/**
+ * Classify intent with SOFT scores (not hard decisions).
+ * Each intent gets a 0-1 score. Multiple intents can score >0.
+ * These scores only boost candidate scores by at most 0.15.
+ */
+export function classifyIntentScores(prompt: string): IntentScores {
+  const normalized = prompt.toLowerCase().trim();
+  const scores: Record<string, number> = {
+    user_preference: 0,
+    project_state: 0,
+    task_continuation: 0,
+    historical_reason: 0,
+    topic_recall: 0,
+    procedure_reuse: 0,
+    capability_recall: 0,
+    no_recall: 0,
+    current_input_only: 0,
+  };
+
+  // No recall if empty or command
+  if (normalized.length < 2) {
+    scores["no_recall"] = 1;
+    scores["current_input_only"] = 1;
+    return scores as IntentScores;
+  }
+
+  // Greetings / simple operations → current_input_only
+  if (/^(?:你好|hi|hello|hey|thanks|thank you|ok|好的)[\s!！。，,.]*$/i.test(normalized)) {
+    scores["current_input_only"] = 0.9;
+    scores["no_recall"] = 0.8;
+    return scores as IntentScores;
+  }
+
+  // Calculations / pure translations → no recall needed
+  if (
+    /^(?:计算|translate|convert|翻译|what is \d+[\s+/*-]+\d+|tell me about\s+\w+$)/i.test(
+      normalized,
+    )
+  ) {
+    scores["current_input_only"] = 0.7;
+    scores["no_recall"] = 0.6;
+    return scores as IntentScores;
+  }
+
+  // ─── Weak keyword signals (0.1-0.7, not hard gates) ──────────
+
+  // User preference: 我(喜欢|习惯|偏好...)
+  if (
+    /我(?:喜欢|习惯|偏好|一般|平时|经常|总是)|i (?:prefer|like|usually|always|tend to)|my (?:preference|style|habit)/i.test(
+      normalized,
+    )
+  ) {
+    scores["user_preference"] = Math.max(scores["user_preference"] ?? 0, 0.6);
+  }
+
+  // ─── Agent profile: 你叫什么 / 你的名字 / 怎么称呼你 ───
+  if (
+    /你(?:叫|是)什?么名?字?|你的名?字|怎么称呼你|(?:what'?s? )?your name|call yourself/i.test(
+      normalized,
+    )
+  ) {
+    scores["agent_profile"] = 0.85;
+  }
+
+  // ─── User profile: 我叫什么 / 我的名字 ───
+  if (/我(?:叫|是)什?么名?字?|我的名?字|what'?s? my name|who am i/i.test(normalized)) {
+    scores["user_profile"] = 0.85;
+  }
+
+  // ─── Memory lookup: 记忆(?:中的|里)|remember|recall from memory ───
+  if (
+    /记忆(?:中的|里的?|过的?)|(?:remember|recall)(?:.{0,10})(?:from|in).{0,5}memory|记忆中/i.test(
+      normalized,
+    )
+  ) {
+    scores["explicit_memory_lookup"] = 0.8;
+  }
+
+  // ─── Credential reference: 凭据|密钥|token|密码在(?:哪里|哪) ───
+  if (
+    /(?:密码|凭据|凭证|token|令牌|密钥).{0,5}(?:在哪|哪里|怎么|位置)|where.*(?:credentials?|token|secret|key)|credential.*reference/i.test(
+      normalized,
+    )
+  ) {
+    scores["credential_reference"] = 0.9;
+  }
+
+  // ─── Knowledge lookup: explicit knowledge questions ───
+  if (
+    /(?:how does|what is|how to|documentation|文档|spec|规范|protocol|协议|oauth|实现|怎么.*实现)/i.test(
+      normalized,
+    )
+  ) {
+    scores["knowledge_lookup"] = 0.6;
+  }
+
+  // Task continuation: 继续|接着|上次的任务...
+  if (/继续|接着|上次的|未完|continue|last task|unfinished|resume/i.test(normalized)) {
+    scores["task_continuation"] = Math.max(scores["task_continuation"] ?? 0, 0.6);
+  }
+
+  // Historical reason: 为什么|原因|之前|当时...
+  if (
+    /为什么|原因|是怎么|上次|之前|当时|当初|why|reason|last time|before|previous|how did/i.test(
+      normalized,
+    )
+  ) {
+    scores["historical_reason"] = Math.max(scores["historical_reason"] ?? 0, 0.5);
+  }
+
+  // Procedure: 怎么做|步骤|流程|how to|怎么部署...
+  if (
+    /怎么做|步骤|流程|how (?:to|do|can)|procedure|steps|workflow|怎么(?:部署|配置|安装|设置|构建)/i.test(
+      normalized,
+    )
+  ) {
+    scores["procedure_reuse"] = Math.max(scores["procedure_reuse"] ?? 0, 0.5);
+  }
+
+  // Project state: 这个项目|项目(状态|配置...)|project...
+  if (
+    /这个项目|当前项目|项目(?:状态|配置|架构|情况|怎么样)|project (?:state|config|status|documentation|api)/i.test(
+      normalized,
+    )
+  ) {
+    scores["project_state"] = Math.max(scores["project_state"] ?? 0, 0.5);
+  }
+
+  // Capability: 能不能|可以吗|支持吗|can you...
+  if (/能不能|可以(?:.{0,5})?吗|支持(?:.{0,5})?吗|can (?:you|it)|capable/i.test(normalized)) {
+    scores["capability_recall"] = Math.max(scores["capability_recall"] ?? 0, 0.4);
+  }
+
+  // Topic: broader references
+  if (/(?:NAS|预算|配置|方案|计划|架构|存储|部署|那个|那种|ECC|低功耗)/i.test(normalized)) {
+    scores["topic_recall"] = Math.max(scores["topic_recall"] ?? 0, 0.3);
+  }
+
+  return scores as IntentScores;
+}
+
+// ─── Source-Specific Calibration ──────────────────────────────────
+
+/**
+ * Different sources have fundamentally different authority scales.
+ * Knowledge authority (80) should NOT beat user Memory authority (10).
+ * Each source is calibrated to a common 0-1 scale.
+ */
+export type RecallSource =
+  "exact_fact" | "user_view" | "project_view" | "agent_view" | "memory" | "knowledge";
+
+export interface RankedCandidate {
+  readonly id: string;
+  readonly kind: "memory" | "knowledge" | "capability";
+  readonly source: RecallSource;
+  readonly text: string;
+  readonly scope?: { readonly kind: string; readonly id: string };
+  readonly factKey?: string;
+  readonly status?: string;
+  readonly temporalState?: string;
+
+  readonly sourceScore: number;
+  readonly calibratedScore: number;
+  readonly intentAffinity: number;
+  readonly scopeAffinity: number;
+  readonly finalScore: number;
+
+  readonly matchReason?: string;
+  readonly evidenceSummary?: string;
+}
+
+/**
+ * Calibrate authority across sources so Knowledge doesn't drown Memory.
+ */
+export function calibrateSourceScore(source: RecallSource, rawAuthority: number): number {
+  switch (source) {
+    case "exact_fact":
+      return 1.0;
+    case "user_view":
+    case "agent_view":
+      return 0.95;
+    case "project_view":
+      return 0.8;
+    case "memory":
+      return 0.6 + (rawAuthority / 100) * 0.3;
+    case "knowledge":
+      return 0.1;
+    default:
+      return 0.5;
+  }
+}
+
+/**
+ * Determine lane priority from intent. Memory vs Knowledge lanes.
+ */
+export function lanePriority(intentScores: IntentScores): {
+  memoryWeight: number;
+  knowledgeWeight: number;
+  credentialOnly: boolean;
+} {
+  const profile =
+    (intentScores.user_profile ?? 0) +
+    (intentScores.agent_profile ?? 0) +
+    (intentScores.user_preference ?? 0) +
+    (intentScores.explicit_memory_lookup ?? 0);
+
+  const knowledge = intentScores.knowledge_lookup ?? 0;
+  const credential = intentScores.credential_reference ?? 0;
+
+  // Credential queries: ONLY secret references, no general knowledge
+  if (credential >= 0.7) {
+    return { memoryWeight: 1.0, knowledgeWeight: 0.0, credentialOnly: true };
+  }
+
+  // Profile/preference queries: Memory lane dominates, Knowledge suppressed
+  if (profile >= 0.5) {
+    return { memoryWeight: 1.0, knowledgeWeight: 0.05, credentialOnly: false };
+  }
+
+  // Knowledge queries: Knowledge lane primary, Memory supplemental
+  if (knowledge >= 0.5) {
+    return { memoryWeight: 0.3, knowledgeWeight: 1.0, credentialOnly: false };
+  }
+
+  // Default: both lanes, Memory preferred
+  return { memoryWeight: 1.0, knowledgeWeight: 0.3, credentialOnly: false };
+}
+
+// ─── Existing code continues ─────────────────────────────────────
+
+export interface RecallQueryContext {
+  readonly currentMessage: string;
+  readonly recentUserMessages: readonly string[];
+  readonly activeGoal?: string;
+  readonly taskId?: string;
+  readonly repositoryId?: string;
+  readonly projectId?: string;
+  readonly topicIds?: readonly string[];
+  readonly branchId?: string;
+  readonly recentToolErrors?: readonly string[];
+  readonly recentFiles?: readonly string[];
+}
+
+/**
+ * Build a rich query string from context, not just the current message.
+ * This makes recall work for pronouns and implicit references like
+ * "那这个呢？" or "为什么当时换掉了？"
+ */
+export function buildRecallQuery(context: RecallQueryContext): string {
+  const parts: string[] = [context.currentMessage];
+
+  // Last user message for continuation context
+  const prevUser = context.recentUserMessages[context.recentUserMessages.length - 1];
+  if (prevUser !== undefined && prevUser !== context.currentMessage) {
+    parts.push(prevUser);
+  }
+
+  // Active goal
+  if (context.activeGoal !== undefined && context.activeGoal.length > 0) {
+    parts.push(context.activeGoal);
+  }
+
+  // Task context
+  if (context.taskId !== undefined) {
+    parts.push(`task:${context.taskId}`);
+  }
+
+  // Project/repo context
+  if (context.repositoryId !== undefined) {
+    parts.push(`repo:${context.repositoryId}`);
+  } else if (context.projectId !== undefined) {
+    parts.push(`project:${context.projectId}`);
+  }
+
+  // Recent failures — high signal for debugging recall
+  if (context.recentToolErrors !== undefined && context.recentToolErrors.length > 0) {
+    parts.push(...context.recentToolErrors.slice(0, 3));
+  }
+
+  return parts.filter((p) => p.length > 0).join(" ");
+}
+
+// ─── Fast Recall Candidate ────────────────────────────────────────
+
+export interface FastRecallCandidate {
+  readonly id: string;
+  readonly text: string;
+  readonly kind: "memory" | "knowledge" | "capability";
+  readonly source: "view" | "temporal_head" | "fts" | "cache" | "cached_vector";
+
+  readonly semanticScore: number;
+  readonly lexicalScore: number;
+  readonly scopeAffinity: number;
+  readonly taskContinuity: number;
+  readonly temporalRelevance: number;
+  readonly trustScore: number;
+  readonly applicabilityScore: number;
+
+  readonly finalScore: number;
+}
+
+// ─── Scoring ──────────────────────────────────────────────────────
+
+export interface CandidateScoringInput {
+  readonly candidate: {
+    readonly id: string;
+    readonly text: string;
+    readonly kind: "memory" | "knowledge" | "capability";
+    readonly scope?: { readonly kind: string; readonly id: string };
+    readonly taskId?: string;
+    readonly branchId?: string;
+    readonly authority: number;
+    readonly observedAt: number;
+    readonly updatedAt: number;
+    readonly confidence?: number;
+    readonly semanticSimilarity?: number;
+    readonly lexicalMatchCount?: number;
+  };
+  readonly context: RecallQueryContext;
+  readonly now: number;
+}
+
+/**
+ * Task continuity: how well the candidate aligns with the current task.
+ * This is MORE reliable than keyword matching.
+ */
+export function taskContinuityScore(
+  candidate: CandidateScoringInput["candidate"],
+  context: RecallQueryContext,
+): number {
+  let score = 0;
+
+  if (candidate.taskId !== undefined && candidate.taskId === context.taskId) {
+    score += 0.35;
+  }
+
+  if (
+    candidate.scope !== undefined &&
+    context.repositoryId !== undefined &&
+    (candidate.scope.kind === "repository" || candidate.scope.kind === "project") &&
+    candidate.scope.id === context.repositoryId
+  ) {
+    score += 0.25;
+  }
+
+  if (
+    candidate.branchId !== undefined &&
+    context.branchId !== undefined &&
+    candidate.branchId === context.branchId
+  ) {
+    score += 0.1;
+  }
+
+  return Math.min(score, 1);
+}
+
+/**
+ * Scope affinity: how relevant the candidate's scope is to the current context.
+ */
+export function scopeAffinityScore(
+  candidate: CandidateScoringInput["candidate"],
+  context: RecallQueryContext,
+): number {
+  if (candidate.scope === undefined) return 0.3; // unknown scope, low affinity
+
+  // Exact match
+  if (context.repositoryId !== undefined && candidate.scope.id === context.repositoryId) {
+    return 1.0;
+  }
+  if (context.projectId !== undefined && candidate.scope.id === context.projectId) {
+    return 0.9;
+  }
+  if (context.taskId !== undefined && candidate.scope.id === context.taskId) {
+    return 0.85;
+  }
+
+  // User scope always relevant for current user
+  if (candidate.scope.kind === "user") return 0.6;
+
+  // Topic scope: relevant if active topic matches
+  if (
+    candidate.scope.kind === "topic" &&
+    context.topicIds !== undefined &&
+    context.topicIds.includes(candidate.scope.id)
+  ) {
+    return 0.7;
+  }
+
+  return 0.2; // unrelated scope
+}
+
+/**
+ * Temporal relevance: how fresh/relevant the candidate is.
+ */
+export function temporalRelevanceScore(
+  candidate: CandidateScoringInput["candidate"],
+  now: number,
+): number {
+  const ageMs = now - Math.max(candidate.observedAt, candidate.updatedAt);
+  const ageHours = ageMs / (1000 * 60 * 60);
+
+  if (ageHours < 1) return 1.0;
+  if (ageHours < 24) return 0.9;
+  if (ageHours < 168) return 0.7; // 1 week
+  if (ageHours < 720) return 0.5; // 1 month
+  return 0.3; // older
+}
+
+/**
+ * Compute final recall score from multiple dimensions.
+ */
+export function computeCandidateScore(input: CandidateScoringInput): FastRecallCandidate {
+  const semantic = input.candidate.semanticSimilarity ?? 0;
+  const lexical = Math.min(1, (input.candidate.lexicalMatchCount ?? 0) / 10);
+  const scopeAff = scopeAffinityScore(input.candidate, input.context);
+  const taskCont = taskContinuityScore(input.candidate, input.context);
+  const temporal = temporalRelevanceScore(input.candidate, input.now);
+  const trust = (input.candidate.confidence ?? 0.7) * (input.candidate.authority / 100);
+  const applicability = 0.5; // default
+
+  const finalScore =
+    0.25 * semantic +
+    0.15 * lexical +
+    0.2 * scopeAff +
+    0.15 * taskCont +
+    0.1 * temporal +
+    0.1 * trust +
+    0.05 * applicability;
+
+  return {
+    id: input.candidate.id,
+    text: input.candidate.text,
+    kind: input.candidate.kind,
+    source: "cache",
+    semanticScore: semantic,
+    lexicalScore: lexical,
+    scopeAffinity: scopeAff,
+    taskContinuity: taskCont,
+    temporalRelevance: temporal,
+    trustScore: trust,
+    applicabilityScore: applicability,
+    finalScore,
+  };
+}
+
+// ─── Recall Decision ──────────────────────────────────────────────
+
+export type RecallDecisionKind =
+  | { readonly kind: "skip"; readonly reason: string }
+  | { readonly kind: "inject_fast"; readonly candidateIds: readonly string[] }
+  | { readonly kind: "quality_search"; readonly reason: string };
+
+/**
+ * Decide what to do based on fast recall candidates and intent signals.
+ *
+ * Decision logic:
+ * - Top1 >= 0.78 AND Top1-Top2 >= 0.08 → inject directly
+ * - Top1 >= 0.55 AND < 0.78 → quality search
+ * - Top1 < 0.55 → skip
+ *
+ * Intent signals only boost by up to 0.05.
+ */
+export function evaluateRecallDecision(
+  candidates: readonly FastRecallCandidate[],
+  intentScores: IntentScores,
+): RecallDecisionKind {
+  if (candidates.length === 0) {
+    return { kind: "skip", reason: "no-candidates" };
+  }
+
+  const top1 = candidates[0];
+  if (top1 === undefined) return { kind: "skip", reason: "no-candidates" };
+
+  const top2 = candidates[1];
+
+  // Apply weak intent boost (max 0.05)
+  const maxIntentBoost = Math.max(
+    0,
+    ...(Object.values(intentScores).filter((s) => typeof s === "number") as number[]),
+  );
+  const intentBoost = Math.min(0.05, maxIntentBoost * 0.05);
+
+  const boostedTop1 = Math.min(1, top1.finalScore + intentBoost);
+
+  // High confidence + clear margin → inject directly
+  if (boostedTop1 >= 0.78 && (top2 === undefined || boostedTop1 - top2.finalScore >= 0.08)) {
+    return {
+      kind: "inject_fast",
+      candidateIds: candidates.slice(0, 5).map((c) => c.id),
+    };
+  }
+
+  // Medium confidence → quality search
+  if (boostedTop1 >= 0.55) {
+    return { kind: "quality_search", reason: "medium-confidence" };
+  }
+
+  // Low confidence → skip
+  return { kind: "skip", reason: "low-confidence" };
+}
+
+// ─── High-level recall planner (backward compatible) ──────────────
+
 export interface RecallDecision {
   readonly shouldRecall: boolean;
   readonly sources: readonly ("knowledge" | "memory")[];
@@ -15,49 +550,57 @@ export interface RecallSignals {
   readonly isCommand: boolean;
 }
 
+/**
+ * ALWAYS-ON Fast Recall: every non-command, non-trivial input triggers recall.
+ *
+ * Keywords are NOT used as gates. They are only used in `classifyIntentScores`
+ * as weak boosters for candidate scoring.
+ */
 export function decideRecall(signals: RecallSignals): RecallDecision {
   const prompt = signals.prompt.trim();
-  if (signals.isCommand || prompt.length < 8) {
+
+  // Only skip for commands and trivially short input
+  if (signals.isCommand) {
     return {
       shouldRecall: false,
       sources: [],
       budgetTokens: 0,
       allowRemoteEmbedding: false,
       allowRerank: false,
-      reason: signals.isCommand ? "command-input" : "insufficient-query-signal",
+      reason: "command-input",
     };
   }
-  const memorySignal =
-    /\b(?:remember|previous|preference|decision|last time|before)\b|记得|之前|偏好|决定/i.test(
-      prompt,
-    );
-  const knowledgeSignal =
-    /\b(?:file|project|api|symbol|documentation|how|where|version|extension|skill|mcp)\b|文件|项目|接口|文档|版本|扩展|技能/i.test(
-      prompt,
-    );
-  if (!memorySignal && !knowledgeSignal && !signals.queryCacheHit && !signals.embeddingCacheHit) {
+
+  if (prompt.length < 2) {
     return {
       shouldRecall: false,
       sources: [],
       budgetTokens: 0,
       allowRemoteEmbedding: false,
       allowRerank: false,
-      reason: "no-recall-intent",
+      reason: "insufficient-query-signal",
     };
   }
+
+  // Pure greetings — skip
+  if (/^(?:你好|hi|hello|hey|thanks|thank you|ok|好的)[\s!！。，,.]*$/i.test(prompt)) {
+    return {
+      shouldRecall: false,
+      sources: [],
+      budgetTokens: 0,
+      allowRemoteEmbedding: false,
+      allowRerank: false,
+      reason: "greeting",
+    };
+  }
+
+  // Always recall for everything else. Fast lane: no rerank, cheap embedding.
   return {
     shouldRecall: true,
-    sources: [
-      ...(knowledgeSignal || !memorySignal ? (["knowledge"] as const) : []),
-      ...(memorySignal ? (["memory"] as const) : []),
-    ],
+    sources: ["memory"],
     budgetTokens: Math.max(0, Math.min(1_600, signals.remainingContextTokens)),
-    allowRemoteEmbedding: true,
-    allowRerank: signals.remainingContextTokens >= 2_000,
-    reason: signals.queryCacheHit
-      ? "query-cache"
-      : signals.embeddingCacheHit
-        ? "embedding-cache"
-        : "rule-intent",
+    allowRemoteEmbedding: signals.remainingContextTokens >= 500,
+    allowRerank: false,
+    reason: "always-on-fast-recall",
   };
 }

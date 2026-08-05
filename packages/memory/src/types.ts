@@ -137,8 +137,15 @@ export interface MemoryPremise {
 }
 
 export interface CommitMemoryResult {
-  readonly outcome: "created" | "reinforced" | "corrected" | "superseded" | "conflict" | "rejected";
-  readonly record: Omit<MemoryRecord, "embedding">;
+  readonly outcome:
+    | "created"
+    | "reinforced"
+    | "corrected"
+    | "superseded"
+    | "conflict"
+    | "rejected"
+    | "rejected_sensitive";
+  readonly record?: Omit<MemoryRecord, "embedding">;
   readonly relatedIds: readonly string[];
 }
 

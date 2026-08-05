@@ -29,6 +29,8 @@ export class PdfParser implements KnowledgeParser {
       useWorkerFetch: false,
       isEvalSupported: false,
       useSystemFonts: true,
+      disableFontFace: true,
+      verbosity: 0,
     });
     const document = await task.promise;
     const nodes: DocumentNode[] = [];

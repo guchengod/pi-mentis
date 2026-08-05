@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import {
@@ -89,14 +89,20 @@ function sourceInput(kind: string, value: string) {
   return { kind: "file" as const, path: normalizedPath };
 }
 
-async function knowledgeCommandSource(target: string) {
+async function knowledgeCommandSource(target: string, maxDepth?: number) {
   const normalizedTarget = normalizePiPathArgument(target);
   if (/^https?:\/\//.test(normalizedTarget)) {
     return { kind: "url" as const, url: normalizedTarget };
   }
   try {
     const metadata = await stat(normalizedTarget);
-    if (metadata.isDirectory()) return { kind: "directory" as const, path: normalizedTarget };
+    if (metadata.isDirectory()) {
+      return {
+        kind: "directory" as const,
+        path: normalizedTarget,
+        ...(maxDepth === undefined ? {} : { maxDepth }),
+      };
+    }
   } catch {
     // Preserve the file-shaped command so the background job reports the path error.
   }
@@ -200,18 +206,49 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
         return;
       }
       if (action === "add" || action === "sync" || action === "rebuild") {
-        const target = argumentsList.join(" ");
+        const depthFlag = /--depth=(\d+)/.exec(rawArguments);
+        const maxDepth =
+          depthFlag !== null ? Math.min(Math.max(Number(depthFlag[1]), 1), 10) : undefined;
+        const target = argumentsList.filter((a) => !a.startsWith("--depth=")).join(" ");
         if (target === "") {
-          notifyWhenUiAvailable(context, `Usage: /kb ${action} <path-or-url>`, "error");
+          notifyWhenUiAvailable(context, `Usage: /kb ${action} <path-or-url> [--depth=N]`, "error");
           return;
         }
-        const source = await knowledgeCommandSource(target);
+        const source = await knowledgeCommandSource(target, maxDepth);
         const receipt = await knowledge.enqueueIngest(
           {
             source,
             scopeContext: localKnowledgeScope(),
           },
-          { priority: "user" },
+          {
+            priority: "user",
+            onProgress: (event) => {
+              tuiContext?.ui.setStatus("mentis-kb", event.message ?? "Indexing…");
+            },
+            onDone: (result) => {
+              tuiContext?.ui.setStatus("mentis-kb", undefined);
+              if (result instanceof Error) {
+                notifyWhenUiAvailable(
+                  context,
+                  `Knowledge job ${receipt.jobId} failed: ${result.message}`,
+                  "error",
+                );
+              } else {
+                if (result.diagnostics.length > 0) {
+                  console.debug("[mentis] Knowledge job diagnostics:", result.diagnostics);
+                }
+                const parts: string[] = [];
+                if (result.chunkCount > 0)
+                  parts.push(`${result.chunkCount} chunks from ${result.documentIds.length} docs`);
+                if (result.unchanged > 0) parts.push(`${result.unchanged} unchanged`);
+                notifyWhenUiAvailable(
+                  context,
+                  `Knowledge job ${receipt.jobId} completed: ${parts.join(", ")}`,
+                  "info",
+                );
+              }
+            },
+          },
         );
         notifyWhenUiAvailable(context, `Knowledge job ${receipt.jobId} queued`, "info");
         return;
@@ -328,6 +365,8 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
   });
 }
 
+let tuiContext: ExtensionContext | undefined;
+
 export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Promise<void> {
   let initError: Error | undefined;
   try {
@@ -411,6 +450,7 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
   });
   let registered = false;
   pi.on("session_start", async (_event, context) => {
+    tuiContext = context;
     let runtimeReadyError: Error | undefined;
     try {
       await runtime.ready(context.signal);

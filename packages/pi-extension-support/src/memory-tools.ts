@@ -123,10 +123,10 @@ export interface PublicRecallResult {
 // ─── Tool Descriptions ────────────────────────────────────────────
 
 export const COMMIT_MEMORY_DESCRIPTION =
-  "Commit evidence-bound durable memory. Knowledge remains read-only through automatic and manual retrieval. Output is limited to 50KB or 2000 lines. Narrow the query or lower the limit if a truncation notice is returned.";
+  "Remember durable information for future sessions. Provide only the natural-language information to remember, update, correct, or forget.";
 
 export const SEARCH_MEMORY_DESCRIPTION =
-  "Run knowledge-first retrieval, then knowledge-guided memory search with RRF, Rerank fallback, MMR, conflict, and context budgets. Output is limited to 50KB or 2000 lines. Narrow the query or lower the limit if a truncation notice is returned.";
+  "Recall durable user, project, task, topic, event, or procedural context. Provide a natural-language query, an exact memory ID, or both.";
 
 // ─── Facade Interface ─────────────────────────────────────────────
 
@@ -161,8 +161,21 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     label: "Remember",
     description: COMMIT_MEMORY_DESCRIPTION,
     parameters: CommitMemoryParameters,
+    promptGuidelines: [
+      "Use commit_memory for explicit remember/update/forget requests and for durable, verified information that will likely matter in future sessions.",
+      "Suitable memories include stable user preferences, project conventions, architectural decisions, and verified reusable solutions.",
+      "Do not persist guesses, transient task details, routine outputs, temporary paths, or timestamps unless explicitly requested.",
+      "Never submit raw passwords, tokens, API keys, cookies, private keys, or other secrets.",
+    ],
     async execute(_toolCallId, toolParams, abortSignal) {
-      const result = await facade.remember(String(toolParams.content), abortSignal);
+      if (typeof toolParams.content !== "string") {
+        throw new Error("commit_memory requires string content");
+      }
+      const content = toolParams.content.trim();
+      if (content.length === 0) {
+        throw new Error("commit_memory requires non-empty content");
+      }
+      const result = await facade.remember(content, abortSignal);
       return toolResult(result);
     },
   });
@@ -172,12 +185,23 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     label: "Recall",
     description: SEARCH_MEMORY_DESCRIPTION,
     parameters: SearchMemoryParameters,
+    promptGuidelines: [
+      "Use search_memory when the request depends on durable context from earlier sessions that is not already available.",
+      "Use it for explicit memory questions, previous work, saved preferences, project history, past decisions, fixes, or task continuation.",
+      "Use id for exact retrieval and id plus query for history, evidence, correction, or conflicts.",
+      "Do not search automatically at every session start, for trivial queries, or merely to verify a successful commit.",
+    ],
     async execute(_toolCallId, toolParams, abortSignal) {
-      const query = toolParams.query !== undefined ? String(toolParams.query) : undefined;
-      const id = toolParams.id !== undefined ? String(toolParams.id) : undefined;
+      const query =
+        typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;
+      const id =
+        typeof toolParams.id === "string" ? toolParams.id.trim() : undefined;
+      if (query === undefined && id === undefined) {
+        throw new Error("search_memory requires query, id, or both");
+      }
       const request: { readonly query?: string; readonly id?: string } = {
-        ...(query === undefined ? {} : { query }),
-        ...(id === undefined ? {} : { id }),
+        ...(query ? { query } : {}),
+        ...(id ? { id } : {}),
       };
       const result = await facade.recall(request, abortSignal);
       return toolResult(result);

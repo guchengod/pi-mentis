@@ -123,6 +123,7 @@ export interface SyncKnowledgeSourceCommand {
 
 export interface EnqueueOptions extends OperationOptions {
   readonly priority?: "user" | "background";
+  readonly onDone?: (result: IngestKnowledgeResult | Error) => void;
 }
 
 export interface InspectKnowledgeQuery {
