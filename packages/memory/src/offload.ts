@@ -1,5 +1,6 @@
 import type {
   ArtifactRecord,
+  ArtifactCaptureIntegrity,
   OffloadedToolResult,
   PiEvidenceStore,
   ToolResultEnvelope,
@@ -68,6 +69,11 @@ export function summarizeToolResult(
       ? undefined
       : Math.max(0, envelope.completedAt - envelope.startedAt);
   const exitCode = detailNumber(envelope.details, "exitCode");
+  const mode = classifyToolResult(bytes, policy);
+  const isInline = mode === "inline";
+  const captureIntegrity: ArtifactCaptureIntegrity = isInline
+    ? { complete: true, lossy: false, capturedBytes: bytes }
+    : { complete: false, lossy: true, capturedBytes: bytes, truncationStage: "host" };
   return {
     tool: envelope.toolName,
     status: envelope.isError ? "failed" : "completed",
@@ -84,6 +90,7 @@ export function summarizeToolResult(
     ...(bytes <= policy.inlineMaxBytes
       ? {}
       : { preview: Buffer.from(envelope.text).subarray(0, policy.previewBytes).toString("utf8") }),
+    captureIntegrity,
   };
 }
 

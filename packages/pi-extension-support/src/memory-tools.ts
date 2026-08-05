@@ -105,16 +105,29 @@ export interface PublicRecallHit {
     | "topic"
     | "event"
     | "procedure"
-    | "knowledge";
+    | "knowledge"
+    | "artifact";
 
   readonly status: "current" | "historical" | "conflicted";
 
   readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
+
+  readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
+  readonly sanitized: boolean;
 }
 
 /** Result of a search_memory call. */
 export interface PublicRecallResult {
   readonly found: boolean;
+  readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
+  readonly anchored: boolean;
+  readonly reason?:
+    | "not_found"
+    | "scope_denied"
+    | "not_ready"
+    | "expired"
+    | "failed"
+    | "ambiguous";
   readonly summary?: string;
   readonly hits: readonly PublicRecallHit[];
   readonly traceId?: string;

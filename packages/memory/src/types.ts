@@ -398,6 +398,14 @@ export interface EvidenceSearchMatch {
   readonly artifactOffset?: number;
 }
 
+export interface ArtifactCaptureIntegrity {
+  readonly complete: boolean;
+  readonly lossy: boolean;
+  readonly sourceReportedBytes?: number;
+  readonly capturedBytes: number;
+  readonly truncationStage?: "tool" | "host" | "extension" | "unknown";
+}
+
 export interface ToolSymbolicResult {
   readonly tool: string;
   readonly status: "completed" | "failed";
@@ -412,6 +420,7 @@ export interface ToolSymbolicResult {
   readonly truncated: boolean;
   readonly originalBytes: number;
   readonly preview?: string;
+  readonly captureIntegrity?: ArtifactCaptureIntegrity;
 }
 
 export interface ToolResultOffloadPolicy {

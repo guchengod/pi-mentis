@@ -1,25 +1,39 @@
 /**
- * RecallCoordinator — orchestrates the full recall pipeline.
+ * RecallCoordinator — orchestrates the full recall pipeline with strict ID routing.
  *
  * Routing:
- *   ID only → Exact memory read
- *   ID + Query → Anchored memory + evidence search
+ *   ID only → Resolve type → Route to Memory / Artifact / Evidence
+ *   ID + Query → Resolve type → Anchored query (NEVER fall back to global)
  *   Query only → Intent-based lane routing
  *
- * Lanes (priority ordered by intent):
- *   ExactFactLane → ProfileLane → CurrentViewLane
- *   → ProjectLane → EventLane → ProcedureLane → KnowledgeLane
+ * Fail-closed: if ID is present and cannot be resolved, return error.
+ * NEVER fall back to full-library search when ID exists.
  *
- * Knowledge is NOT always run first. It only runs when the intent
- * is knowledge_lookup, cross_project_compare, or explicit mixed request.
+ * All results pass through secret detection before return.
  */
 
 import type { SearchHit, SearchResult, MentisContextSnapshot } from "@pi-mentis/pi-mentis-core";
-import type { MemoryService, PiScopeContext } from "@pi-mentis/pi-mentis-memory-core";
+import type {
+  MemoryService,
+  PiScopeContext,
+  PiEvidenceStore,
+  ArtifactRecord,
+} from "@pi-mentis/pi-mentis-memory-core";
+import { detectSecrets, safeSummary } from "@pi-mentis/pi-mentis-memory-core";
 import type { RetrievalService } from "./service.js";
 import { classifyIntent } from "./recall-intent.js";
+import {
+  DefaultMentisResourceReferenceResolver,
+  type MentisResourceReferenceResolver,
+  type ResolvedMentisReference,
+  type MentisResourceType,
+} from "./resource-reference-resolver.js";
+import {
+  DefaultArtifactQueryService,
+  type ArtifactQueryService,
+} from "./artifact-query.js";
 
-// ─── Public Types (mirrors pi-extension-support contract) ─────────
+// ─── Public Types ─────────────────────────────────────────────────
 
 export interface PublicRecallHit {
   readonly id: string;
@@ -33,13 +47,25 @@ export interface PublicRecallHit {
     | "topic"
     | "event"
     | "procedure"
-    | "knowledge";
+    | "knowledge"
+    | "artifact";
   readonly status: "current" | "historical" | "conflicted";
   readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
+  readonly resourceType: MentisResourceType;
+  readonly sanitized: boolean;
 }
 
 export interface PublicRecallResult {
   readonly found: boolean;
+  readonly resourceType: MentisResourceType;
+  readonly anchored: boolean;
+  readonly reason?:
+    | "not_found"
+    | "scope_denied"
+    | "not_ready"
+    | "expired"
+    | "failed"
+    | "ambiguous";
   readonly summary?: string;
   readonly hits: readonly PublicRecallHit[];
   readonly traceId?: string;
@@ -69,6 +95,14 @@ export interface RecallCoordinator {
 const MAX_HITS = 5;
 const MAX_CONTENT_LENGTH = 300;
 
+// ─── Secret Sanitization ──────────────────────────────────────────
+
+function sanitize(text: string): { text: string; sanitized: boolean } {
+  const detection = detectSecrets(text);
+  if (!detection.sensitive) return { text, sanitized: false };
+  return { text: safeSummary(text, text.length), sanitized: true };
+}
+
 // ─── Hit Mapping ─────────────────────────────────────────────────
 
 function mapKind(sourceKind: SearchHit["kind"], _namespace: string): PublicRecallHit["kind"] {
@@ -90,13 +124,18 @@ function trimContent(text: string): string {
 }
 
 function buildHits(result: SearchResult): readonly PublicRecallHit[] {
-  return result.hits.slice(0, MAX_HITS).map((hit) => ({
-    id: hit.id,
-    content: trimContent(hit.text),
-    kind: mapKind(hit.kind, hit.namespace),
-    status: "current",
-    match: "semantic",
-  }));
+  return result.hits.slice(0, MAX_HITS).map((hit) => {
+    const { text, sanitized: wasSanitized } = sanitize(hit.text);
+    return {
+      id: hit.id,
+      content: trimContent(text),
+      kind: mapKind(hit.kind, hit.namespace),
+      status: "current",
+      match: "semantic",
+      resourceType: "memory" as const,
+      sanitized: wasSanitized,
+    };
+  });
 }
 
 function buildSummary(hits: readonly PublicRecallHit[]): string | undefined {
@@ -105,18 +144,53 @@ function buildSummary(hits: readonly PublicRecallHit[]): string | undefined {
   return first.length > 150 ? first.slice(0, 150) + "..." : first;
 }
 
-// ─── Exact Read ──────────────────────────────────────────────────
+// ─── Reference Failure Response ──────────────────────────────────
 
-async function exactRead(memory: MemoryService, recordId: string): Promise<PublicRecallResult> {
+type NonResolvedReason = Exclude<ResolvedMentisReference["reason"], "resolved">;
+
+function referenceFailure(
+  reason: NonResolvedReason,
+  type: MentisResourceType,
+): PublicRecallResult {
+  return {
+    found: false,
+    resourceType: type,
+    anchored: true,
+    reason,
+    hits: [],
+  };
+}
+
+function resolverContext(
+  scopeContext: PiScopeContext,
+  signal?: AbortSignal,
+): { readonly scopeContext: PiScopeContext; readonly signal?: AbortSignal } {
+  if (signal === undefined) return { scopeContext };
+  return { scopeContext, signal };
+}
+
+// ─── Exact Memory Read ────────────────────────────────────────────
+
+async function exactMemoryRead(
+  memory: MemoryService,
+  recordId: string,
+): Promise<PublicRecallResult> {
   try {
     const record = await memory.get(recordId);
     if (record === undefined) {
-      return { found: false, hits: [] };
+      return {
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
     }
 
+    const { text: sanitizedContent, sanitized: wasSanitized } = sanitize(record.content);
     const hit: PublicRecallHit = {
       id: record.id,
-      content: trimContent(record.content),
+      content: trimContent(sanitizedContent),
       kind: "topic",
       status:
         record.temporalState === "historical"
@@ -125,15 +199,282 @@ async function exactRead(memory: MemoryService, recordId: string): Promise<Publi
             ? "conflicted"
             : "current",
       match: "exact",
+      resourceType: "memory",
+      sanitized: wasSanitized,
     };
 
     return {
       found: true,
+      resourceType: "memory",
+      anchored: false,
       summary: record.content.length > 150 ? record.content.slice(0, 150) + "..." : record.content,
       hits: [hit],
     };
   } catch {
-    return { found: false, hits: [] };
+    return { found: false, resourceType: "unknown", anchored: true, reason: "failed", hits: [] };
+  }
+}
+
+// ─── Memory Evolution Chain (ID + Query) ─────────────────────────
+
+async function memoryEvolutionChain(
+  memory: MemoryService,
+  evidence: PiEvidenceStore,
+  recordId: string,
+  query: string,
+  scopeContext: PiScopeContext,
+  signal?: AbortSignal,
+): Promise<PublicRecallResult> {
+  try {
+    const record = await memory.get(recordId);
+    if (record === undefined) {
+      return {
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
+    }
+
+    const hits: PublicRecallHit[] = [];
+
+    // Current record
+    const { text: currentSanitized, sanitized: currentWasSanitized } = sanitize(record.content);
+    hits.push({
+      id: record.id,
+      content: trimContent(currentSanitized),
+      kind: "topic",
+      status:
+        record.temporalState === "historical"
+          ? "historical"
+          : record.temporalState === "conflicted"
+            ? "conflicted"
+            : "current",
+      match: "exact",
+      resourceType: "memory",
+      sanitized: currentWasSanitized,
+    });
+
+    // Superseded by
+    if (record.supersededById !== undefined) {
+      const newer = await memory.get(record.supersededById).catch(() => undefined);
+      if (newer !== undefined) {
+        const { text: s, sanitized: sanitized } = sanitize(newer.content);
+        hits.push({
+          id: newer.id,
+          content: trimContent(s),
+          kind: "topic",
+          status: "current",
+          match: "anchored",
+          resourceType: "memory",
+          sanitized,
+        });
+      }
+    }
+
+    // Superseded records
+    for (const supersededId of record.supersedesIds.slice(0, 3)) {
+      if (hits.length >= MAX_HITS) break;
+      const old = await memory.get(supersededId).catch(() => undefined);
+      if (old !== undefined) {
+        const { text: s, sanitized: sanitized } = sanitize(old.content);
+        hits.push({
+          id: old.id,
+          content: trimContent(s),
+          kind: "topic",
+          status: "historical",
+          match: "anchored",
+          resourceType: "memory",
+          sanitized,
+        });
+      }
+    }
+
+    // Conflicts
+    for (const conflictId of record.conflictsWithIds.slice(0, 3)) {
+      if (hits.length >= MAX_HITS) break;
+      const conflict = await memory.get(conflictId).catch(() => undefined);
+      if (conflict !== undefined) {
+        const { text: s, sanitized: sanitized } = sanitize(conflict.content);
+        hits.push({
+          id: conflict.id,
+          content: trimContent(s),
+          kind: "topic",
+          status: "conflicted",
+          match: "anchored",
+          resourceType: "memory",
+          sanitized,
+        });
+      }
+    }
+
+    // Evidence references
+    for (const evRef of record.evidenceRefs.slice(0, 3)) {
+      if (hits.length >= MAX_HITS) break;
+      if (evRef.kind === "artifact") {
+        try {
+          const artifact = await evidence.getArtifact(evRef.id, {
+            scopeContext,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          if (artifact !== undefined && artifact.state === "ready") {
+            hits.push({
+              id: artifact.id,
+              content: `[Artifact] ${artifact.mediaType} ${artifact.byteLength}B`,
+              kind: "artifact",
+              status: "current",
+              match: "anchored",
+              resourceType: "artifact",
+              sanitized: false,
+            });
+          }
+        } catch {
+          // evidence ref unavailable, skip
+        }
+      }
+      if (evRef.kind === "event") {
+        try {
+          const event = await evidence.getEvent(evRef.id, {
+            scopeContext,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+          if (event !== undefined) {
+            hits.push({
+              id: event.id,
+              content: `[Event] ${event.kind} seq=${event.sequence}`,
+              kind: "event",
+              status: "current",
+              match: "anchored",
+              resourceType: "evidence",
+              sanitized: false,
+            });
+          }
+        } catch {
+          // evidence ref unavailable, skip
+        }
+      }
+    }
+
+    return {
+      found: true,
+      resourceType: "memory",
+      anchored: true,
+      summary: `Memory evolution chain: ${hits.length} related records`,
+      hits: hits.slice(0, MAX_HITS),
+    };
+  } catch {
+    return { found: false, resourceType: "unknown", anchored: true, reason: "failed", hits: [] };
+  }
+}
+
+// ─── Artifact Metadata Response ──────────────────────────────────
+
+function artifactSummary(artifact: ArtifactRecord): PublicRecallResult {
+  const readable =
+    artifact.state === "ready" &&
+    (artifact.expiresAt === undefined || artifact.expiresAt > Date.now());
+
+  return {
+    found: true,
+    resourceType: "artifact",
+    anchored: true,
+    summary: JSON.stringify({
+      id: artifact.id,
+      resourceType: "artifact",
+      status: artifact.state,
+      byteLength: artifact.byteLength,
+      contentHash: artifact.contentHash,
+      mediaType: artifact.mediaType,
+      queryable: readable,
+      chunkCount: artifact.chunks.length,
+    }),
+    hits: [],
+  };
+}
+
+// ─── Artifact Anchored Query ─────────────────────────────────────
+
+async function anchoredArtifactQuery(
+  service: ArtifactQueryService,
+  artifactId: string,
+  query: string,
+  scopeContext: PiScopeContext,
+  signal?: AbortSignal,
+): Promise<PublicRecallResult> {
+  try {
+    const result = await service.query(artifactId, query, {
+      scopeContext,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+
+    if (!result.found) {
+      return {
+        found: false,
+        resourceType: "artifact",
+        anchored: true,
+        summary: result.summary ?? "No matches found in artifact",
+        hits: [],
+      };
+    }
+
+    const hits: PublicRecallHit[] = result.hits.slice(0, MAX_HITS).map((h) => ({
+      id: h.artifactId,
+      content: trimContent(h.content),
+      kind: "artifact" as const,
+      status: "current" as const,
+      match: h.match === "exact" ? "anchored" : "lexical",
+      resourceType: "artifact" as const,
+      sanitized: h.sanitized,
+    }));
+
+    return {
+      found: true,
+      resourceType: "artifact",
+      anchored: true,
+      summary: `Found ${result.hits.length} match(es) in artifact`,
+      hits,
+    };
+  } catch {
+    return { found: false, resourceType: "artifact", anchored: true, reason: "failed", hits: [] };
+  }
+}
+
+// ─── Evidence Summary ────────────────────────────────────────────
+
+async function evidenceSummary(
+  evidence: PiEvidenceStore,
+  eventId: string,
+  scopeContext: PiScopeContext,
+  signal?: AbortSignal,
+): Promise<PublicRecallResult> {
+  try {
+    const event = await evidence.getEvent(eventId, {
+      scopeContext,
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    if (event === undefined) {
+      return {
+        found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [],
+      };
+    }
+    return {
+      found: true,
+      resourceType: "evidence",
+      anchored: true,
+      summary: JSON.stringify({
+        id: event.id,
+        resourceType: "evidence",
+        kind: event.kind,
+        episodeId: event.episodeId,
+        sequence: event.sequence,
+        timestamp: event.timestamp,
+        hasArtifactRef: event.artifactRef !== undefined,
+      }),
+      hits: [],
+    };
+  } catch {
+    return { found: false, resourceType: "unknown", anchored: true, reason: "failed", hits: [] };
   }
 }
 
@@ -142,10 +483,16 @@ async function exactRead(memory: MemoryService, recordId: string): Promise<Publi
 export class DefaultRecallCoordinator implements RecallCoordinator {
   readonly #memory: MemoryService;
   readonly #retrieval: RetrievalService;
+  readonly #evidence: PiEvidenceStore;
+  readonly #resolver: MentisResourceReferenceResolver;
+  readonly #artifactQuery: ArtifactQueryService;
 
-  constructor(memory: MemoryService, retrieval: RetrievalService) {
+  constructor(memory: MemoryService, retrieval: RetrievalService, evidence: PiEvidenceStore) {
     this.#memory = memory;
     this.#retrieval = retrieval;
+    this.#evidence = evidence;
+    this.#resolver = new DefaultMentisResourceReferenceResolver(memory, evidence);
+    this.#artifactQuery = new DefaultArtifactQueryService(evidence);
   }
 
   async recall(
@@ -155,56 +502,82 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
     const { query, id } = request;
     const { scopeContext, contextSnapshot, signal } = context;
 
-    // Mode 1: ID only → exact read
+    // ── MODE 1: ID only → resolve type → route ──
     if (id !== undefined && query === undefined) {
-      return exactRead(this.#memory, id);
-    }
-
-    // Mode 2: ID + Query → anchored search
-    if (id !== undefined && query !== undefined) {
-      const exact = await exactRead(this.#memory, id);
-      // Also do a semantic search scoped to the memory's context
-      try {
-        const searchResult = await this.#retrieval.search(
-          {
-            text: query,
-            limit: MAX_HITS,
-            memoryScopes: [],
-            memoryScopeContext: scopeContext,
-            ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),
-          },
-          {
-            ...(signal !== undefined ? { signal } : {}),
-            allowRerank: true,
-          },
-        );
-        const searchHits = buildHits(searchResult);
-        const summary = buildSummary([...exact.hits, ...searchHits]);
-        return {
-          found: exact.found || searchHits.length > 0,
-          ...(summary !== undefined ? { summary } : {}),
-          hits: [...exact.hits, ...searchHits].slice(0, MAX_HITS),
-        };
-      } catch {
-        return exact;
+      const ref = await this.#resolver.resolve(id, resolverContext(scopeContext, signal));
+      if (ref.reason !== "resolved") {
+        return referenceFailure(ref.reason as NonResolvedReason, ref.type);
       }
+
+      if (ref.type === "memory") {
+        return exactMemoryRead(this.#memory, id);
+      }
+
+      if (ref.type === "artifact") {
+        const artifact = await this.#evidence.getArtifact(id, {
+          scopeContext,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+        if (artifact === undefined) {
+          return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
+        }
+        return artifactSummary(artifact);
+      }
+
+      if (ref.type === "evidence") {
+        return evidenceSummary(this.#evidence, id, scopeContext, signal);
+      }
+
+      return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
     }
 
-    // Mode 3: Query only → intent-based lane routing
+    // ── MODE 2: ID + Query → anchored search, NEVER fall back ──
+    if (id !== undefined && query !== undefined) {
+      const ref = await this.#resolver.resolve(id, resolverContext(scopeContext, signal));
+      if (ref.reason !== "resolved") {
+        return referenceFailure(ref.reason as NonResolvedReason, ref.type);
+      }
+
+      if (ref.type === "artifact") {
+        return anchoredArtifactQuery(this.#artifactQuery, id, query, scopeContext, signal);
+      }
+
+      if (ref.type === "memory") {
+        // Memory ID with query: evolution chain (supersedes, conflicts, evidence)
+        return memoryEvolutionChain(this.#memory, this.#evidence, id, query, scopeContext, signal);
+      }
+
+      if (ref.type === "evidence") {
+        // Evidence is not queryable
+        return {
+          found: false,
+          resourceType: "evidence",
+          anchored: true,
+          reason: "not_ready",
+          summary: "Evidence records do not support anchored queries",
+          hits: [],
+        };
+      }
+
+      return { found: false, resourceType: "unknown", anchored: true, reason: "not_found", hits: [] };
+    }
+
+    // ── MODE 3: Query only → intent-based lane routing ──
     if (query !== undefined) {
       const intent = classifyIntent(query);
 
-      // No recall needed
       if (intent.primary === "no_recall") {
-        return { found: false, hits: [] };
+        return {
+          found: false,
+          resourceType: "search",
+          anchored: false,
+          hits: [],
+        };
       }
 
-      // Knowledge lookup → always run retrieval with knowledge
       const needsKnowledge =
         intent.primary === "knowledge_lookup" || intent.primary === "cross_project_compare";
 
-      // For agent_profile / user_profile / explicit_memory_lookup
-      // Run retrieval but skip knowledge by using memory-only search
       const isMemoryOnly =
         intent.primary === "agent_profile" ||
         intent.primary === "user_profile" ||
@@ -212,25 +585,21 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
 
       try {
         if (isMemoryOnly) {
-          // Memory-only: use MemoryService.search directly
           const memResult = await this.#memory.search(
-            {
-              text: query,
-              limit: MAX_HITS,
-              scopeContext,
-            },
+            { text: query, limit: MAX_HITS, scopeContext },
             { ...(signal !== undefined ? { signal } : {}) },
           );
           const hits = buildHits(memResult);
           const summary = buildSummary(hits);
           return {
             found: hits.length > 0,
+            resourceType: "search",
+            anchored: false,
             ...(summary !== undefined ? { summary } : {}),
             hits,
           };
         }
 
-        // Otherwise use RetrievalService (which may include knowledge)
         const result = await this.#retrieval.search(
           {
             text: query,
@@ -249,15 +618,17 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         const summary = buildSummary(hits);
         return {
           found: hits.length > 0,
+          resourceType: "search",
+          anchored: false,
           ...(summary !== undefined ? { summary } : {}),
           hits,
         };
       } catch {
-        return { found: false, hits: [] };
+        return { found: false, resourceType: "search", anchored: false, hits: [] };
       }
     }
 
     // Both empty → error
-    return { found: false, hits: [] };
+    return { found: false, resourceType: "unknown", anchored: false, hits: [] };
   }
 }

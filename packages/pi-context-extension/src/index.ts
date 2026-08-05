@@ -119,7 +119,7 @@ function registerIntegratedTools(
   pi: ExtensionAPI,
   memory: MemoryService,
   retrieval: RetrievalService,
-  _evidence: PiEvidenceStore,
+  evidence: PiEvidenceStore,
   _currentScope: () => MemoryScope,
   _currentScopes: () => readonly MemoryScope[],
   getScopeContext: () => PiScopeContext,
@@ -130,7 +130,7 @@ function registerIntegratedTools(
 ): void {
   // Build coordinators and register shared tool pair.
   const rememberCoord = new DefaultRememberCoordinator(memory);
-  const recallCoord = new DefaultRecallCoordinator(memory, retrieval);
+  const recallCoord = new DefaultRecallCoordinator(memory, retrieval, evidence);
 
   registerMemoryToolPair(pi, {
     async remember(content, signal) {

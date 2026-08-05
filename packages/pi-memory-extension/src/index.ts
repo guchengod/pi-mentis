@@ -92,7 +92,7 @@ function registerMemoryTools(
   pi: ExtensionAPI,
   memory: MemoryService,
   retrieval: RetrievalService | undefined,
-  _evidence: PiEvidenceStore,
+  evidence: PiEvidenceStore,
   getScopeContext: () => PiScopeContext,
   getContextSnapshot: () => MentisContextSnapshot | undefined,
   getEvidenceRef: () => EvidenceRef | undefined,
@@ -102,7 +102,7 @@ function registerMemoryTools(
   // Build coordinators and register shared tool pair.
   const rememberCoord = new DefaultRememberCoordinator(memory);
   const recallCoord =
-    retrieval !== undefined ? new DefaultRecallCoordinator(memory, retrieval) : undefined;
+    retrieval !== undefined ? new DefaultRecallCoordinator(memory, retrieval, evidence) : undefined;
 
   registerMemoryToolPair(pi, {
     async remember(content, signal) {
@@ -120,7 +120,7 @@ function registerMemoryTools(
     },
     async recall(request, signal) {
       if (recallCoord === undefined) {
-        return { found: false, hits: [] };
+        return { found: false, resourceType: "unknown", anchored: false, hits: [] };
       }
       const ctxSnapshot = getContextSnapshot();
       return recallCoord.recall(request, {
