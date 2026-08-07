@@ -38,13 +38,16 @@ import {
   createMemoryService,
   deriveExperienceObservation,
   referencedMemoryIds,
-  resolvePiProjectIdentity,
   taskIdentityId,
   type MemoryService,
   type MemoryScope,
   type PiEvidenceStore,
   type PiProjectIdentity,
   type PiScopeContext,
+  ProjectIdentityCache,
+  TurnContextManager,
+  MentisBackgroundQueue,
+  PerformanceTrace,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
@@ -319,6 +322,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let effectiveness: EffectivenessService | undefined;
   let policy: AdaptivePolicyService | undefined;
   let latestRetrievalTraceId: string | undefined;
+  const projectIdentityCache = new ProjectIdentityCache({ ttlMs: 30_000 });
+  const turnContext = new TurnContextManager();
+  const backgroundQueue = new MentisBackgroundQueue({
+    maxConcurrency: 2,
+    maxQueueLength: 64,
+  });
 
   runtime.registerEmbedding({
     id: "siliconflow-integrated",
@@ -572,9 +581,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         () => scopeContext,
       );
     }
-    const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
-      fallbackProjectIdentity(context.cwd),
-    );
+    const { identity: project } = await projectIdentityCache.getOrResolve(context.cwd).catch(async () => {
+      const fallback = fallbackProjectIdentity(context.cwd);
+      return { identity: fallback, cacheHit: false };
+    });
     scopeContext = {
       tenantId: "local",
       userId: "local",
@@ -899,10 +909,17 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     await captureSession?.finish().catch(() => undefined);
   });
   pi.on("before_agent_start", async (event, context) => {
+    const trace = new PerformanceTrace();
+    trace.start();
     latestRetrievalTraceId = undefined;
-    const identity = await resolvePiProjectIdentity(context.cwd).catch(() =>
-      fallbackProjectIdentity(context.cwd),
-    );
+
+    const { identity, cacheHit: projectCacheHit } = await projectIdentityCache
+      .getOrResolve(context.cwd)
+      .catch(async () => {
+        const fallback = fallbackProjectIdentity(context.cwd);
+        return { identity: fallback, cacheHit: false };
+      });
+    trace.mark("projectIdentity");
     const currentEntryId = context.sessionManager.getLeafId() ?? undefined;
     const parentEntryId =
       currentEntryId === undefined
@@ -963,17 +980,29 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       .match(/(?:^|\s)(?:topic|主题)\s*[:：]\s*([^\n]{2,80})/i)?.[1]
       ?.trim();
     let topicIds: readonly string[] = [];
+    let topicReused = false;
     if (explicitTopic !== undefined && contextState !== undefined) {
       const topic = await contextState
         .observeTopicLabel(identityNamespace, explicitTopic)
         .catch(() => undefined);
       if (topic?.state === "active") topicIds = [topic.topicId];
     } else if (contextState !== undefined) {
-      const topic = await contextState
-        .inferTopic(identityNamespace, event.prompt)
-        .catch(() => undefined);
-      if (topic?.state === "active") topicIds = [topic.topicId];
+      const activeTopic = turnContext.activeTopic;
+      const shouldRefresh = turnContext.shouldRefreshTopic();
+      if (!shouldRefresh && activeTopic.topicId !== undefined) {
+        topicIds = [activeTopic.topicId];
+        topicReused = true;
+      } else {
+        const topic = await contextState
+          .inferTopic(identityNamespace, event.prompt)
+          .catch(() => undefined);
+        if (topic?.state === "active") {
+          topicIds = [topic.topicId];
+          turnContext.updateTopic(topic.topicId, 0.85);
+        }
+      }
     }
+    trace.mark("topic");
     const taskInput = {
       namespace: identityNamespace,
       goal: event.prompt,
@@ -984,7 +1013,20 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ? {}
         : { currentTaskId: contextSnapshot.situation.taskId }),
     };
-    const resolvedTask = await contextState?.resolveTask(taskInput).catch(() => undefined);
+    let resolvedTask: { taskId?: string } | undefined;
+    let taskReused = false;
+    const activeTask = turnContext.activeTask;
+    const shouldRefreshTask = turnContext.shouldRefreshTask();
+    if (!shouldRefreshTask && activeTask.taskId !== undefined && activeTask.status !== "completed") {
+      resolvedTask = { taskId: activeTask.taskId };
+      taskReused = true;
+    } else {
+      resolvedTask = await contextState?.resolveTask(taskInput).catch(() => undefined);
+      if (resolvedTask?.taskId !== undefined) {
+        turnContext.updateTask(resolvedTask.taskId, "active", 0.8);
+      }
+    }
+    trace.mark("task");
     const taskId = resolvedTask?.taskId ?? taskIdentityId(taskInput);
     const fastContext = {
       runtimeKey: context.sessionManager.getSessionId(),
@@ -1034,13 +1076,23 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           ?.latestSnapshot(identityFacet, context.sessionManager.getSessionId())
           .catch(() => undefined)
       : undefined;
+    trace.mark("snapshotRead");
     contextSnapshot =
       contextState === undefined
         ? contextResolver.resolve(fastContext).snapshot
         : contextState.resolveFromPersistent(fastContext, previousSnapshot).snapshot;
     if (contextState !== undefined && config.intelligence.context.persistSnapshots) {
-      await contextState.persistSnapshot(contextSnapshot).catch(() => undefined);
+      const state = contextState;
+      const snap = contextSnapshot;
+      backgroundQueue.enqueue({
+        kind: "snapshot.checkpoint",
+        coalesceKey: "snapshot.checkpoint",
+        execute: async () => {
+          await state.persistSnapshot(snap).catch(() => undefined);
+        },
+      });
     }
+    trace.mark("snapshotWrite");
     scopeContext = {
       ...contextSnapshot.identity,
       sessionId: contextSnapshot.conversation.sessionId,
@@ -1074,13 +1126,23 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       ),
       capabilitySnapshotId: contextSnapshot.capability.snapshotId,
     };
-    await captureSession
-      ?.start({
-        goal: event.prompt,
-        scope: scopeContext,
-      })
-      .catch(() => undefined);
-    if (!config.retrieval.automaticRecall) return;
+    if (captureSession !== undefined) {
+      const session = captureSession;
+      backgroundQueue.enqueue({
+        kind: "capture.persist",
+        coalesceKey: "capture.persist",
+        execute: async () => {
+          await session
+            .start({ goal: event.prompt, scope: scopeContext })
+            .catch(() => undefined);
+        },
+      });
+    }
+    trace.mark("capture");
+    if (!config.retrieval.automaticRecall) {
+      trace.snapshot({ projectCacheHit, topicReused, taskReused });
+      return;
+    }
     const decision = decideRecall({
       prompt: event.prompt,
       queryCacheHit: false,

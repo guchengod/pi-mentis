@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-siliconflow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Validated SiliconFlow Embedding and Rerank provider",
   "type": "module",
   "sideEffects": false,

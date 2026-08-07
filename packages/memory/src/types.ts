@@ -154,6 +154,8 @@ export interface MemoryRecord {
   readonly revision: number;
   readonly factKey?: string;
   readonly cardinality?: TemporalCardinality;
+  readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
   readonly temporalState?: TemporalState;
   readonly branchClaimState?: BranchClaimState;
   readonly idempotencyKey?: string;
@@ -183,6 +185,8 @@ export interface CommitMemoryCommand {
   readonly applicability?: MemoryApplicability;
   readonly premises?: readonly MemoryPremise[];
   readonly contentOrigin?: MemoryContentOrigin;
+  readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
 }
 
 export type MemoryContentOrigin =
@@ -218,6 +222,10 @@ export interface CommitMemoryResult {
     | "rejected_sensitive";
   readonly record?: Omit<MemoryRecord, "embedding">;
   readonly relatedIds: readonly string[];
+  readonly predicate?: string;
+  readonly cardinality?: TemporalCardinality;
+  readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
 }
 
 export interface MemoryQuery {

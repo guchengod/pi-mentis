@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
-import { deriveFactKey, type KnownPredicate } from "../src/fact-key.js";
+import { deriveFactKey } from "../src/fact-key.js";
+import type { KnownPredicate } from "../src/predicate-registry.js";
 
 describe("deriveFactKey", () => {
   it("detects project_package_manager predicate", () => {
@@ -108,6 +109,120 @@ describe("deriveFactKey", () => {
     });
     expect(userResult.subjectKey).toBe("user-1");
     expect(projectResult.subjectKey).toBe("repo-1");
+  });
+
+  // ─── Regression: Semantic Dedup / Set Cardinality / Cross-Predicate ───
+
+  it("detects programming_language_preference with normalizedValue", () => {
+    const result = deriveFactKey("除了 Go 之外，我也很喜欢 TypeScript", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(result.predicateKey).toBe("programming_language_preference");
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.normalizedValue).toBeDefined();
+    // Should extract language names
+    expect(result.normalizedValue?.toLowerCase()).toContain("go");
+    expect(result.normalizedValue?.toLowerCase()).toContain("typescript");
+    expect(result.setMemberKey).toBeDefined();
+  });
+
+  it("detects programming_language_preference for a single language mention", () => {
+    const result = deriveFactKey("我喜欢 Go", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(result.predicateKey).toBe("programming_language_preference");
+    expect(result.fallbackUsed).toBe(false);
+    expect(result.normalizedValue?.toLowerCase()).toBe("go");
+    expect(result.setMemberKey?.toLowerCase()).toBe("go");
+  });
+
+  it("detects code_style_preference for code style content", () => {
+    const result = deriveFactKey("我喜欢简单直接的实现，避免过度设计", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(result.predicateKey).toBe("code_style_preference");
+    expect(result.fallbackUsed).toBe(false);
+  });
+
+  it("code_style and programming_language produce DIFFERENT factKeys", () => {
+    const codeStyle = deriveFactKey("喜欢简单直接的代码，不要过度抽象", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    const progLang = deriveFactKey("除了 Go，我也喜欢 TypeScript", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(codeStyle.predicateKey).toBe("code_style_preference");
+    expect(progLang.predicateKey).toBe("programming_language_preference");
+    expect(codeStyle.factKey).not.toBe(progLang.factKey);
+  });
+
+  it("extracts multiple language names as normalizedValue", () => {
+    const result = deriveFactKey("我平时最喜欢 Go，其次是 TypeScript", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(result.predicateKey).toBe("programming_language_preference");
+    const nv = result.normalizedValue?.toLowerCase() ?? "";
+    expect(nv).toContain("go");
+    expect(nv).toContain("typescript");
+  });
+
+  it("extracts setMemberKey for set cardinality predicates", () => {
+    const rust = deriveFactKey("我最近也喜欢 Rust", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(rust.predicateKey).toBe("programming_language_preference");
+    expect(rust.setMemberKey).toBeDefined();
+    expect(rust.setMemberKey?.toLowerCase()).toContain("rust");
+
+    const python = deriveFactKey("我也喜欢 Python", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(python.setMemberKey?.toLowerCase()).toContain("python");
+    // Different languages = different set member keys
+    expect(rust.setMemberKey).not.toBe(python.setMemberKey);
+  });
+
+  it("same language gets same factKey for consistent set identity", () => {
+    const go1 = deriveFactKey("我喜欢 Go", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    const go2 = deriveFactKey("我也喜欢 Go", "user", {
+      tenantId: "local",
+      userId: "user-1",
+      appId: "pi",
+      agentId: "test",
+    });
+    expect(go1.factKey).toBe(go2.factKey);
+    // Same setMemberKey for the same language
+    expect(go1.setMemberKey?.toLowerCase()).toBe("go");
+    expect(go2.setMemberKey?.toLowerCase()).toBe("go");
   });
 });
 

@@ -94,6 +94,12 @@ function polarity(text: string): "positive" | "negative" {
   return /\b(?:not|never|no longer|禁止|不要|不能|不再)\b/i.test(text) ? "negative" : "positive";
 }
 
+function extractPredicate(factKey: string | undefined): string | undefined {
+  if (factKey === undefined) return undefined;
+  const idx = factKey.lastIndexOf("/");
+  return idx >= 0 ? factKey.slice(idx + 1) : undefined;
+}
+
 function cosineSimilarity(score: number): number {
   // Zvec returns cosine distance (0 is identical), not cosine similarity.
   return 1 - score;
@@ -342,6 +348,10 @@ export class DefaultMemoryService implements MemoryService {
           ? {}
           : { branchClaimState: command.branchClaimState }),
       });
+      const exNextNormalizedValue =
+        command.normalizedValue ?? (existing as Record<string, unknown>)["normalizedValue"] as string | undefined;
+      const exNextSetMemberKey =
+        command.setMemberKey ?? (existing as Record<string, unknown>)["setMemberKey"] as string | undefined;
       const record: MemoryRecord = {
         ...existing,
         embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
@@ -354,6 +364,8 @@ export class DefaultMemoryService implements MemoryService {
         status: statusForTemporalState(temporalPlan.temporalState),
         factKey,
         cardinality,
+        ...(exNextNormalizedValue !== undefined ? { normalizedValue: exNextNormalizedValue } : {}),
+        ...(exNextSetMemberKey !== undefined ? { setMemberKey: exNextSetMemberKey } : {}),
         temporalState: temporalPlan.temporalState,
         observedAt: Math.max(existing.observedAt, command.observedAt ?? now),
         authority: Math.max(existing.authority, command.authority) as MemoryRecord["authority"],
@@ -377,10 +389,15 @@ export class DefaultMemoryService implements MemoryService {
       await this.#applyRelatedTemporalStates(temporalPlan, record.id, now);
       await this.#temporal.apply(temporalPlan);
       await this.#views?.enqueueMemory(withoutEmbedding(record));
+      const exactPredicate = extractPredicate(factKey);
       return {
         outcome: temporalPlan.decision === "supersede" ? "superseded" : "reinforced",
         record: withoutEmbedding(record),
         relatedIds: [record.id, ...temporalPlan.supersedesIds, ...temporalPlan.conflictsWithIds],
+        ...(exactPredicate !== undefined ? { predicate: exactPredicate } : {}),
+        cardinality,
+        ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
+        ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
       };
     }
     // ── Remote safety: produce safe content for embedding ──
@@ -435,11 +452,29 @@ export class DefaultMemoryService implements MemoryService {
         : neighbors.find((neighbor) => {
             const payload = decodeStoredPayload(neighbor);
             const existingContent = payload["content"];
-            // Also skip if the neighbor itself is an event
             const neighborCardinality = payload["cardinality"] as string | undefined;
             const neighborDomain = payload["domain"] as string | undefined;
             if (neighborCardinality === "event" || neighborDomain === "episodic") {
               return false;
+            }
+            const incomingPredicate = extractPredicate(command.factKey);
+            const neighborFactKey = (payload["factKey"] as string) ?? undefined;
+            const neighborPredicate = extractPredicate(neighborFactKey);
+            if (
+              incomingPredicate !== undefined &&
+              neighborPredicate !== undefined &&
+              incomingPredicate !== neighborPredicate
+            ) {
+              return false;
+            }
+            if (command.cardinality === "set" && command.setMemberKey !== undefined) {
+              const neighborSetMemberKey = (payload["setMemberKey"] as string) ?? undefined;
+              if (
+                neighborSetMemberKey !== undefined &&
+                command.setMemberKey !== neighborSetMemberKey
+              ) {
+                return false;
+              }
             }
             return (
               cosineSimilarity(neighbor.score) >= 0.78 &&
@@ -471,6 +506,10 @@ export class DefaultMemoryService implements MemoryService {
             ? {}
             : { branchClaimState: command.branchClaimState }),
         });
+        const nextNormalizedValue =
+          command.normalizedValue ?? (existing as Record<string, unknown>)["normalizedValue"] as string | undefined;
+        const nextSetMemberKey =
+          command.setMemberKey ?? (existing as Record<string, unknown>)["setMemberKey"] as string | undefined;
         const record: MemoryRecord = {
           ...existing,
           embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
@@ -483,6 +522,8 @@ export class DefaultMemoryService implements MemoryService {
           status: statusForTemporalState(temporalPlan.temporalState),
           factKey,
           cardinality,
+          ...(nextNormalizedValue !== undefined ? { normalizedValue: nextNormalizedValue } : {}),
+          ...(nextSetMemberKey !== undefined ? { setMemberKey: nextSetMemberKey } : {}),
           temporalState: temporalPlan.temporalState,
           observedAt: Math.max(existing.observedAt, command.observedAt ?? now),
           authority: Math.max(existing.authority, command.authority) as MemoryRecord["authority"],
@@ -506,10 +547,15 @@ export class DefaultMemoryService implements MemoryService {
         await this.#applyRelatedTemporalStates(temporalPlan, record.id, now);
         await this.#temporal.apply(temporalPlan);
         await this.#views?.enqueueMemory(withoutEmbedding(record));
+        const semPredicate = extractPredicate(factKey);
         return {
           outcome: temporalPlan.decision === "supersede" ? "superseded" : "reinforced",
           record: withoutEmbedding(record),
           relatedIds: [record.id, ...temporalPlan.supersedesIds, ...temporalPlan.conflictsWithIds],
+          ...(semPredicate !== undefined ? { predicate: semPredicate } : {}),
+          cardinality,
+          ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
+          ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
         };
       }
     }
@@ -598,6 +644,8 @@ export class DefaultMemoryService implements MemoryService {
       revision: 1,
       factKey,
       cardinality,
+      ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
+      ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
       temporalState: temporalPlan.temporalState,
       ...(command.branchClaimState === undefined
         ? {}
@@ -666,10 +714,15 @@ export class DefaultMemoryService implements MemoryService {
           : supersedesIds.length > 0
             ? "superseded"
             : "created";
+    const newPredicate = extractPredicate(factKey);
     return {
       outcome,
       record: withoutEmbedding(record),
       relatedIds: [...supersedesIds, ...conflicts],
+      ...(newPredicate !== undefined ? { predicate: newPredicate } : {}),
+      cardinality,
+      ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
+      ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
     };
   }
 

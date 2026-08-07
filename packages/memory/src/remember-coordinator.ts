@@ -25,7 +25,7 @@ import type { MentisContextSnapshot, EvidenceRef } from "@pi-mentis/pi-mentis-co
 import { shouldReject } from "./secret-detector.js";
 import { planScope, detectCorrectionSignal, type MemoryScopePlan } from "./scope-planner.js";
 import { classifyDomain } from "./commit-planner.js";
-import { deriveFactKey as deriveFactKeyService } from "./service.js";
+import { deriveFactKey as deriveFactKeyNew } from "./fact-key.js";
 import { predicateDefinition } from "./predicate-registry.js";
 
 // ─── Public Result Type (mirrors pi-extension-support contract) ───
@@ -43,6 +43,10 @@ export interface PublicRememberResult {
   readonly id?: string;
   readonly summary: string;
   readonly readable: boolean;
+  readonly predicate?: string;
+  readonly cardinality?: TemporalCardinality;
+  readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
 }
 
 // ─── Request / Context ────────────────────────────────────────────
@@ -249,6 +253,10 @@ function toPublicResult(
   record: Omit<MemoryRecord, "embedding"> | undefined,
   consistency: CommitConsistency,
   outcome: string,
+  predicate?: string,
+  cardinality?: TemporalCardinality,
+  normalizedValue?: string,
+  setMemberKey?: string,
 ): PublicRememberResult {
   if (!consistency.persisted) {
     return {
@@ -287,6 +295,10 @@ function toPublicResult(
         : record.content
       : "Memory committed.",
     readable: true,
+    ...(predicate !== undefined ? { predicate } : {}),
+    ...(cardinality !== undefined ? { cardinality } : {}),
+    ...(normalizedValue !== undefined ? { normalizedValue } : {}),
+    ...(setMemberKey !== undefined ? { setMemberKey } : {}),
   };
 }
 
@@ -330,13 +342,13 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
     // 6. Domain Classification
     const domainClassification = classifyDomain(content, type, scopeContext);
 
-    // 7. FactKey Planning
-    const factKeyResult = deriveFactKeyService({
+    // 7. FactKey Planning (using new predicate-aware derivation)
+    const factKeyResult = deriveFactKeyNew(
       content,
-      type,
-      domain: domainClassification.domain,
-    });
-    const predicateKey = factKeyResult.split("/").pop();
+      domainClassification.domain,
+      scopeContext,
+    );
+    const predicateKey = factKeyResult.predicateKey;
 
     // 8. Build commit command
     const command: CommitMemoryCommand = {
@@ -349,11 +361,17 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       importance: type === "preference" ? 0.8 : 0.5,
       authority: inferAuthority(scopePlan),
       evidenceRefs: evidenceRef !== undefined ? [evidenceRef] : [],
-      factKey: factKeyResult,
+      factKey: factKeyResult.factKey,
       cardinality: inferCardinality(type, predicateKey, content),
       observedAt: Date.now(),
       contentOrigin: "user",
       ...(action === "retract" ? { retractsFact: true } : {}),
+      ...(factKeyResult.normalizedValue !== undefined
+        ? { normalizedValue: factKeyResult.normalizedValue }
+        : {}),
+      ...(factKeyResult.setMemberKey !== undefined
+        ? { setMemberKey: factKeyResult.setMemberKey }
+        : {}),
     };
 
     try {
@@ -367,7 +385,15 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       const consistency = await verifyReadYourWrites(this.#memory, result.record?.id);
 
       // 11. Public result
-      return toPublicResult(result.record, consistency, result.outcome);
+      return toPublicResult(
+        result.record,
+        consistency,
+        result.outcome,
+        result.predicate,
+        result.cardinality,
+        result.normalizedValue,
+        result.setMemberKey,
+      );
     } catch (err) {
       if (signal?.aborted) {
         return {

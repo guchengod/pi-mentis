@@ -1,7 +1,7 @@
 import { normalizeText } from "@pi-mentis/pi-mentis-core";
 
 import type { MemoryDomain, PiScopeContext } from "./types.js";
-import type { KnownPredicate } from "./predicate-registry.js";
+import { predicateDefinition, type KnownPredicate } from "./predicate-registry.js";
 
 // ─── Predicate Registry ───────────────────────────────────────────
 
@@ -12,6 +12,8 @@ export interface FactKeyResult {
   readonly confidence: number;
   readonly fallbackUsed: boolean;
   readonly reasons: string[];
+  readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
 }
 
 // ─── Chinese-aware matching helpers ────────────────────────────────
@@ -56,10 +58,26 @@ const PREDICATE_MATCHERS: readonly PredicatePattern[] = [
       hasPhrase(t, "说中文", "说英文", "用中文", "用英文") || hasRegex(t, /\b(?:language|语言)\b/),
   },
   {
+    predicate: "code_style_preference",
+    match: (t) =>
+      hasPhrase(t, "代码风格", "编码风格", "实现风格", "设计习惯", "代码习惯", "编码习惯") ||
+      hasRegex(t, /\b(?:code style|coding style|implementation style)\b/i) ||
+      ((hasPhrase(t, "喜欢", "偏好") || hasRegex(t, /prefer|like/i)) &&
+        (hasPhrase(t, "简单", "直接", "抽象", "接口层", "过度设计", "过度抽象", "过度工程") ||
+          hasRegex(
+            t,
+            /(?:keep it simple|simple.*implementation|avoid.*abstract(?:ion)?|don't over[- ]?engineer|minimal.*interface|avoid.*layer)/i,
+          ))),
+  },
+  {
     predicate: "programming_language_preference",
     match: (t) =>
-      (hasPhrase(t, "喜欢", "偏好") || hasRegex(t, /prefer|like/i)) &&
-      hasRegex(t, /\b(?:go|rust|typescript|python|java|javascript)\b/i),
+      (hasPhrase(t, "喜欢", "偏好", "编程语言") || hasRegex(t, /prefer|like/i)) &&
+      (hasPhrase(t, "编程语言") ||
+        hasRegex(
+          t,
+          /\b(?:go\b|golang|rust|types?cript|python|java|javascript|kotlin|swift|zig|elixir|c\b|c#|c\+\+|ruby|php|scala|haskell|clojure|dart|lua|perl|r\b)\b/i,
+        )),
   },
   {
     predicate: "general_package_manager_preference",
@@ -246,6 +264,29 @@ function subjectKey(domain: MemoryDomain, scopeContext?: PiScopeContext): string
 
 // ─── FactKey Derivation ───────────────────────────────────────────
 
+const EXTRACT_LANG = /\b(?:go\b|golang|rust|types?cript|python|java(?!script)|kotlin|swift|zig|elixir|c\b|c#|c\+\+|ruby|php|scala|haskell|clojure|dart|lua|perl|r\b)\b/gi;
+
+function extractNormalizedValue(
+  content: string,
+  predicate: KnownPredicate | undefined,
+): string | undefined {
+  if (predicate === undefined) return undefined;
+  const normalized = normalizeText(content).toLowerCase();
+  if (predicate === "programming_language_preference") {
+    const langs = [...new Set(normalized.match(EXTRACT_LANG) ?? [])].map((l) =>
+      l === "golang" ? "go" : l,
+    );
+    return langs.length > 0 ? langs.join(", ") : undefined;
+  }
+  if (predicate === "language") {
+    const langs = [...new Set(normalized.match(EXTRACT_LANG) ?? [])].map((l) =>
+      l === "golang" ? "go" : l,
+    );
+    return langs.length > 0 ? langs.join(", ") : undefined;
+  }
+  return undefined;
+}
+
 /**
  * Derive a controlled FactKey from content, domain, and context.
  * FactKey format: `<domain>:<subjectKey>/<predicateKey>`
@@ -261,6 +302,10 @@ export function deriveFactKey(
   const { predicate, confidence } = detectPredicate(content);
   const subjKey = subjectKey(domain, scopeContext);
   const reasons: string[] = [];
+  const normalizedValue = extractNormalizedValue(content, predicate);
+  const cardinality = predicate !== undefined ? predicateDefinition(predicate)?.cardinality : undefined;
+    const setMemberKey =
+    cardinality === "set" ? (normalizedValue ?? normalizeText(content).toLowerCase().slice(0, 60)) : undefined;
 
   if (predicate !== undefined && confidence >= 0.6) {
     reasons.push(`predicate "${predicate}" detected with confidence ${confidence}`);
@@ -271,6 +316,8 @@ export function deriveFactKey(
       confidence,
       fallbackUsed: false,
       reasons,
+      ...(normalizedValue !== undefined ? { normalizedValue } : {}),
+      ...(setMemberKey !== undefined ? { setMemberKey } : {}),
     };
   }
 
