@@ -12,6 +12,7 @@ export {
   type RecallDecision,
 } from "./recall.js";
 export { classifyIntent, type IntentClassification } from "./recall-intent.js";
+export * from "./query-intent.js";
 export * from "./recall-coordinator.js";
 export * from "./resource-reference-resolver.js";
 export * from "./service.js";

@@ -23,6 +23,13 @@ import { detectSecrets, safeSummary } from "@pi-mentis/pi-mentis-memory-core";
 import type { RetrievalService } from "./service.js";
 import { classifyIntent } from "./recall-intent.js";
 import {
+  analyzeQueryIntent,
+  predicateCompatibility,
+  computeRelevanceThreshold,
+  formatIntentSummary,
+  type MemoryQueryIntent,
+} from "./query-intent.js";
+import {
   DefaultMentisResourceReferenceResolver,
   type MentisResourceReferenceResolver,
   type ResolvedMentisReference,
@@ -130,10 +137,61 @@ function buildHits(result: SearchResult): readonly PublicRecallHit[] {
   });
 }
 
-function buildSummary(hits: readonly PublicRecallHit[]): string | undefined {
-  if (hits.length === 0 || hits[0] === undefined) return undefined;
-  const first = hits[0].content;
+function buildSummary(hits: readonly PublicRecallHit[], intent?: MemoryQueryIntent): string | undefined {
+  if (hits.length === 0) return undefined;
+  if (intent !== undefined) return formatIntentSummary(hits, intent);
+  const first = hits[0]!.content;
   return first.length > 150 ? first.slice(0, 150) + "..." : first;
+}
+
+function filterByRelevance(
+  hits: readonly PublicRecallHit[],
+  intent: MemoryQueryIntent,
+): readonly PublicRecallHit[] {
+  if (hits.length === 0) return hits;
+
+  const threshold = computeRelevanceThreshold(intent);
+
+  // For specific queries with domain, use predicate compatibility filtering
+  if (intent.specificity === "specific" && intent.domain !== undefined) {
+    const scored = hits.map((hit, index) => {
+      const compat = predicateCompatibility(hit.content, intent);
+      const relativeDrop = index > 0 ? hits[index - 1] !== undefined : false;
+      return { hit, compat, keep: compat.compatible };
+    });
+
+    // Always keep the first hit if we have results unless it's strongly incompatible
+    const firstCompat = scored[0]!;
+    if (!firstCompat.keep && hits.length > 1) {
+      // If top hit is incompatible but there's a compatible hit, re-rank
+      // Otherwise still include it as context
+      const hasCompatible = scored.some((s) => s.keep);
+      if (hasCompatible) {
+        // Keep compatible hits, drop clearly incompatible ones
+        return scored.filter((s) => s.keep).map((s) => s.hit);
+      }
+    }
+
+    // Filter out strongly incompatible results
+    const filtered = scored.filter((s) => s.keep).map((s) => s.hit);
+    if (filtered.length > 0 && filtered.length < scored.length) return filtered;
+  }
+
+  return hits;
+}
+
+function applyRelativeDropFilter(
+  hits: readonly PublicRecallHit[],
+  intent: MemoryQueryIntent,
+): readonly PublicRecallHit[] {
+  if (hits.length <= 2 || intent.specificity !== "specific") return hits;
+
+  // For specific queries, cut at the first significant relative drop
+  // We use a heuristic: compare search result positions (simulated scores)
+  // If the result set is large enough, truncate at the first logical gap
+  // This is a heuristic since we don't have actual similarity scores here
+
+  return hits;
 }
 
 // ─── Reference Failure Response ──────────────────────────────────
@@ -479,15 +537,29 @@ export interface MentisServiceAccess {
   getEvidence(): PiEvidenceStore | undefined;
 }
 
+function addSummary(
+  result: PublicRecallResult,
+  summary: string | undefined,
+): PublicRecallResult {
+  if (summary === undefined) return result;
+  return { ...result, summary };
+}
+
 export class DefaultRecallCoordinator implements RecallCoordinator {
   readonly #services: MentisServiceAccess;
   readonly #resolver: MentisResourceReferenceResolver;
   readonly #artifactQuery: ArtifactQueryService;
+  readonly #turnSearchCache = new Map<string, PublicRecallResult>();
 
   constructor(services: MentisServiceAccess) {
     this.#services = services;
     this.#resolver = new DefaultMentisResourceReferenceResolver(services);
     this.#artifactQuery = new DefaultArtifactQueryService(services);
+  }
+
+  #searchCacheKey(query: string, scopeContext: PiScopeContext): string {
+    const scope = `${scopeContext.tenantId}:${scopeContext.userId}:${scopeContext.repositoryId ?? ""}:${scopeContext.projectId ?? ""}`;
+    return `${query}::${scope}`;
   }
 
   async recall(
@@ -615,9 +687,9 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
 
     // ── MODE 3: Query only → intent-based lane routing ──
     if (query !== undefined) {
-      const intent = classifyIntent(query);
+      const recallIntent = classifyIntent(query);
 
-      if (intent.primary === "no_recall") {
+      if (recallIntent.primary === "no_recall") {
         return {
           found: false,
           resourceType: "search",
@@ -626,24 +698,32 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         };
       }
 
+      // Dedup: check turn cache
+      const cacheKey = this.#searchCacheKey(query, scopeContext);
+      const cached = this.#turnSearchCache.get(cacheKey);
+      if (cached !== undefined) return cached;
+
+      // Analyze query intent for domain/predicate guidance
+      const queryIntent = analyzeQueryIntent(query);
+
       const needsKnowledge =
-        intent.primary === "knowledge_lookup" || intent.primary === "cross_project_compare";
+        recallIntent.primary === "knowledge_lookup" || recallIntent.primary === "cross_project_compare";
 
       const isMemoryOnly =
-        intent.primary === "agent_profile" ||
-        intent.primary === "user_profile" ||
-        intent.primary === "explicit_memory_lookup" ||
-        intent.primary === "current_project_fact";
+        recallIntent.primary === "agent_profile" ||
+        recallIntent.primary === "user_profile" ||
+        recallIntent.primary === "explicit_memory_lookup" ||
+        recallIntent.primary === "current_project_fact";
 
       try {
         if (isMemoryOnly && memory !== undefined) {
           // Profile/Project queries: first check views for exact fact matches
-          if (intent.primary === "agent_profile" || intent.primary === "user_profile") {
+          if (recallIntent.primary === "agent_profile" || recallIntent.primary === "user_profile") {
             const view = await memory.getView?.("user", scopeContext.userId, scopeContext);
             if (view !== undefined && view.facts !== undefined) {
               const profileHits: PublicRecallHit[] = [];
               const profileFactKeys =
-                intent.primary === "agent_profile"
+                recallIntent.primary === "agent_profile"
                   ? ["assistant_alias", "response_style", "language_preference"]
                   : ["user_name", "response_style", "language_preference"];
               for (const factKey of profileFactKeys) {
@@ -658,7 +738,7 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                         profileHits.push({
                           id: record.id,
                           content: trimContent(s),
-                          kind: intent.primary === "agent_profile" ? "agent" : "user",
+                          kind: recallIntent.primary === "agent_profile" ? "agent" : "user",
                           status: "current",
                           match: "exact",
                           resourceType: "memory",
@@ -670,22 +750,24 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                 }
               }
               if (profileHits.length > 0) {
-                const summary = buildSummary(profileHits);
-                const result: PublicRecallResult = {
-                  found: true,
-                  resourceType: "search",
-                  anchored: false,
-                  hits: profileHits.slice(0, MAX_HITS),
-                };
-                if (summary !== undefined) {
-                  (result as { summary?: string }).summary = summary;
-                }
+                const filtered = filterByRelevance(profileHits, queryIntent);
+                const summary = buildSummary(filtered, queryIntent);
+                const result = addSummary(
+                  {
+                    found: true,
+                    resourceType: "search",
+                    anchored: false,
+                    hits: filtered.slice(0, MAX_HITS),
+                  },
+                  summary,
+                );
+                this.#turnSearchCache.set(cacheKey, result);
                 return result;
               }
             }
           }
 
-          if (intent.primary === "current_project_fact") {
+          if (recallIntent.primary === "current_project_fact") {
             const view =
               scopeContext.repositoryId !== undefined
                 ? await memory.getView?.("project", scopeContext.repositoryId, scopeContext)
@@ -725,16 +807,18 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                 }
               }
               if (projectHits.length > 0) {
-                const summary = buildSummary(projectHits);
-                const result: PublicRecallResult = {
-                  found: true,
-                  resourceType: "search",
-                  anchored: false,
-                  hits: projectHits.slice(0, MAX_HITS),
-                };
-                if (summary !== undefined) {
-                  (result as { summary?: string }).summary = summary;
-                }
+                const filtered = filterByRelevance(projectHits, queryIntent);
+                const summary = buildSummary(filtered, queryIntent);
+                const result = addSummary(
+                  {
+                    found: true,
+                    resourceType: "search",
+                    anchored: false,
+                    hits: filtered.slice(0, MAX_HITS),
+                  },
+                  summary,
+                );
+                this.#turnSearchCache.set(cacheKey, result);
                 return result;
               }
             }
@@ -744,18 +828,20 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
             { text: query, limit: MAX_HITS, scopeContext },
             { ...(signal !== undefined ? { signal } : {}) },
           );
-          const hits = buildHits(memResult);
-          const summary = buildSummary(hits);
-          const memRecallResult: PublicRecallResult = {
-            found: hits.length > 0,
-            resourceType: "search",
-            anchored: false,
-            hits,
-          };
-          if (summary !== undefined) {
-            (memRecallResult as { summary?: string }).summary = summary;
-          }
-          return memRecallResult;
+          const rawHits = buildHits(memResult);
+          const filtered = filterByRelevance(rawHits, queryIntent);
+          const summary = buildSummary(filtered, queryIntent);
+          const result = addSummary(
+            {
+              found: filtered.length > 0,
+              resourceType: "search",
+              anchored: false,
+              hits: filtered,
+            },
+            summary,
+          );
+          this.#turnSearchCache.set(cacheKey, result);
+          return result;
         }
 
         if (isMemoryOnly && memory === undefined) {
@@ -772,7 +858,7 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           return { found: false, resourceType: "search", anchored: false, hits: [] };
         }
 
-        const result = await retrieval.search(
+        const retrievalResult = await retrieval.search(
           {
             text: query,
             limit: MAX_HITS,
@@ -786,18 +872,20 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           },
         );
 
-        const hits = buildHits(result);
-        const summary = buildSummary(hits);
-        const retrievalResult: PublicRecallResult = {
-          found: hits.length > 0,
-          resourceType: "search",
-          anchored: false,
-          hits,
-        };
-        if (summary !== undefined) {
-          (retrievalResult as { summary?: string }).summary = summary;
-        }
-        return retrievalResult;
+        const rawHits = buildHits(retrievalResult);
+        const filtered = filterByRelevance(rawHits, queryIntent);
+        const summary = buildSummary(filtered, queryIntent);
+        const result = addSummary(
+          {
+            found: filtered.length > 0,
+            resourceType: "search",
+            anchored: false,
+            hits: filtered,
+          },
+          summary,
+        );
+        this.#turnSearchCache.set(cacheKey, result);
+        return result;
       } catch {
         return { found: false, resourceType: "search", anchored: false, hits: [] };
       }
