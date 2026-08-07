@@ -13,6 +13,7 @@ import {
   ProviderPriority,
   TaskPriority,
   UnsupportedPiVersionError,
+  PI_COMPATIBILITY,
   assertPiCompatibility,
   computeToolPlan,
   contextAffinity,
@@ -47,7 +48,7 @@ const fastContext = {
     startedAt: 1,
   },
   capability: {
-    piVersion: "0.83.0",
+    piVersion: "0.84.0",
     extensionsHash: "extensions",
     skillsHash: "skills",
     mcpHash: "mcp",
@@ -161,8 +162,8 @@ describe("faceted context resolution", () => {
 });
 
 describe("Pi compatibility and tool surface", () => {
-  it("locks Pi exactly to 0.83.0 before initialization", () => {
-    expect(() => assertPiCompatibility("0.83.0")).not.toThrow();
+  it("locks Pi to the supported version before initialization", () => {
+    expect(() => assertPiCompatibility(PI_COMPATIBILITY.supportedVersion)).not.toThrow();
     expect(() => assertPiCompatibility("0.82.2")).toThrow(UnsupportedPiVersionError);
     try {
       assertPiCompatibility("0.81.0");
@@ -171,7 +172,7 @@ describe("Pi compatibility and tool surface", () => {
         code: "UNSUPPORTED_PI_VERSION",
         details: {
           currentVersion: "0.81.0",
-          supportedVersion: "0.83.0",
+          supportedVersion: PI_COMPATIBILITY.supportedVersion,
           initializationStopped: true,
         },
       });

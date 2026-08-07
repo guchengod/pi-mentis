@@ -5,25 +5,34 @@ import type { MemoryDomain, PiScopeContext } from "./types.js";
 // ─── Predicate Registry ───────────────────────────────────────────
 
 export type KnownPredicate =
+  | "assistant_alias"
+  | "user_name"
+  | "response_style"
+  | "language_preference"
+  | "programming_language_preference"
+  | "package_manager_preference"
+  | "general_package_manager_preference"
+  | "project_package_manager"
+  | "project_build_command"
+  | "project_test_command"
+  | "project_integration_test_command"
+  | "project_lint_command"
+  | "project_typecheck_command"
+  | "project_format_command"
+  | "project_database"
+  | "project_deployment_target"
   | "project_purpose"
-  | "package_manager"
-  | "build_command"
-  | "test_command"
-  | "runtime"
-  | "runtime_version"
-  | "language"
-  | "storage_engine"
-  | "deployment_target"
   | "architecture_decision"
-  | "user_preference"
   | "task_status"
+  | "task_goal"
+  | "task_blocker"
   | "capability_state"
   | "verified_procedure"
   | "known_failure"
-  | "user_name"
-  | "assistant_alias"
-  | "response_style"
-  | "general_package_manager_preference";
+  | "runtime"
+  | "runtime_version"
+  | "language"
+  | "storage_engine";
 
 export interface FactKeyResult {
   readonly factKey: string;
@@ -34,94 +43,191 @@ export interface FactKeyResult {
   readonly reasons: string[];
 }
 
-// ─── Predicate Detection ──────────────────────────────────────────
+// ─── Chinese-aware matching helpers ────────────────────────────────
+
+function hasPhrase(text: string, ...phrases: string[]): boolean {
+  return phrases.some((phrase) => text.includes(phrase));
+}
+
+function hasRegex(text: string, ...regexes: RegExp[]): boolean {
+  return regexes.some((re) => re.test(text));
+}
+
+// ─── Predicate Detection (ordered from specific to general) ──────
 
 interface PredicatePattern {
   readonly predicate: KnownPredicate;
-  readonly pattern: RegExp;
+  readonly match: (text: string) => boolean;
 }
 
-const PREDICATE_PATTERNS: readonly PredicatePattern[] = [
+const PREDICATE_MATCHERS: readonly PredicatePattern[] = [
+  // ── Profile predicates (highest priority) ──
   {
     predicate: "assistant_alias",
-    pattern: /(?:记住你叫|你叫|叫你|你的名字是|call yourself|your name is|称呼|喊你)/i,
+    match: (t) =>
+      hasPhrase(t, "记住你叫", "你叫", "叫你", "你的名字是", "称呼你", "称呼助手", "喊你") ||
+      hasRegex(t, /call yourself|your name is/i),
   },
   {
     predicate: "user_name",
-    pattern: /(?:我叫|我的名字是|my name is|i am|我是|用户名|用户姓名)/i,
+    match: (t) =>
+      hasPhrase(t, "我叫", "我的名字是") || hasRegex(t, /my name is|i am|我叫|我的名字/),
   },
   {
     predicate: "response_style",
-    pattern:
-      /(?:回答.*风格|回复.*方式|先(?:看|给).*结论|简洁|详细|啰嗦|简练|response style|回答方式|说.*方式|讲.*方式|回答.*先)/i,
+    match: (t) =>
+      hasPhrase(t, "回答风格", "回复方式", "回答方式") ||
+      hasRegex(t, /先(?:看|给).*结论|简洁|详细|啰嗦|简练|response style|说.*方式|讲.*方式/),
+  },
+  {
+    predicate: "language_preference",
+    match: (t) =>
+      hasPhrase(t, "说中文", "说英文", "用中文", "用英文") || hasRegex(t, /\b(?:language|语言)\b/),
+  },
+  {
+    predicate: "programming_language_preference",
+    match: (t) =>
+      (hasPhrase(t, "喜欢", "偏好") || hasRegex(t, /prefer|like/i)) &&
+      hasRegex(t, /\b(?:go|rust|typescript|python|java|javascript)\b/i),
   },
   {
     predicate: "general_package_manager_preference",
-    pattern:
-      /(?:一般.*包管理|默认.*包管理|general.*package.*manager|常用.*包管理|always.*(?:pnpm|npm|yarn))/i,
+    match: (t) =>
+      hasRegex(
+        t,
+        /一般.*包管理|默认.*包管理|general.*package.*manager|常用.*包管理|always.*(?:pnpm|npm|yarn)/i,
+      ),
   },
-  // build_command before package_manager: "pnpm build" should detect build_command
+
+  // ── Project command predicates (must be checked from specific to general) ──
   {
-    predicate: "build_command",
-    pattern: /\b(?:build|compile|tsc|turbo build|npm run build|pnpm build)\b|(?:构建|编译)/i,
-  },
-  // test_command before package_manager: "pnpm test" should detect test_command
-  {
-    predicate: "test_command",
-    pattern: /\b(?:test|vitest|jest|npm test|pnpm test)\b|(?:测试命令)/i,
-  },
-  {
-    predicate: "package_manager",
-    pattern: /\b(?:pnpm|npm|yarn|bun|package manager)\b|(?:包管理器|包管理)/i,
+    predicate: "project_integration_test_command",
+    match: (t) =>
+      hasPhrase(t, "集成测试", "integration test") ||
+      hasRegex(t, /pnpm\s+test:integration|npm\s+run\s+test:integration|pnpm\s+test:e2e/i),
   },
   {
-    predicate: "runtime",
-    pattern: /\b(?:node|deno|bun|runtime)\b|(?:运行时)/i,
+    predicate: "project_typecheck_command",
+    match: (t) =>
+      hasPhrase(t, "类型检查", "typecheck", "type check") ||
+      hasRegex(t, /pnpm\s+typecheck|npm\s+run\s+typecheck|tsc\s+--noEmit/i),
   },
   {
-    predicate: "runtime_version",
-    pattern:
-      /(?:(?:node|deno|bun|runtime)\s+(?:v?\d+\.\d+|version))|(?:运行时.*版本|版本.*\d+\.\d+)/i,
+    predicate: "project_lint_command",
+    match: (t) =>
+      (hasPhrase(t, "检查") && hasPhrase(t, "lint")) ||
+      hasRegex(t, /pnpm\s+lint|npm\s+run\s+lint|eslint\b/i),
   },
   {
-    predicate: "language",
-    pattern: /\b(?:typescript|javascript|python|rust|go|golang|java)\b|(?:语言|编程语言)/i,
+    predicate: "project_format_command",
+    match: (t) =>
+      hasPhrase(t, "格式化") || hasRegex(t, /pnpm\s+format|npm\s+run\s+format|prettier\b/i),
+  },
+  // build_command BEFORE package_manager and test_command
+  {
+    predicate: "project_build_command",
+    match: (t) =>
+      hasPhrase(t, "构建", "编译") ||
+      hasRegex(
+        t,
+        /pnpm\s+build|npm\s+run\s+build|tsc\b(?!.*--noEmit)|turbo\s+build|构建命令|编译命令/i,
+      ),
+  },
+  // test_command BEFORE package_manager
+  {
+    predicate: "project_test_command",
+    match: (t) =>
+      hasPhrase(t, "测试") ||
+      hasRegex(
+        t,
+        /pnpm\s+test(?!\s*:integration\b)|npm\s+test(?!\s*:integration\b)|vitest|jest|\btest\b/i,
+      ),
   },
   {
-    predicate: "storage_engine",
-    pattern: /\b(?:storage|database|zvec|sqlite|postgres)\b|(?:存储|数据库)/i,
+    predicate: "project_package_manager",
+    match: (t) =>
+      hasPhrase(t, "pnpm", "npm", "yarn", "bun", "包管理", "包管理器") ||
+      hasRegex(t, /\b(?:pnpm|npm|yarn|bun|package manager)\b/i),
   },
   {
-    predicate: "deployment_target",
-    pattern: /\b(?:deploy|production|staging|release)\b|(?:发布|部署|上线|生产环境|预发布)/i,
+    predicate: "project_database",
+    match: (t) =>
+      hasPhrase(t, "数据库", "database", "postgres", "mysql", "sqlite", "mongodb") ||
+      hasRegex(t, /\b(?:database|postgres|mysql|sqlite|mongodb)\b/i),
+  },
+  {
+    predicate: "project_deployment_target",
+    match: (t) =>
+      hasPhrase(t, "部署", "发布", "上线") || hasRegex(t, /\b(?:deploy|production|staging)\b/i),
   },
   {
     predicate: "project_purpose",
-    pattern: /\b(?:purpose|goal|this project is)\b|(?:这个项目是|目标|用途|做什么|用于)/i,
+    match: (t) =>
+      hasPhrase(t, "这个项目是") || hasRegex(t, /\b(?:purpose|goal|this project is)\b/i),
   },
   {
     predicate: "architecture_decision",
-    pattern: /\b(?:architecture|design decision|pattern)\b|(?:架构|设计决定|设计模式)/i,
+    match: (t) =>
+      hasPhrase(t, "架构", "设计模式") ||
+      hasRegex(t, /\b(?:architecture|design decision|pattern)\b/i),
+  },
+
+  // ── Infrastructure ──
+  {
+    predicate: "runtime",
+    match: (t) => hasPhrase(t, "运行时") || hasRegex(t, /\b(?:node|deno|bun|runtime)\b/i),
   },
   {
-    predicate: "user_preference",
-    pattern: /\b(?:prefer|like|want|preference)\b|(?:喜欢|偏好|习惯|倾向)/i,
+    predicate: "runtime_version",
+    match: (t) =>
+      hasRegex(t, /(?:node|deno|bun|runtime)\s+(?:v?\d+\.\d+|version)/i) ||
+      (hasPhrase(t, "版本") && hasRegex(t, /\d+\.\d+/)),
+  },
+  {
+    predicate: "language",
+    match: (t) =>
+      hasPhrase(t, "语言", "编程语言") ||
+      hasRegex(t, /\b(?:typescript|javascript|python|rust|go|golang|java)\b/i),
+  },
+  {
+    predicate: "storage_engine",
+    match: (t) =>
+      hasPhrase(t, "存储", "数据库") ||
+      hasRegex(t, /\b(?:storage|database|zvec|sqlite|postgres)\b/i),
+  },
+
+  // ── Task / Status ──
+  {
+    predicate: "task_goal",
+    match: (t) => hasPhrase(t, "任务目标") || hasRegex(t, /task.*goal|goal.*task/i),
   },
   {
     predicate: "task_status",
-    pattern: /\b(?:task status|progress)\b|(?:任务状态|进度|完成|进行中|待办)/i,
+    match: (t) => hasPhrase(t, "任务状态", "进度") || hasRegex(t, /task status|progress/i),
   },
   {
+    predicate: "task_blocker",
+    match: (t) => hasPhrase(t, "阻塞", "卡住") || hasRegex(t, /blocker|blocked by/i),
+  },
+
+  // ── Capability ──
+  {
     predicate: "capability_state",
-    pattern: /\b(?:capability|can |cannot |able to)\b|(?:能力|可以|不能|支持)/i,
+    match: (t) =>
+      hasPhrase(t, "能力", "可以", "不能", "支持") ||
+      hasRegex(t, /\b(?:capability|can |cannot |able to)\b/i),
   },
   {
     predicate: "verified_procedure",
-    pattern: /\b(?:verified|procedure|steps|workflow)\b|(?:已验证|步骤|流程|经过验证)/i,
+    match: (t) =>
+      hasPhrase(t, "已验证", "步骤", "流程") ||
+      hasRegex(t, /\b(?:verified|procedure|steps|workflow)\b/i),
   },
   {
     predicate: "known_failure",
-    pattern: /\b(?:failure|error|bug|issue|problem|known issue)\b|(?:失败|错误|已知问题|故障)/i,
+    match: (t) =>
+      hasPhrase(t, "失败", "错误", "故障", "已知问题") ||
+      hasRegex(t, /\b(?:failure|error|bug|issue|problem|known issue)\b/i),
   },
 ];
 
@@ -130,25 +236,28 @@ function detectPredicate(content: string): {
   confidence: number;
 } {
   const normalized = normalizeText(content).toLowerCase();
-  for (const { predicate, pattern } of PREDICATE_PATTERNS) {
-    if (pattern.test(normalized)) {
+  for (const { predicate, match } of PREDICATE_MATCHERS) {
+    if (match(normalized)) {
       return { predicate, confidence: 0.7 };
     }
   }
   return { confidence: 0 };
 }
 
-// ─── Subject Key Extraction ───────────────────────────────────────
+// ─── Subject Key Extraction (no more "unknown-project") ───────────
 
 function subjectKey(domain: MemoryDomain, scopeContext?: PiScopeContext): string {
   switch (domain) {
     case "project":
     case "environment":
-      return scopeContext?.repositoryId ?? scopeContext?.projectId ?? "unknown-project";
+      // Require a real repository or project ID — never "unknown-project"
+      return (
+        scopeContext?.repositoryId ?? scopeContext?.projectId ?? scopeContext?.userId ?? "local"
+      );
     case "user":
       return scopeContext?.userId ?? "local";
     case "task":
-      return scopeContext?.taskId ?? "unknown-task";
+      return scopeContext?.taskId ?? scopeContext?.userId ?? "local";
     case "capability":
       return scopeContext?.capabilitySnapshotId ?? scopeContext?.userId ?? "local";
     case "topic":
@@ -218,11 +327,6 @@ export interface FactKeyConflictCheck {
   readonly reason?: string;
 }
 
-/**
- * Check if two potential facts would conflict on the same FactKey
- * despite having different predicates. Returns conflict=true if
- * the predicates are clearly different and should not supersede.
- */
 export function checkFactKeyConflict(
   oldPredicate: KnownPredicate | undefined,
   newPredicate: KnownPredicate | undefined,
@@ -231,15 +335,12 @@ export function checkFactKeyConflict(
   oldSubjectKey: string,
   newSubjectKey: string,
 ): FactKeyConflictCheck {
-  // Different subject → no conflict (different FactKey)
   if (oldSubjectKey !== newSubjectKey) {
     return { wouldConflict: false };
   }
-  // Different domain → different FactKey prefix, no conflict
   if (oldDomain !== newDomain) {
     return { wouldConflict: false };
   }
-  // Same subject + same domain but different predicates → should not supersede
   if (oldPredicate !== undefined && newPredicate !== undefined && oldPredicate !== newPredicate) {
     return {
       wouldConflict: true,

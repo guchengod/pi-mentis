@@ -34,7 +34,7 @@ export interface CapabilityRecord {
   readonly constraints: readonly string[];
   readonly examples: readonly CapabilityExample[];
   readonly packageName: string;
-  readonly packageVersion: "0.83.0" | string;
+  readonly packageVersion: string;
   readonly installed: boolean;
   readonly sourceRefs: readonly SourceLocation[];
 }

@@ -30,7 +30,7 @@ import { TemporalTruthEngine, type TemporalPlan } from "./temporal.js";
 import { HierarchicalViewService, type ViewKind } from "./views.js";
 import { deriveFactKey as deriveFactKeyNew } from "./fact-key.js";
 import { planCommit } from "./commit-planner.js";
-import { shouldReject } from "./secret-detector.js";
+import { classifySensitivity, toRemoteSafe } from "./secret-detector.js";
 
 import type {
   CommitMemoryCommand,
@@ -43,6 +43,9 @@ import type {
   MemoryService,
   MemoryDomain,
   PiScopeContext,
+  MentisSecurityMode,
+  ResourceOwnership,
+  RelevanceScope,
 } from "./types.js";
 
 export interface CreateMemoryServiceOptions {
@@ -116,8 +119,9 @@ export function deriveFactKey(
 }
 
 function defaultCardinality(type: CommitMemoryCommand["type"]) {
+  // Only events and tasks get event cardinality by type default
   if (type === "episodic" || type === "task") return "event" as const;
-  if (type === "preference" || type === "procedural") return "set" as const;
+  // All other types default to single — set cardinality is determined by predicate
   return "single" as const;
 }
 
@@ -277,8 +281,15 @@ export class DefaultMemoryService implements MemoryService {
     options: OperationOptions = {},
   ): Promise<CommitMemoryResult> {
     throwIfAborted(options.signal, "memory-commit");
-    // ── Secret detection ─────────────────────────────────────
-    if (shouldReject(command.content)) {
+    // ── Sensitivity classification (classify, don't destroy) ──
+    const sensitivity = classifySensitivity(command.content);
+    // Local storage preserves original content.
+    // Only drop if the content is entirely a high-confidence secret token
+    // (e.g., a bare API key with no surrounding context).
+    if (
+      sensitivity.categories.some((c) => c === "private_key" || c === "certificate") &&
+      sensitivity.sensitivity === "secret"
+    ) {
       return {
         outcome: "rejected_sensitive",
         record: undefined as unknown as Omit<MemoryRecord, "embedding">,
@@ -375,27 +386,43 @@ export class DefaultMemoryService implements MemoryService {
         relatedIds: [record.id, ...temporalPlan.supersedesIds, ...temporalPlan.conflictsWithIds],
       };
     }
-    const response = await this.#embedding.embed(
-      {
-        inputs: [normalizedContent],
-        inputKind: "memory",
-        dimensions: this.#dimensions,
-        truncate: "reject",
-      },
-      {
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
-        priority: "interactive",
-      },
-    );
-    const embedding = response.vectors[0];
-    if (embedding === undefined) throw new Error("Memory Embedding response is empty");
-    const neighbors = await this.#store.vectorSearch({
-      kind: "memory",
-      vector: embedding.values,
-      topK: 5,
-      filter: `namespace = ${quoteFilter(scopeKey)} AND status = "active"`,
-    });
+    // ── Remote safety: produce safe content for embedding ──
+    const remoteSafe = toRemoteSafe(normalizedContent);
+    const skipEmbedding = remoteSafe.policy === "local_only" || remoteSafe.policy === "drop";
+    let embedding: { values: Float32Array } | undefined;
+
+    if (skipEmbedding) {
+      embedding = { values: new Float32Array(this.#dimensions) };
+    } else {
+      const contentForEmbedding = remoteSafe.text ?? normalizedContent;
+      const response = await measure(this.#telemetry, "embedding_duration_ms", () =>
+        this.#embedding.embed(
+          {
+            inputs: [contentForEmbedding],
+            inputKind: "memory",
+            dimensions: this.#dimensions,
+            truncate: "reject",
+          },
+          {
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+            ...(options.traceId === undefined ? {} : { traceId: options.traceId }),
+            priority: "interactive",
+          },
+        ),
+      );
+      const vec = response.vectors[0];
+      if (vec === undefined) throw new Error("Memory Embedding response is empty");
+      embedding = vec;
+    }
+
+    const neighbors = skipEmbedding
+      ? []
+      : await this.#store.vectorSearch({
+          kind: "memory",
+          vector: embedding.values,
+          topK: 5,
+          filter: `namespace = ${quoteFilter(scopeKey)} AND status = "active"`,
+        });
     // Event guard: episodic events and event-cardinality records must NOT
     // be deduplicated by semantic similarity — only by exact idempotency key
     // or exact content hash match.
@@ -549,6 +576,13 @@ export class DefaultMemoryService implements MemoryService {
       domain: inferDomain(command),
       scope: command.scope,
       ...(command.scopeContext === undefined ? {} : { scopeContext: command.scopeContext }),
+      ownership: {
+        tenantId: command.scopeContext?.tenantId,
+        userId: command.scopeContext?.userId ?? "local",
+        appId: command.scopeContext?.appId,
+        agentId: command.scopeContext?.agentId,
+      },
+      sensitivity: sensitivity.sensitivity,
       confidence,
       importance,
       authority: command.authority,
@@ -880,12 +914,25 @@ export class DefaultMemoryService implements MemoryService {
         const stages: Record<string, number> = {};
         const degraded: string[] = [];
         if (vector === undefined) {
+          // Security gate: produce remote-safe content before sending to provider
+          const safe = toRemoteSafe(query.text);
+          if (safe.policy === "drop" || safe.policy === "local_only") {
+            return {
+              hits: [],
+              diagnostics: {
+                durationMs: performance.now() - started,
+                timedOut: false,
+                degraded: ["query-rejected-sensitive"],
+                stages: {},
+              },
+            };
+          }
           const embeddingStarted = performance.now();
           try {
             const response = await measure(this.#telemetry, "embedding_duration_ms", () =>
               this.#embedding.embed(
                 {
-                  inputs: [query.text],
+                  inputs: [safe.text ?? "[REDACTED]"],
                   inputKind: "query",
                   dimensions: this.#dimensions,
                   truncate: "reject",
@@ -1004,10 +1051,40 @@ export class DefaultMemoryService implements MemoryService {
     const stored = (await this.#store.fetchVectors("memory", [id])).get(id);
     if (stored === undefined) return undefined;
     const record = decodeStoredPayload(stored) as unknown as Omit<MemoryRecord, "embedding">;
+
+    const isExplicitId = options.accessIntent === "explicit_id";
+    const currentUser = options.scopeContext?.userId ?? "local";
+    const currentTenant = options.scopeContext?.tenantId ?? "local";
+    const recordOwner = record.ownership?.userId ?? record.scopeContext?.userId ?? "local";
+    const recordTenant = record.ownership?.tenantId ?? record.scopeContext?.tenantId ?? "local";
+
+    // Multi-tenant mode: strict tenant isolation
+    if (options.securityMode === "multi_tenant" && recordTenant !== currentTenant) {
+      return undefined;
+    }
+
+    // Different user (not same user): always deny
+    if (recordOwner !== currentUser) {
+      return undefined;
+    }
+
+    // Same user, explicit ID access in personal/team mode: allow cross-project
+    if (isExplicitId && options.securityMode !== "multi_tenant") {
+      return record;
+    }
+
+    // Backward compat: legacy boundary check
     if (
       options.scopeContext !== undefined &&
       boundaryKey(record.scopeContext) !== boundaryKey(options.scopeContext)
     ) {
+      // In personal mode with explicit ID, return anyway
+      if (
+        isExplicitId &&
+        (options.securityMode === "personal" || options.securityMode === undefined)
+      ) {
+        return record;
+      }
       return undefined;
     }
     return record;

@@ -167,7 +167,8 @@ export class HierarchicalViewService {
       record.status === "pending" ||
       record.status === "rejected" ||
       record.branchClaimState === "hypothesis" ||
-      record.branchClaimState === "abandoned"
+      record.branchClaimState === "abandoned" ||
+      record.sensitivity === "secret"
     ) {
       return undefined;
     }

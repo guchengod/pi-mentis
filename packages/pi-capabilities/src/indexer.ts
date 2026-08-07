@@ -2,6 +2,7 @@ import {
   EvidenceAuthority,
   contentHash,
   systemClock,
+  PI_VERSION,
   type Clock,
   type OperationOptions,
 } from "@pi-mentis/pi-mentis-core";
@@ -13,7 +14,7 @@ import {
 import type { KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
 import { ZvecStore, type StoredRecord, type StoredVectorRecord } from "@pi-mentis/pi-mentis-zvec";
 
-import type {
+const PI_NAMESPACE = `pi:${PI_VERSION}`;import type {
   CapabilityPlan,
   CapabilityPlanner,
   CapabilityRecord,
@@ -55,7 +56,7 @@ export class CapabilityIndexer {
     if (existing?.["fingerprint"] === fingerprint) return { indexed: 0, unchanged: true };
     const previous = await this.#store.filterVectors(
       "capability",
-      'namespace = "pi:0.83.0" AND status = "active"',
+      `namespace = "${PI_NAMESPACE}" AND status = "active"`,
       10_000,
     );
     const activeIds = new Set(records.map((record) => record.id));
@@ -79,7 +80,7 @@ export class CapabilityIndexer {
         removedVectors.push({
           id,
           kind: "capability",
-          namespace: "pi:0.83.0",
+          namespace: PI_NAMESPACE,
           status: "removed",
           payload: { ...decoded, installed: false, removedAt: now, updatedAt: now },
           searchableText: text,
@@ -121,7 +122,7 @@ export class CapabilityIndexer {
         vectors.push({
           id: record.id,
           kind: "capability",
-          namespace: "pi:0.83.0",
+          namespace: PI_NAMESPACE,
           status: "active",
           payload: {
             ...record,
@@ -216,7 +217,7 @@ export class DefaultCapabilityPlanner implements CapabilityPlanner {
       reusable.length > 0
         ? []
         : [
-            `No installed Pi v0.83.0 capability directly satisfies: ${request.goal}`,
+            `No installed Pi ${PI_VERSION} capability directly satisfies: ${request.goal}`,
             ...(knowledgeEvidence.length === 0
               ? ["No supporting user or project knowledge was retrieved"]
               : []),
@@ -237,11 +238,11 @@ export class DefaultCapabilityPlanner implements CapabilityPlanner {
       gaps,
       recommendation,
       implementationConstraints: [
-        "Use only Pi v0.83.0 Extension API",
+        `Use only Pi ${PI_VERSION} Extension API`,
         ...(request.constraints ?? []),
       ],
       validationPlan: [
-        "Load the generated artifact in Pi v0.83.0",
+        `Load the generated artifact in Pi ${PI_VERSION}`,
         "Verify declared tools and commands",
         "Exercise success, failure, cancellation, and shutdown paths",
         "Require evidence before promotion; do not modify the running extension automatically",

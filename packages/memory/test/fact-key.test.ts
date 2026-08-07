@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { deriveFactKey, type KnownPredicate } from "../src/fact-key.js";
 
 describe("deriveFactKey", () => {
-  it("detects package_manager predicate", () => {
+  it("detects project_package_manager predicate", () => {
     const result = deriveFactKey("Project uses pnpm@10.20.0 as package manager", "project", {
       tenantId: "local",
       userId: "u1",
@@ -11,12 +11,12 @@ describe("deriveFactKey", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(result.predicateKey).toBe("package_manager");
-    expect(result.factKey).toContain("/package_manager");
+    expect(result.predicateKey).toBe("project_package_manager");
+    expect(result.factKey).toContain("/project_package_manager");
     expect(result.fallbackUsed).toBe(false);
   });
 
-  it("detects build_command predicate", () => {
+  it("detects project_build_command predicate", () => {
     const result = deriveFactKey("The build command for this project is turbo build", "project", {
       tenantId: "local",
       userId: "u1",
@@ -24,11 +24,11 @@ describe("deriveFactKey", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(result.predicateKey).toBe("build_command");
-    expect(result.factKey).toContain("/build_command");
+    expect(result.predicateKey).toBe("project_build_command");
+    expect(result.factKey).toContain("/project_build_command");
   });
 
-  it("detects test_command predicate", () => {
+  it("detects project_test_command predicate", () => {
     const result = deriveFactKey("Run vitest for testing", "project", {
       tenantId: "local",
       userId: "u1",
@@ -36,7 +36,7 @@ describe("deriveFactKey", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(result.predicateKey).toBe("test_command");
+    expect(result.predicateKey).toBe("project_test_command");
   });
 
   it("detects runtime predicate", () => {
@@ -50,14 +50,14 @@ describe("deriveFactKey", () => {
     expect(result.predicateKey).toBe("runtime");
   });
 
-  it("detects user_preference predicate", () => {
-    const result = deriveFactKey("I prefer concise code reviews", "user", {
+  it("detects assistant_alias predicate", () => {
+    const result = deriveFactKey("以后叫你小明", "user", {
       tenantId: "local",
       userId: "u1",
       appId: "pi",
       agentId: "test",
     });
-    expect(result.predicateKey).toBe("user_preference");
+    expect(result.predicateKey).toBe("assistant_alias");
   });
 
   it("different predicates produce different factKeys", () => {
@@ -76,8 +76,8 @@ describe("deriveFactKey", () => {
       repositoryId: "my-repo",
     });
     expect(r1.factKey).not.toBe(r2.factKey);
-    expect(r1.predicateKey).toBe("package_manager");
-    expect(r2.predicateKey).toBe("build_command");
+    expect(r1.predicateKey).toBe("project_package_manager");
+    expect(r2.predicateKey).toBe("project_build_command");
   });
 
   it("falls back when no predicate matches", () => {
@@ -93,13 +93,13 @@ describe("deriveFactKey", () => {
   });
 
   it("uses different subjectKeys for different domains", () => {
-    const userResult = deriveFactKey("preference", "user", {
+    const userResult = deriveFactKey("以后叫你小明", "user", {
       tenantId: "local",
       userId: "user-1",
       appId: "pi",
       agentId: "test",
     });
-    const projectResult = deriveFactKey("fact", "project", {
+    const projectResult = deriveFactKey("构建命令是 pnpm build", "project", {
       tenantId: "local",
       userId: "user-1",
       appId: "pi",
@@ -112,18 +112,21 @@ describe("deriveFactKey", () => {
 });
 
 describe("predicate collision prevention", () => {
-  // Ensure that two different predicates on the same subject don't silently collide
   const predicates: KnownPredicate[] = [
-    "project_purpose",
-    "package_manager",
-    "build_command",
-    "test_command",
+    "project_package_manager",
+    "project_build_command",
+    "project_test_command",
+    "project_lint_command",
+    "project_typecheck_command",
+    "project_format_command",
+    "project_database",
+    "project_deployment_target",
     "runtime",
     "language",
     "storage_engine",
-    "deployment_target",
     "architecture_decision",
     "known_failure",
+    "project_purpose",
   ];
 
   for (const pred of predicates) {

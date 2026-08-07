@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { ConfigurationError } from "./errors.js";
 import { resolveStorageRoot, globalConfigPath } from "./mentis-home.js";
+import { PI_VERSION } from "./compatibility.js";
 
 export interface EmbeddingBatchPolicy {
   readonly maxItems: number;
@@ -47,7 +48,7 @@ export interface SiliconFlowConfig {
 }
 
 export interface RuntimeConfig {
-  readonly piVersion: "0.83.0";
+  readonly piVersion: typeof PI_VERSION;
 }
 
 export interface KnowledgeConfig {
@@ -183,7 +184,7 @@ export interface PiMentisConfig {
 export function createDefaultConfig(_cwd: string): PiMentisConfig {
   const availableProcessors = globalThis.navigator?.hardwareConcurrency ?? 2;
   return {
-    runtime: { piVersion: "0.83.0" },
+    runtime: { piVersion: PI_VERSION },
     knowledge: {
       enabled: true,
       defaultNamespace: "user",
@@ -324,8 +325,8 @@ function requireRange(name: string, value: number, minimum: number, maximum: num
 }
 
 export function validateConfig(config: PiMentisConfig): PiMentisConfig {
-  if (config.runtime.piVersion !== "0.83.0") {
-    throw new ConfigurationError("runtime.piVersion must be exactly 0.83.0", {
+  if (config.runtime.piVersion !== PI_VERSION) {
+    throw new ConfigurationError(`runtime.piVersion must be exactly ${PI_VERSION}`, {
       operation: "configuration-validate",
       retryable: false,
     });

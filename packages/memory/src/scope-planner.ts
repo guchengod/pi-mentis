@@ -7,10 +7,11 @@
  *   - User / Agent Profile (always user scope)
  *   - Repository / Project facts (repo scope preferred)
  *   - Task / Episodic (task/event scope)
- *   - Low-confidence fallback: narrower scope, never promote to user global
+ *   - No-repo safety: never generate project scope without a repository
  */
 
-import { normalizeText } from "@pi-mentis/pi-mentis-core";
+import { normalizeText, stableHash } from "@pi-mentis/pi-mentis-core";
+import { createHash } from "node:crypto";
 
 import type { MemoryDomain, MemoryScope, PiScopeContext } from "./types.js";
 
@@ -24,17 +25,23 @@ export interface MemoryScopePlan {
   readonly alternatives: readonly { scope: MemoryScope; score: number }[];
 }
 
-// ─── Known Predicates (shared with fact-key planner) ───────────────
+// ─── Known Predicates (expanded) ───────────────────────────────────
 
 type KnownPredicate =
   | "user_name"
   | "assistant_alias"
   | "response_style"
   | "language_preference"
+  | "programming_language_preference"
+  | "package_manager_preference"
   | "general_package_manager_preference"
   | "project_package_manager"
   | "project_build_command"
   | "project_test_command"
+  | "project_integration_test_command"
+  | "project_lint_command"
+  | "project_typecheck_command"
+  | "project_format_command"
   | "project_database"
   | "project_deployment_target"
   | "task_goal"
@@ -47,7 +54,7 @@ interface PredicateMeta {
   readonly domain: MemoryDomain;
   readonly scopeKind: MemoryScope["kind"];
   readonly reasonCode: string;
-  readonly cardinality: string;
+  readonly cardinality: "single" | "set" | "event";
 }
 
 const PREDICATE_META: Record<KnownPredicate, PredicateMeta> = {
@@ -70,10 +77,24 @@ const PREDICATE_META: Record<KnownPredicate, PredicateMeta> = {
     domain: "user",
     scopeKind: "user",
     reasonCode: "user_preference",
-    cardinality: "set",
+    cardinality: "single",
   },
   language_preference: {
     predicate: "language_preference",
+    domain: "user",
+    scopeKind: "user",
+    reasonCode: "user_preference",
+    cardinality: "single",
+  },
+  programming_language_preference: {
+    predicate: "programming_language_preference",
+    domain: "user",
+    scopeKind: "user",
+    reasonCode: "user_preference",
+    cardinality: "set",
+  },
+  package_manager_preference: {
+    predicate: "package_manager_preference",
     domain: "user",
     scopeKind: "user",
     reasonCode: "user_preference",
@@ -102,6 +123,34 @@ const PREDICATE_META: Record<KnownPredicate, PredicateMeta> = {
   },
   project_test_command: {
     predicate: "project_test_command",
+    domain: "project",
+    scopeKind: "repository",
+    reasonCode: "project_config",
+    cardinality: "single",
+  },
+  project_integration_test_command: {
+    predicate: "project_integration_test_command",
+    domain: "project",
+    scopeKind: "repository",
+    reasonCode: "project_config",
+    cardinality: "single",
+  },
+  project_lint_command: {
+    predicate: "project_lint_command",
+    domain: "project",
+    scopeKind: "repository",
+    reasonCode: "project_config",
+    cardinality: "single",
+  },
+  project_typecheck_command: {
+    predicate: "project_typecheck_command",
+    domain: "project",
+    scopeKind: "repository",
+    reasonCode: "project_config",
+    cardinality: "single",
+  },
+  project_format_command: {
+    predicate: "project_format_command",
     domain: "project",
     scopeKind: "repository",
     reasonCode: "project_config",
@@ -137,6 +186,20 @@ const PREDICATE_META: Record<KnownPredicate, PredicateMeta> = {
   },
 };
 
+// ─── Chinese boundary helpers ──────────────────────────────────────
+
+/**
+ * Unicode-aware phrase matcher for Chinese text.
+ * Does NOT use \b which is undefined for CJK characters.
+ */
+function hasPhrase(text: string, ...phrases: string[]): boolean {
+  return phrases.some((phrase) => text.includes(phrase));
+}
+
+function hasRegex(text: string, ...regexes: RegExp[]): boolean {
+  return regexes.some((re) => re.test(text));
+}
+
 // ─── User / Agent Profile Detection ──────────────────────────────
 
 interface ProfileSignal {
@@ -147,38 +210,51 @@ interface ProfileSignal {
 function detectProfileSignal(content: string): ProfileSignal {
   const normalized = normalizeText(content).toLowerCase();
 
-  // Agent alias: 记住你叫 / call yourself / your name
+  // Agent alias (Chinese + English)
   if (
-    /记住你叫|你叫|叫你|你的名字|call\s+yourself|your\s+name\s+is|称呼(?:你|助手)|喊你/.test(
-      normalized,
-    )
+    hasPhrase(normalized, "记住你叫", "你叫", "叫你", "你的名字", "称呼你", "称呼助手", "喊你") ||
+    hasRegex(normalized, /call\s+yourself/i, /your\s+name\s+is/i)
   ) {
     return { predicate: "assistant_alias", confidence: 0.9 };
   }
 
-  // User name: 我叫 / my name is
-  if (/我叫|我的名?字|my\s+name\s+is|i\s+am\s+[A-Z]/.test(normalized)) {
+  // User name
+  if (
+    hasPhrase(normalized, "我叫", "我的名字") ||
+    hasRegex(normalized, /my\s+name\s+is/i, /i\s+am\s+[A-Z]/)
+  ) {
     return { predicate: "user_name", confidence: 0.85 };
   }
 
-  // Response style: 回答风格 / 喜欢先看结论 / 简洁
+  // Response style
   if (
-    /回答.*风格|回复.*方式|先(?:看|给).*结论|简洁|详细|啰嗦|简练|response\s+style|回答方式|说.*方式|讲.*方式|先.*结论/.test(
-      normalized,
-    )
+    hasPhrase(normalized, "回答风格", "回复方式", "回答方式", "说方式", "讲方式") ||
+    hasRegex(normalized, /先(?:看|给).*结论|简洁|详细|啰嗦|简练|response\s+style/i)
   ) {
     return { predicate: "response_style", confidence: 0.8 };
   }
 
   // Language preference
-  if (/说中文|说英文|用中文|用英文|language|语言/.test(normalized)) {
+  if (
+    hasPhrase(normalized, "说中文", "说英文", "用中文", "用英文") ||
+    hasRegex(normalized, /language|语言/)
+  ) {
     return { predicate: "language_preference", confidence: 0.75 };
+  }
+
+  // Programming language preference
+  if (
+    hasPhrase(normalized, "喜欢", "偏好") &&
+    hasRegex(normalized, /\b(?:go|rust|typescript|python|java)\b/i)
+  ) {
+    return { predicate: "programming_language_preference", confidence: 0.75 };
   }
 
   // General preference signals (not project-specific)
   if (
-    /一般|通常|平时|习惯|偏好|prefer|usually|always\b.*(?!this project)/i.test(normalized) &&
-    !/这个项目|this project|当前项目|仓库/.test(normalized)
+    hasRegex(normalized, /(?:一般|通常|平时|习惯|喜欢|偏好|prefer|usually)/i) &&
+    !hasPhrase(normalized, "这个项目", "仓库", "代码库") &&
+    !hasRegex(normalized, /this project|this repo|codebase/i)
   ) {
     return { predicate: undefined, confidence: 0.6 } satisfies ProfileSignal;
   }
@@ -186,61 +262,124 @@ function detectProfileSignal(content: string): ProfileSignal {
   return { predicate: undefined, confidence: 0 } satisfies ProfileSignal;
 }
 
-// ─── Project/Fact Detection ───────────────────────────────────────
+// ─── Project Predicate Detection ──────────────────────────────────
+
+function detectProjectPredicate(content: string): {
+  predicate: KnownPredicate | undefined;
+  confidence: number;
+} {
+  const normalized = normalizeText(content).toLowerCase();
+
+  // Match from most specific to least specific
+
+  // integration_test_command
+  if (
+    hasPhrase(normalized, "集成测试", "integration test") ||
+    hasRegex(normalized, /pnpm\s+test:integration|npm\s+run\s+test:integration|pnpm\s+test:e2e/i)
+  ) {
+    return { predicate: "project_integration_test_command", confidence: 0.85 };
+  }
+
+  // typecheck_command — must be checked BEFORE test_command / lint_command
+  if (
+    hasPhrase(normalized, "类型检查", "typecheck", "type check") ||
+    hasRegex(normalized, /pnpm\s+typecheck|npm\s+run\s+typecheck|tsc\s+--noEmit/i)
+  ) {
+    return { predicate: "project_typecheck_command", confidence: 0.85 };
+  }
+
+  // lint_command
+  if (
+    hasPhrase(normalized, "检查", "lint", "eslint") ||
+    hasRegex(normalized, /pnpm\s+lint|npm\s+run\s+lint|eslint\b/i)
+  ) {
+    return { predicate: "project_lint_command", confidence: 0.8 };
+  }
+
+  // format_command
+  if (
+    hasPhrase(normalized, "格式化", "format") ||
+    hasRegex(normalized, /pnpm\s+format|npm\s+run\s+format|prettier\b/i)
+  ) {
+    return { predicate: "project_format_command", confidence: 0.8 };
+  }
+
+  // build_command — must be checked BEFORE package_manager and test_command
+  if (
+    hasPhrase(normalized, "构建", "编译", "build", "compile") ||
+    hasRegex(normalized, /pnpm\s+build|npm\s+run\s+build|tsc\b|turbo\s+build/i)
+  ) {
+    return { predicate: "project_build_command", confidence: 0.85 };
+  }
+
+  // test_command — must be checked BEFORE package_manager
+  if (
+    hasPhrase(normalized, "测试", "test") ||
+    hasRegex(normalized, /pnpm\s+test|npm\s+test|vitest|jest/i)
+  ) {
+    return { predicate: "project_test_command", confidence: 0.85 };
+  }
+
+  // Package manager
+  if (
+    hasPhrase(normalized, "pnpm", "npm", "yarn", "bun", "包管理", "包管理器") ||
+    hasRegex(normalized, /\b(?:pnpm|npm|yarn|bun)\b/i)
+  ) {
+    const isGeneral =
+      hasRegex(normalized, /一般|通常|默认|一般.*项目|prefer|usually|default/i) &&
+      !hasPhrase(normalized, "这个项目") &&
+      !hasRegex(normalized, /this project/i);
+    if (isGeneral) {
+      return { predicate: "general_package_manager_preference", confidence: 0.75 };
+    }
+    return { predicate: "project_package_manager", confidence: 0.8 };
+  }
+
+  // Database
+  if (
+    hasPhrase(normalized, "数据库", "database", "postgres", "mysql", "sqlite", "mongodb") ||
+    hasRegex(normalized, /\b(?:database|postgres|mysql|sqlite|mongodb)\b/i)
+  ) {
+    return { predicate: "project_database", confidence: 0.75 };
+  }
+
+  // Deployment
+  if (
+    hasPhrase(normalized, "部署", "发布", "上线", "deploy", "production", "staging") ||
+    hasRegex(normalized, /\b(?:deploy|部署|发布|上线|production|staging)\b/i)
+  ) {
+    return { predicate: "project_deployment_target", confidence: 0.75 };
+  }
+
+  return { predicate: undefined, confidence: 0 };
+}
 
 function detectProjectSignal(
   content: string,
   scopeContext?: PiScopeContext,
 ): { projectRelated: boolean; predicate: KnownPredicate | undefined; confidence: number } {
   const normalized = normalizeText(content).toLowerCase();
+  const pred = detectProjectPredicate(content);
 
-  // Check for specific project predicates first (even with explicit markers present)
-  // Build command checked BEFORE package_manager: "pnpm build" should detect build_command
-  if (/\b(?:build|构建|编译|pnpm build|npm run build|tsc|turbo build)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_build_command", confidence: 0.8 };
+  if (pred.predicate !== undefined) {
+    // General preferences are NOT project-related
+    const isGeneral = pred.predicate === "general_package_manager_preference";
+    return { projectRelated: !isGeneral, predicate: pred.predicate, confidence: pred.confidence };
   }
 
-  // Test command checked BEFORE package_manager: "pnpm test" should detect test_command
-  if (/\b(?:test|测试|vitest|jest|pnpm test|npm test)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_test_command", confidence: 0.8 };
-  }
-
-  // Package manager
-  if (/\b(?:pnpm|npm|yarn|bun|包管理|包管理器)\b/i.test(normalized)) {
-    const isGeneral =
-      /一般|通常|默认|一般.*项目|prefer|usually|default/i.test(normalized) &&
-      !/这个项目|this project/i.test(normalized);
-    if (isGeneral) {
-      return {
-        projectRelated: false,
-        predicate: "general_package_manager_preference",
-        confidence: 0.75,
-      };
-    }
-    return { projectRelated: true, predicate: "project_package_manager", confidence: 0.8 };
-  }
-
-  // Database
-  if (/\b(?:database|数据库|postgres|mysql|sqlite|mongodb)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_database", confidence: 0.75 };
-  }
-
-  // Deployment
-  if (/\b(?:deploy|部署|发布|上线|production|staging)\b/i.test(normalized)) {
-    return { projectRelated: true, predicate: "project_deployment_target", confidence: 0.75 };
-  }
-
-  // Explicit project scope markers (checked AFTER specific predicates)
-  if (/这个项目|this project|当前项目|仓库|this repo|代码库|codebase/.test(normalized)) {
+  // Explicit project scope language markers
+  if (
+    hasPhrase(normalized, "这个项目", "当前项目", "本仓库") ||
+    hasRegex(normalized, /this project|this repo|codebase/i)
+  ) {
     return { projectRelated: true, predicate: undefined, confidence: 0.85 };
   }
 
-  // General project language in repo context
+  // General project architecture language in repo context
   if (scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined) {
     if (
-      /\b(?:architecture|架构|design|设计|structure|结构|module|模块|component|组件)\b/i.test(
-        normalized,
-      )
+      hasRegex(normalized, /\b(?:architecture|design|module|component|structure)\b/i) ||
+      hasPhrase(normalized, "架构", "模块", "组件", "结构")
     ) {
       return { projectRelated: true, predicate: undefined, confidence: 0.6 };
     }
@@ -253,41 +392,146 @@ function detectProjectSignal(
 
 function detectTaskSignal(content: string): { taskRelated: boolean; confidence: number } {
   const normalized = normalizeText(content).toLowerCase();
-  if (/任务|目标|进度|阻塞|blocker|todo|待办|进行中|task|goal|progress/.test(normalized)) {
+  if (
+    hasPhrase(normalized, "任务", "目标", "进度", "阻塞", "待办", "进行中") ||
+    hasRegex(normalized, /blocker|todo|task|goal|progress/i)
+  ) {
     return { taskRelated: true, confidence: 0.7 };
   }
   return { taskRelated: false, confidence: 0 };
 }
 
-// ─── Episodic Detection ───────────────────────────────────────────
-
-function detectEpisodicSignal(content: string): { episodic: boolean; confidence: number } {
-  const normalized = normalizeText(content).toLowerCase();
-  if (
-    /构建|编译|测试|部署|失败|成功|错误|error|fail|success|pass|上次|第一[次回]|刚才|刚才说/.test(
-      normalized,
-    )
-  ) {
-    return { episodic: true, confidence: 0.65 };
-  }
-  return { episodic: false, confidence: 0 };
-}
-
 // ─── Correction / Retraction Detection ────────────────────────────
 
-function detectCorrectionSignal(content: string): { isCorrection: boolean; confidence: number } {
+export function detectCorrectionSignal(content: string): {
+  isCorrection: boolean;
+  isRetract: boolean;
+  action: "correct" | "replace" | "retract" | undefined;
+  oldValue: string | undefined;
+  newValue: string | undefined;
+  confidence: number;
+} {
   const normalized = normalizeText(content).toLowerCase();
+  const original = content;
+
+  // Retract expressions
   if (
-    /刚才说|说错了|不是.*应该是|正确.*是|不对.*是|纠正|改正|更正|修正|之前.*错|不小心说|actually|sorry.*meant|更正.*之前|改成|现在使用|切换到/i.test(
-      normalized,
-    )
+    hasPhrase(normalized, "忘掉", "忘记这个", "撤销之前的决定", "不要再使用这个配置") ||
+    hasPhrase(normalized, "撤销") ||
+    hasRegex(normalized, /删除.*记忆|清除.*记忆|forget|remove.*memory|不再使用.*改用/i)
   ) {
-    return { isCorrection: true, confidence: 0.85 };
+    // Extract old value from "不再使用 X, 改用 Y" — that's replace not retract
+    const replaceMatch = original.match(
+      /不再使用\s*(\S+).*改用\s*(\S+)|改用\s*(\S+).*不再使用\s*(\S+)/,
+    );
+    if (replaceMatch) {
+      const oldVal = replaceMatch[1] ?? replaceMatch[4] ?? undefined;
+      const newVal = replaceMatch[2] ?? replaceMatch[3] ?? undefined;
+      return {
+        isCorrection: true,
+        isRetract: false,
+        action: "replace",
+        oldValue: oldVal,
+        newValue: newVal,
+        confidence: 0.9,
+      };
+    }
+    return {
+      isCorrection: true,
+      isRetract: true,
+      action: "retract",
+      oldValue: undefined,
+      newValue: undefined,
+      confidence: 0.9,
+    };
   }
-  if (/忘掉|删除.*记忆|清除|forget|remove.*memory|撤销/.test(normalized)) {
-    return { isCorrection: true, confidence: 0.9 };
+
+  // Explicit correction patterns
+  if (
+    hasPhrase(
+      normalized,
+      "刚才说错了",
+      "之前说错了",
+      "不小心说",
+      "更正",
+      "纠正",
+      "改正",
+      "修正",
+      "更正之前",
+    ) ||
+    hasRegex(normalized, /actually|sorry.*meant/i)
+  ) {
+    return {
+      isCorrection: true,
+      isRetract: false,
+      action: "correct",
+      oldValue: undefined,
+      newValue: undefined,
+      confidence: 0.85,
+    };
   }
-  return { isCorrection: false, confidence: 0 };
+
+  // Replace patterns: "改成/改为/改用/替换为/切换到/以后使用/现在使用/不再是 Y 现在是 Y/从 X 迁移到 Y"
+  if (
+    hasPhrase(normalized, "改成", "改为", "改用", "替换为", "切换到", "以后使用", "现在使用") ||
+    hasRegex(normalized, /不再是\s+\S+\s+现在是/i) ||
+    hasPhrase(normalized, "已经废弃", "迁移到") ||
+    hasRegex(normalized, /从\s+\S+\s+迁移到\s+\S+/i)
+  ) {
+    // Try to extract old and new values
+    const patterns = [
+      /改用\s*(.+)/,
+      /改成\s*(.+)/,
+      /改为\s*(.+)/,
+      /替换为\s*(.+)/,
+      /切换到\s*(.+)/,
+      /以后使用\s*(.+)/,
+      /现在使用\s*(.+)/,
+      /不再是\s+(\S+)\s+现在是\s+(\S+)/,
+      /从\s+(\S+)\s+迁移到\s+(\S+)/,
+    ];
+    let oldValue: string | undefined;
+    let newValue: string | undefined;
+    for (const pat of patterns) {
+      const match = original.match(pat);
+      if (match) {
+        if (match[2] !== undefined) {
+          oldValue = match[1];
+          newValue = match[2];
+        } else {
+          newValue = match[1];
+        }
+        break;
+      }
+    }
+    return {
+      isCorrection: true,
+      isRetract: false,
+      action: "replace",
+      oldValue,
+      newValue,
+      confidence: 0.85,
+    };
+  }
+
+  return {
+    isCorrection: false,
+    isRetract: false,
+    action: undefined,
+    oldValue: undefined,
+    newValue: undefined,
+    confidence: 0,
+  };
+}
+
+// ─── Repository ID generation ─────────────────────────────────────
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+export function stableRepositoryId(canonicalGitRoot: string, normalizedRemoteUrl?: string): string {
+  return sha256(canonicalGitRoot + "\n" + (normalizedRemoteUrl ?? ""));
 }
 
 // ─── Main Planner ─────────────────────────────────────────────────
@@ -300,8 +544,10 @@ function detectCorrectionSignal(content: string): { isCorrection: boolean; confi
  *   2. Correction signals → locate existing fact & update in same scope
  *   3. Project signals → repository/project scope
  *   4. Task signals → task scope
- *   5. Episodic signals → event scope
- *   6. Default → current context scope (narrowest)
+ *   5. Default → narrowest context scope
+ *
+ * NEVER generates "unknown-project" scope.
+ * No-repo context must NOT create project scope.
  */
 export function planScope(content: string, scopeContext: PiScopeContext): MemoryScopePlan {
   // 1. Check profile signals
@@ -321,11 +567,9 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
     };
   }
 
-  // 2. Check corrections (inherit scope from existing fact)
+  // 2. Check corrections
   const correction = detectCorrectionSignal(content);
   if (correction.isCorrection) {
-    // Placeholder: the remember coordinator will locate the existing fact
-    // and use its scope. For now, default narrow.
     const scope: MemoryScope = {
       kind: "project",
       id:
@@ -343,26 +587,36 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
     };
   }
 
-  // 3. Check project signals
+  // 3. Check project signals — only if repository/project context exists
+  const inRepo = scopeContext.repositoryId !== undefined || scopeContext.projectId !== undefined;
   const project = detectProjectSignal(content, scopeContext);
-  if (project.projectRelated) {
+  if (project.projectRelated && inRepo) {
     const repoId = scopeContext.repositoryId;
     const scope: MemoryScope =
       repoId !== undefined
         ? { kind: "repository", id: repoId }
         : scopeContext.projectId !== undefined
           ? { kind: "project", id: scopeContext.projectId }
-          : { kind: "workspace", id: scopeContext.workspacePath ?? "local" };
+          : { kind: "user", id: scopeContext.userId };
     const meta = project.predicate !== undefined ? PREDICATE_META[project.predicate] : undefined;
     return {
       domain: meta?.domain ?? "project",
       scope,
       confidence: project.confidence,
       reasonCodes: [meta?.reasonCode ?? "project_signal"],
-      alternatives:
-        repoId === undefined
-          ? [{ scope: { kind: "user", id: scopeContext.userId }, score: 0.2 }]
-          : [],
+      alternatives: [],
+    };
+  }
+
+  // If there's a project signal but no repo context, fall back to user scope
+  if (project.projectRelated) {
+    const scope: MemoryScope = { kind: "user", id: scopeContext.userId };
+    return {
+      domain: "user",
+      scope,
+      confidence: 0.5,
+      reasonCodes: ["project_signal_no_repo_fallback_user"],
+      alternatives: [],
     };
   }
 
@@ -379,33 +633,7 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
     };
   }
 
-  // 5. Check episodic signals
-  const episodic = detectEpisodicSignal(content);
-  if (episodic.episodic) {
-    const scope: MemoryScope = {
-      kind:
-        scopeContext.runId !== undefined
-          ? "run"
-          : scopeContext.sessionId !== undefined
-            ? "session"
-            : "project",
-      id:
-        scopeContext.runId ??
-        scopeContext.sessionId ??
-        scopeContext.projectId ??
-        scopeContext.workspacePath ??
-        "local",
-    };
-    return {
-      domain: "episodic",
-      scope,
-      confidence: episodic.confidence,
-      reasonCodes: ["episodic_signal"],
-      alternatives: [],
-    };
-  }
-
-  // 6. Default: narrowest scope from context
+  // 5. Default: narrowest scope from context
   const defaultScope = resolveDefaultScope(scopeContext);
   return {
     domain: "topic",
@@ -417,7 +645,6 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
 }
 
 function resolveDefaultScope(ctx: PiScopeContext): MemoryScope {
-  // Prefer narrowest available
   if (ctx.taskId !== undefined) return { kind: "task", id: ctx.taskId };
   if (ctx.repositoryId !== undefined) return { kind: "repository", id: ctx.repositoryId };
   if (ctx.projectId !== undefined) return { kind: "project", id: ctx.projectId };
@@ -427,6 +654,4 @@ function resolveDefaultScope(ctx: PiScopeContext): MemoryScope {
   return { kind: "user", id: ctx.userId };
 }
 
-// ─── Re-exports for convenience ───────────────────────────────────
-
-export { detectProfileSignal, detectProjectSignal, detectCorrectionSignal };
+export { detectProfileSignal, detectProjectSignal };

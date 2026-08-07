@@ -23,27 +23,26 @@ export function classifyDomain(
   const reasons: string[] = [];
   const inRepo = scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined;
 
-  // preference: default to user, but check for project-specific signals
+  // preference: default to user
   if (type === "preference") {
     // Explicit global/user preference signals
     if (
-      /\b(?:global(?:ly)?|always|personally|my (?:personal|own)|in general|not (?:just|only) (?:this|the) (?:project|repo)|不管|不论|无论|个人|全局)\b/i.test(
-        normalized,
-      )
+      hasPhrase(normalized, "不管", "不论", "无论", "个人", "全局") ||
+      /global(?:ly)?|always|personally|my (?:personal|own)|in general/i.test(normalized)
     ) {
       reasons.push("explicit global preference signal");
       return { domain: "user", confidence: 0.9, reasons };
     }
     // Project-specific preference signals
     if (
-      /\b(?:this project|this repo|this codebase|项目里|这个项目|仓库里|code style|format|lint|testing|build|commit|branch|merge)\b/i.test(
+      hasPhrase(normalized, "项目里", "这个项目", "仓库里") ||
+      /this project|this repo|code style|format|lint|testing|build|commit|branch|merge/i.test(
         normalized,
       )
     ) {
       reasons.push("project-scoped preference signal");
       return { domain: "project", confidence: 0.85, reasons };
     }
-    // Default: user preferences go to user scope
     reasons.push("preference type defaults to user domain");
     return { domain: "user", confidence: 0.75, reasons };
   }
@@ -68,30 +67,33 @@ export function classifyDomain(
 
   // fact: classify by content
   if (type === "fact") {
-    // User identity / profile facts — always user domain
+    // User identity / profile facts
     if (
-      /\b(?:i am|my name|我叫|我是|我的名字|记住你叫|你叫|call (?:yourself|me)|your name|称呼|偏好|习惯|喜欢|prefer|style)\b/i.test(
+      hasPhrase(normalized, "我叫", "我的名字", "你叫") ||
+      /i am|my name|记住你叫|call (?:yourself|me)|your name|称呼|偏好|习惯|喜欢|prefer|style/i.test(
         normalized,
       )
     ) {
       reasons.push("user identity/profile fact");
       return { domain: "user", confidence: 0.85, reasons };
     }
-    // Environment facts
+    // Environment facts (runtime, platform, OS — NOT database/project config)
     if (
-      /\b(?:runtime|node|deno|bun|os|operating system|platform|arch|architecture|package manager|pnpm|npm|yarn|bun|version|\d+\.\d+\.\d+|运行时|操作系统|平台|包管理器|版本)\b/i.test(
-        normalized,
-      )
+      hasPhrase(normalized, "运行时", "操作系统", "平台") ||
+      /\b(?:runtime|node|deno|bun|operating system|platform|arch|architecture)\b/i.test(normalized)
     ) {
       reasons.push("content matches environment/runtime pattern");
       return { domain: "environment", confidence: 0.8, reasons };
     }
     // Capability facts
-    if (/\b(?:can |cannot |able to|capable of|supports?|能力|支持|可以|不能)\b/i.test(normalized)) {
+    if (
+      hasPhrase(normalized, "能力", "可以", "不能", "支持") ||
+      /can |cannot |able to|capable of|supports?/i.test(normalized)
+    ) {
       reasons.push("capability-related fact");
       return { domain: "capability", confidence: 0.7, reasons };
     }
-    // Default: if in repo, project; otherwise topic
+    // Default: if in repo, project; otherwise topic (NOT unknown-project)
     if (inRepo) {
       reasons.push("fact in repository context defaults to project");
       return { domain: "project", confidence: 0.6, reasons };
@@ -102,11 +104,17 @@ export function classifyDomain(
 
   // decision / requirement: project if in repo, else topic
   if (inRepo) {
-    reasons.push(`${type} in repository context → project domain`);
+    reasons.push(`${type} in repository context -> project domain`);
     return { domain: "project", confidence: 0.7, reasons };
   }
-  reasons.push(`${type} outside repo → topic domain`);
+  reasons.push(`${type} outside repo -> topic domain`);
   return { domain: "topic", confidence: 0.55, reasons };
+}
+
+// ─── Chinese-aware matching ────────────────────────────────────────
+
+function hasPhrase(text: string, ...phrases: string[]): boolean {
+  return phrases.some((phrase) => text.includes(phrase));
 }
 
 // ─── Scope Resolution ─────────────────────────────────────────────
@@ -120,6 +128,9 @@ export interface ScopeResolution {
 /**
  * Resolve the storage scope from the classified domain, content, and context.
  * Scope cannot be directly set by the model.
+ *
+ * NEVER returns "unknown-project" as a scope ID.
+ * No-repo context must fall back to user/task/topic/session, not project.
  */
 export function resolveScope(
   domain: MemoryDomain,
@@ -129,16 +140,18 @@ export function resolveScope(
 ): ScopeResolution {
   const normalized = normalizeText(content).toLowerCase();
   const reasons: string[] = [];
+  const inRepo = scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined;
 
   // Detect explicit global/user preference override
   const explicitGlobal =
-    /\b(?:global(?:ly)?|always|personally|my (?:personal|own)|in general|not (?:just|only) (?:this|the) (?:project|repo)|不管|不论|无论|个人|全局|这不只|不只是)\b/i.test(
+    hasPhrase(normalized, "不管", "不论", "无论", "个人", "全局", "这不只") ||
+    /global(?:ly)?|always|personally|my (?:personal|own)|in general|not (?:just|only) (?:this|the) (?:project|repo)/i.test(
       normalized,
     );
 
   switch (domain) {
     case "user": {
-      reasons.push("user domain → user scope");
+      reasons.push("user domain -> user scope");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.9,
@@ -149,9 +162,9 @@ export function resolveScope(
     case "project":
     case "environment":
     case "procedure": {
-      // Explicit global preference signals override project context → user scope
+      // Explicit global preference signals override project context
       if (explicitGlobal) {
-        reasons.push("explicit global preference overrides project context → user scope");
+        reasons.push("explicit global preference overrides project context -> user scope");
         return {
           scope: { kind: "user", id: scopeContext?.userId ?? "local" },
           confidence: 0.85,
@@ -159,6 +172,7 @@ export function resolveScope(
         };
       }
 
+      // Require real repository/project context for project scope
       if (scopeContext?.repositoryId !== undefined) {
         reasons.push(`using repository scope: ${scopeContext.repositoryId}`);
         return {
@@ -175,6 +189,7 @@ export function resolveScope(
           reasons,
         };
       }
+      // No repository/project context -> user scope (never "unknown-project")
       reasons.push("no project/repository context, fallback to user scope");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
@@ -184,7 +199,7 @@ export function resolveScope(
     }
 
     case "capability": {
-      reasons.push("capability domain → user scope");
+      reasons.push("capability domain -> user scope");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.8,
@@ -194,14 +209,14 @@ export function resolveScope(
 
     case "task": {
       if (scopeContext?.taskId !== undefined) {
-        reasons.push(`task domain → task scope: ${scopeContext.taskId}`);
+        reasons.push(`task domain -> task scope: ${scopeContext.taskId}`);
         return {
           scope: { kind: "task", id: scopeContext.taskId },
           confidence: 0.85,
           reasons,
         };
       }
-      reasons.push("task domain without active task → user scope");
+      reasons.push("task domain without active task -> user scope");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.5,
@@ -213,7 +228,7 @@ export function resolveScope(
       if (scopeContext?.topicIds !== undefined && scopeContext.topicIds.length > 0) {
         const topicId = scopeContext.topicIds[0];
         if (topicId !== undefined) {
-          reasons.push(`topic domain → existing topic scope: ${topicId}`);
+          reasons.push(`topic domain -> existing topic scope: ${topicId}`);
           return {
             scope: { kind: "topic", id: topicId },
             confidence: 0.7,
@@ -221,7 +236,7 @@ export function resolveScope(
           };
         }
       }
-      reasons.push("topic domain without active topic → user scope fallback");
+      reasons.push("topic domain without active topic -> user scope fallback");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.4,
@@ -230,9 +245,8 @@ export function resolveScope(
     }
 
     case "episodic": {
-      // Project events → repository scope; personal events → user scope
       if (scopeContext?.repositoryId !== undefined) {
-        reasons.push("episodic in repo → repository scope");
+        reasons.push("episodic in repo -> repository scope");
         return {
           scope: { kind: "repository", id: scopeContext.repositoryId },
           confidence: 0.8,
@@ -240,14 +254,14 @@ export function resolveScope(
         };
       }
       if (scopeContext?.projectId !== undefined) {
-        reasons.push("episodic in project → project scope");
+        reasons.push("episodic in project -> project scope");
         return {
           scope: { kind: "project", id: scopeContext.projectId },
           confidence: 0.75,
           reasons,
         };
       }
-      reasons.push("episodic without repo → user scope");
+      reasons.push("episodic without repo -> user scope");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.6,
@@ -256,7 +270,7 @@ export function resolveScope(
     }
 
     default: {
-      reasons.push("unknown domain → user scope fallback");
+      reasons.push("unknown domain -> user scope fallback");
       return {
         scope: { kind: "user", id: scopeContext?.userId ?? "local" },
         confidence: 0.3,
@@ -268,9 +282,33 @@ export function resolveScope(
 
 // ─── Cardinality Defaults ─────────────────────────────────────────
 
-function defaultCardinality(type: MemoryType): "single" | "set" | "ordered" | "event" {
+// Single-cardinality predicates
+const SINGLE_PREDICATE_SET: Set<string> = new Set([
+  "assistant_alias",
+  "user_name",
+  "response_style",
+  "language_preference",
+  "package_manager_preference",
+  "general_package_manager_preference",
+  "project_package_manager",
+  "project_build_command",
+  "project_test_command",
+  "project_integration_test_command",
+  "project_lint_command",
+  "project_typecheck_command",
+  "project_format_command",
+  "project_database",
+  "project_deployment_target",
+  "task_goal",
+  "task_blocker",
+]);
+
+function defaultCardinality(
+  type: MemoryType,
+  _predicateKey?: string,
+): "single" | "set" | "ordered" | "event" {
+  // Type-based fallback is only for event/episodic/task
   if (type === "episodic" || type === "task") return "event";
-  if (type === "preference" || type === "procedural") return "single";
   return "single";
 }
 
@@ -310,8 +348,7 @@ export function planCommit(
     ? { scope: overrides.scope, confidence: 1.0, reasons: ["explicit scope override"] }
     : resolveScope(domainResult.domain, content, type, scopeContext);
 
-  // Event prevention: episodic domain + preference type = user-scoped preference
-  // This prevents preferences said in a repo from getting repository-scoped
+  // Ensure user domain forces user scope
   const finalScope =
     domainResult.domain === "user" && scopeResult.scope.kind !== "user"
       ? { kind: "user" as const, id: scopeContext?.userId ?? "local" }
@@ -336,10 +373,6 @@ export function planCommit(
 
 // ─── Event Fingerprint ────────────────────────────────────────────
 
-/**
- * Two events are the same only if their fingerprints match exactly.
- * Events must NOT be merged by semantic similarity alone.
- */
 export interface EventFingerprint {
   readonly normalizedContent: string;
   readonly observedAt: number;
@@ -359,7 +392,6 @@ export function eventFingerprint(candidate: {
 }
 
 export function sameEventFingerprint(a: EventFingerprint, b: EventFingerprint): boolean {
-  // Source event ID matches → same source event
   if (
     a.sourceEventId !== undefined &&
     b.sourceEventId !== undefined &&
@@ -367,7 +399,6 @@ export function sameEventFingerprint(a: EventFingerprint, b: EventFingerprint): 
   ) {
     return true;
   }
-  // Content and time match within 1 second → likely the same event
   if (
     a.normalizedContent === b.normalizedContent &&
     Math.abs(a.observedAt - b.observedAt) <= 1_000

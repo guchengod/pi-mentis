@@ -10,9 +10,11 @@ export {
   deriveFactKey as deriveFactKeyNew,
 } from "./fact-key.js";
 export * from "./learning.js";
+export * from "./maintenance-intent.js";
 export * from "./offload.js";
 export * from "./pi-capture.js";
 export * from "./project-identity.js";
+export * from "./projection.js";
 export * from "./remember-coordinator.js";
 export * from "./scope-planner.js";
 export * from "./secret-detector.js";

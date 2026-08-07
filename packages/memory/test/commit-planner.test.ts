@@ -127,7 +127,7 @@ describe("planCommit", () => {
     expect(plan.scope.kind).toBe("user");
   });
 
-  it("plans build command → environment domain, repository scope", () => {
+  it("plans build command → project domain, repository scope", () => {
     const plan = planCommit("Build command is pnpm build", "fact", {
       tenantId: "local",
       userId: "u1",
@@ -135,7 +135,8 @@ describe("planCommit", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(plan.domain).toBe("environment");
+    // Build commands are project config facts, not environment facts
+    expect(plan.domain).toBe("project");
     expect(plan.scope.kind).toBe("repository");
   });
 

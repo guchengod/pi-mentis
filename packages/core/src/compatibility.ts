@@ -6,20 +6,22 @@ import { fileURLToPath } from "node:url";
 import { UnsupportedPiVersionError } from "./errors.js";
 
 export interface PiCompatibility {
-  readonly supportedVersion: "0.83.0";
-  readonly sourceTag: "v0.83.0";
-  readonly sourceCommit: "845d6ff";
+  readonly supportedVersion: "0.84.0";
+  readonly sourceTag: "v0.84.0";
+  readonly sourceCommit: "91b8e1a";
 }
 
 export const PI_COMPATIBILITY: PiCompatibility = {
-  supportedVersion: "0.83.0",
-  sourceTag: "v0.83.0",
-  sourceCommit: "845d6ff",
-};
+  supportedVersion: "0.84.0",
+  sourceTag: "v0.84.0",
+  sourceCommit: "91b8e1a",
+} as const;
 
-export function assertPiCompatibility(currentVersion: string): asserts currentVersion is "0.83.0" {
+export const PI_VERSION = PI_COMPATIBILITY.supportedVersion;
+
+export function assertPiCompatibility(currentVersion: string): void {
   if (currentVersion !== PI_COMPATIBILITY.supportedVersion) {
-    throw new UnsupportedPiVersionError(currentVersion);
+    throw new UnsupportedPiVersionError(currentVersion, PI_COMPATIBILITY.supportedVersion);
   }
 }
 

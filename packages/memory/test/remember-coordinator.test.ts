@@ -94,14 +94,14 @@ describe("project signal detection", () => {
 });
 
 describe("fact key stability", () => {
-  it("build_command predicate is detected for build content", () => {
+  it("project_build_command predicate is detected for build content", () => {
     const key = deriveFactKey("构建命令是 pnpm build", "project");
-    expect(key.predicateKey).toBe("build_command");
+    expect(key.predicateKey).toBe("project_build_command");
   });
 
-  it("package_manager predicate is detected for package manager content", () => {
+  it("project_package_manager predicate is detected for package manager content", () => {
     const key = deriveFactKey("这个项目使用 pnpm", "project");
-    expect(key.predicateKey).toBe("package_manager");
+    expect(key.predicateKey).toBe("project_package_manager");
   });
 
   it("same predicate + same domain + same subject → same factKey", () => {
@@ -149,11 +149,11 @@ describe("fact key stability", () => {
     expect(key2.predicateKey).toBeDefined();
   });
 
-  it("storage_engine fact key is consistent", () => {
+  it("project_database fact key is consistent", () => {
     const key1 = deriveFactKey("数据库使用 MySQL", "project");
     const key2 = deriveFactKey("数据库实际是 PostgreSQL", "project");
-    expect(key1.predicateKey).toBe("storage_engine");
-    expect(key2.predicateKey).toBe("storage_engine");
+    expect(key1.predicateKey).toBe("project_database");
+    expect(key2.predicateKey).toBe("project_database");
   });
 
   it("response_style fact key is detected for Chinese content", () => {

@@ -6,6 +6,73 @@ import type {
 } from "@pi-mentis/pi-mentis-core";
 import type { MaterializedView, ViewKind } from "./views.js";
 
+// ─── Ownership & Relevance Split ─────────────────────────────────
+
+export interface ResourceOwnership {
+  readonly tenantId: string | undefined;
+  readonly userId: string;
+  readonly appId: string | undefined;
+  readonly agentId: string | undefined;
+}
+
+export type RelevanceScope =
+  | { readonly kind: "global" }
+  | { readonly kind: "repository"; readonly repositoryId: string }
+  | { readonly kind: "project"; readonly projectId: string }
+  | { readonly kind: "task"; readonly taskId: string }
+  | { readonly kind: "topic"; readonly topicId: string }
+  | { readonly kind: "session"; readonly sessionId: string };
+
+export interface MentisResourceScope {
+  readonly ownership: ResourceOwnership;
+  readonly relevance: RelevanceScope;
+}
+
+export function ownershipFromContext(ctx?: PiScopeContext): ResourceOwnership {
+  return {
+    tenantId: ctx?.tenantId,
+    userId: ctx?.userId ?? "local",
+    appId: ctx?.appId,
+    agentId: ctx?.agentId,
+  };
+}
+
+// ─── Security Mode ────────────────────────────────────────────────
+
+export type MentisSecurityMode = "personal" | "team" | "multi_tenant";
+
+// ─── Access Intent ────────────────────────────────────────────────
+
+export type ResourceAccessIntent =
+  "automatic_recall" | "semantic_search" | "explicit_id" | "maintenance";
+
+export interface CrossScopeNotice {
+  readonly crossScope: boolean;
+  readonly sourceScopeKind?: string;
+  readonly sourceScopeLabel?: string;
+}
+
+// ─── Sensitivity Classification ───────────────────────────────────
+
+export type Sensitivity = "public" | "internal" | "sensitive" | "secret";
+
+export interface SensitiveClassification {
+  readonly sensitivity: Sensitivity;
+  readonly categories: readonly string[];
+  readonly confidence: number;
+}
+
+export type RemoteContentPolicy = "allow" | "redact" | "drop" | "local_only";
+
+export interface RemoteSafeContent {
+  readonly originalSensitivity: Sensitivity;
+  readonly policy: RemoteContentPolicy;
+  readonly text: string | undefined;
+  readonly redacted: boolean;
+}
+
+// ─── Memory Scope (existing) ──────────────────────────────────────
+
 export interface MemoryScope {
   readonly kind:
     | "user"
@@ -62,6 +129,9 @@ export interface MemoryRecord {
   readonly domain: MemoryDomain;
   readonly scope: MemoryScope;
   readonly scopeContext?: PiScopeContext;
+  readonly ownership?: ResourceOwnership;
+  readonly relevance?: RelevanceScope;
+  readonly sensitivity?: Sensitivity;
   readonly confidence: number;
   readonly importance: number;
   readonly authority: EvidenceAuthority;
@@ -155,6 +225,7 @@ export interface MemoryQuery {
   readonly scopeContext?: PiScopeContext;
   readonly limit?: number;
   readonly temporalMode?: "current" | "historical" | "all";
+  readonly accessIntent?: ResourceAccessIntent;
 }
 
 export interface MemorySearchOptions extends OperationOptions {
@@ -163,6 +234,9 @@ export interface MemorySearchOptions extends OperationOptions {
 
 export interface MemoryGetOptions extends OperationOptions {
   readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+  readonly accessIntent?: ResourceAccessIntent;
+  /** Security mode override for access control */
+  readonly securityMode?: MentisSecurityMode;
 }
 
 export interface MemoryMutationOptions extends OperationOptions {
@@ -350,6 +424,10 @@ export interface ArtifactRecord {
   readonly id: string;
   readonly episodeId: string;
   readonly securityNamespace: string;
+  readonly ownership?: ResourceOwnership;
+  readonly relevance?: RelevanceScope;
+  readonly sourceSessionId?: string;
+  readonly sourceToolName?: string;
   readonly eventId?: string;
   readonly toolCallId?: string;
   readonly mediaType: string;
@@ -362,6 +440,13 @@ export interface ArtifactRecord {
   readonly failure?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
+  readonly captureIntegrity?: {
+    readonly complete: boolean;
+    readonly lossy: boolean;
+    readonly capturedBytes: number;
+    readonly storedBytes: number;
+    readonly truncationStage?: "tool" | "host" | "extension" | "unknown";
+  };
 }
 
 export interface ArtifactChunk {
@@ -372,10 +457,34 @@ export interface ArtifactChunk {
   readonly contentHash: string;
 }
 
+export interface ArtifactSecurityScope {
+  readonly tenantId?: string;
+  readonly userId: string;
+  readonly appId?: string;
+  readonly agentId?: string;
+  readonly repositoryId?: string;
+  readonly projectId?: string;
+  readonly taskId?: string;
+  readonly sessionId?: string;
+  readonly scopeKind: "user" | "repository" | "project" | "task" | "session";
+  readonly scopeId: string;
+}
+
 export interface ArtifactReadOptions extends OperationOptions {
   readonly scopeContext?: PiScopeContext;
+  readonly securityScope?: ArtifactSecurityScope;
   readonly offset?: number;
   readonly length?: number;
+}
+
+export interface ArtifactQueryHit {
+  readonly resourceType: "artifact";
+  readonly artifactId: string;
+  readonly chunkIndex: number;
+  readonly byteStart: number;
+  readonly byteEnd: number;
+  readonly match: "exact" | "lexical";
+  readonly content: string;
 }
 
 export interface ArtifactRange {

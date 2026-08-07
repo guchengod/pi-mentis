@@ -8,6 +8,7 @@ import {
   TaskPriority,
   contextFingerprint,
   getOrCreateRuntime,
+  PI_VERSION,
   resetGlobalRuntime,
   type Clock,
   type FastMentisContext,
@@ -30,7 +31,7 @@ function context(topicIds: readonly string[]): FastMentisContext {
     conversation: { sessionId: "s", sessionMode: "persistent" },
     situation: { topicIds, interactionMode: "conversation", startedAt: 1 },
     capability: {
-      piVersion: "0.83.0",
+      piVersion: PI_VERSION,
       extensionsHash: "e",
       skillsHash: "s",
       mcpHash: "m",

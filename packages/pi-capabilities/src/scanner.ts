@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { assertPiCompatibility, contentHash, stableHash } from "@pi-mentis/pi-mentis-core";
+import { assertPiCompatibility, contentHash, stableHash, PI_VERSION } from "@pi-mentis/pi-mentis-core";
 import { glob } from "glob";
 
 import type { CapabilityRecord } from "./types.js";
@@ -41,7 +41,7 @@ function record(
     qualifiedName: `${packageName}:${name}`,
     description,
     requirements: [],
-    constraints: ["Pi v0.83.0"],
+    constraints: [`Pi ${PI_VERSION}`],
     examples: [],
     packageName,
     packageVersion,

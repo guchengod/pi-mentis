@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   EvidenceAuthority,
   MentisContextResolver,
+  PI_COMPATIBILITY,
   type FastMentisContext,
   type SearchHit,
 } from "@pi-mentis/pi-mentis-core";
@@ -46,7 +47,7 @@ const fastContext: FastMentisContext = {
     packageManager: "pnpm",
   },
   capability: {
-    piVersion: "0.83.0",
+    piVersion: PI_COMPATIBILITY.supportedVersion,
     extensionsHash: "extensions",
     skillsHash: "skills",
     mcpHash: "mcp",
