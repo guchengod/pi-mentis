@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis-memory",
-  "version": ".0 1 29.2",
+  "version": "0.1.30",
   "description": "Standalone Pi Mentis memory extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",
@@ -41,12 +41,13 @@
     ]
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec",
+    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec --external proper-lockfile",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@zvec/zvec": "0.6.0"
+    "@zvec/zvec": "0.6.0",
+    "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
     "@pi-mentis/pi-mentis-core": "workspace:*",
