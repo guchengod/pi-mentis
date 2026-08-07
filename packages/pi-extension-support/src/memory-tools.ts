@@ -200,6 +200,7 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       "When the user pastes a Mentis-returned record ID and asks about its content, history, corrections, or evidence, use search_memory with the id parameter for anchored retrieval.",
       "Use id for exact retrieval and id plus query for history, evidence, correction, or conflicts.",
       "Do not search automatically at every session start, for trivial queries, or merely to verify a successful commit.",
+      "A semantic query search miss does not prove a memory was never stored. If storage existence matters and an exact ID is available, use ID lookup. Otherwise state only that the current search did not retrieve it — never claim \"it was not written\" solely because a query search returned no results.",
     ],
     async execute(_toolCallId, toolParams, abortSignal) {
       const query = typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;

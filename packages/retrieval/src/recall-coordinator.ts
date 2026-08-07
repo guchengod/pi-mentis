@@ -696,6 +696,9 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                 ? []
                 : [{ kind: "task" as const, id: scopeContext.taskId }]),
               { kind: "user" as const, id: scopeContext.userId },
+              ...(scopeContext.topicIds ?? []).map(
+                (topicId) => ({ kind: "topic" as const, id: topicId }),
+              ),
             ],
             memoryScopeContext: scopeContext,
             ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),

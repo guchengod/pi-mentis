@@ -16,3 +16,4 @@ export * from "./semantic-query-planner.js";
 export * from "./recall-coordinator.js";
 export * from "./resource-reference-resolver.js";
 export * from "./service.js";
+export * from "./trace-recall-target.js";
