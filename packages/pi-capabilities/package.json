@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-pi-capabilities",
-  "version": ".0 1 2.1",
+  "version": ".0 1 2.2",
   "description": "Installed Pi v0.83.0 capability indexing and gap planning",
   "type": "module",
   "sideEffects": false,

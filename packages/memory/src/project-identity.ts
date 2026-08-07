@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import path from "node:path";
+import nodePath from "node:path";
 
 import { contentHash, stableHash } from "@pi-mentis/pi-mentis-core";
 
@@ -38,10 +38,10 @@ async function exists(target: string): Promise<boolean> {
 }
 
 async function findRepositoryRoot(cwd: string): Promise<string | undefined> {
-  let current = path.resolve(cwd);
+  let current = nodePath.resolve(cwd);
   while (true) {
-    if (await exists(path.join(current, ".git"))) return current;
-    const parent = path.dirname(current);
+    if (await exists(nodePath.join(current, ".git"))) return current;
+    const parent = nodePath.dirname(current);
     if (parent === current) return undefined;
     current = parent;
   }
@@ -67,14 +67,14 @@ async function resolveGitDirectory(
   repositoryRoot: string | undefined,
 ): Promise<string | undefined> {
   if (repositoryRoot === undefined) return undefined;
-  const marker = path.join(repositoryRoot, ".git");
+  const marker = nodePath.join(repositoryRoot, ".git");
   try {
     const metadata = await stat(marker);
     if (metadata.isDirectory()) return marker;
     if (!metadata.isFile()) return undefined;
     const pointer = await readFile(marker, "utf8");
     const gitdir = pointer.match(/^gitdir:\s*(.+)$/m)?.[1]?.trim();
-    return gitdir === undefined ? undefined : path.resolve(repositoryRoot, gitdir);
+    return gitdir === undefined ? undefined : nodePath.resolve(repositoryRoot, gitdir);
   } catch {
     return undefined;
   }
@@ -129,21 +129,21 @@ export async function resolvePiProjectIdentity(
   cwd: string,
   explicitProjectId?: string,
 ): Promise<PiProjectIdentity> {
-  const workspacePath = path.resolve(cwd);
+  const workspacePath = nodePath.resolve(cwd);
   const repositoryRoot = await findRepositoryRoot(workspacePath);
   const gitDirectory = await resolveGitDirectory(repositoryRoot);
   const commonDirectoryPointer =
     gitDirectory === undefined
       ? undefined
-      : (await optionalText(path.join(gitDirectory, "commondir")))?.trim();
+      : (await optionalText(nodePath.join(gitDirectory, "commondir")))?.trim();
   const gitCommonDirectory =
     gitDirectory === undefined
       ? undefined
       : commonDirectoryPointer === undefined
         ? gitDirectory
-        : path.resolve(gitDirectory, commonDirectoryPointer);
+        : nodePath.resolve(gitDirectory, commonDirectoryPointer);
   const head =
-    gitDirectory === undefined ? undefined : await optionalText(path.join(gitDirectory, "HEAD"));
+    gitDirectory === undefined ? undefined : await optionalText(nodePath.join(gitDirectory, "HEAD"));
   const headRef = head?.match(/^ref:\s*(.+)$/)?.[1]?.trim();
   const branchName = headRef?.replace(/^refs\/heads\//, "");
   const looseCommitId =
@@ -151,11 +151,11 @@ export async function resolvePiProjectIdentity(
       ? head?.trim()
       : gitDirectory === undefined
         ? undefined
-        : (await optionalText(path.join(gitDirectory, headRef)))?.trim();
+        : (await optionalText(nodePath.join(gitDirectory, headRef)))?.trim();
   const packedRefs =
     looseCommitId !== undefined || gitDirectory === undefined
       ? undefined
-      : await optionalText(path.join(gitDirectory, "packed-refs"));
+      : await optionalText(nodePath.join(gitDirectory, "packed-refs"));
   const commitId =
     looseCommitId ??
     (headRef === undefined
@@ -169,17 +169,17 @@ export async function resolvePiProjectIdentity(
     await Promise.all([
       gitCommonDirectory === undefined
         ? Promise.resolve(undefined)
-        : optionalText(path.join(gitCommonDirectory, "config")),
+        : optionalText(nodePath.join(gitCommonDirectory, "config")),
       gitCommonDirectory === undefined
         ? Promise.resolve(undefined)
-        : optionalText(path.join(gitCommonDirectory, "logs", "HEAD")),
-      optionalText(path.join(manifestRoot, "package.json")),
-      optionalText(path.join(manifestRoot, "go.mod")),
-      optionalText(path.join(manifestRoot, "pyproject.toml")),
-      optionalText(path.join(manifestRoot, "Cargo.toml")),
+        : optionalText(nodePath.join(gitCommonDirectory, "logs", "HEAD")),
+      optionalText(nodePath.join(manifestRoot, "package.json")),
+      optionalText(nodePath.join(manifestRoot, "go.mod")),
+      optionalText(nodePath.join(manifestRoot, "pyproject.toml")),
+      optionalText(nodePath.join(manifestRoot, "Cargo.toml")),
       Promise.all(
         ["pnpm-lock.yaml", "yarn.lock", "package-lock.json", "bun.lock", "bun.lockb"].map(
-          async (name) => ((await exists(path.join(manifestRoot, name))) ? name : undefined),
+          async (name) => ((await exists(nodePath.join(manifestRoot, name))) ? name : undefined),
         ),
       ),
     ]);
@@ -205,7 +205,7 @@ export async function resolvePiProjectIdentity(
         ? `history:${firstCommit}`
         : manifestHash === undefined
           ? undefined
-          : `manifest-path:${manifestHash}:${path.basename(repositoryRoot ?? workspacePath)}`;
+          : `manifest-path:${manifestHash}:${nodePath.basename(repositoryRoot ?? workspacePath)}`;
   const repositoryId =
     explicitProjectId !== undefined
       ? `repo:explicit:${stableHash("explicit-repository:v1", explicitProjectId)}`
@@ -221,7 +221,7 @@ export async function resolvePiProjectIdentity(
       ? `project:explicit:${stableHash("explicit-project:v1", explicitProjectId)}`
       : repositoryId === undefined
         ? undefined
-        : `project:${stableHash("pi-project:v1", repositoryId, manifestName ?? path.basename(manifestRoot))}`;
+        : `project:${stableHash("pi-project:v1", repositoryId, manifestName ?? nodePath.basename(manifestRoot))}`;
   const packageManager = lockfiles.includes("pnpm-lock.yaml")
     ? "pnpm"
     : lockfiles.includes("yarn.lock")

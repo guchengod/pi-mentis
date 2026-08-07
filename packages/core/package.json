@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-core",
-  "version": ".0 1 2.1",
+  "version": ".0 1 2.2",
   "description": "Core contracts, configuration, errors, runtime registry, and deterministic identities",
   "type": "module",
   "sideEffects": false,

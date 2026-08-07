@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
+import nodePath from "node:path";
 
 import {
   contentHash,
@@ -71,12 +71,12 @@ function scalarRecord(
 }
 
 function isWithin(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
+  const relative = nodePath.relative(root, target);
   return (
     relative !== "" &&
     relative !== ".." &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
+    !relative.startsWith(`..${nodePath.sep}`) &&
+    !nodePath.isAbsolute(relative)
   );
 }
 
@@ -273,9 +273,9 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     if (existing?.state === "ready" && existing.securityNamespace === episode.securityNamespace) {
       return existing;
     }
-    const directory = path.join("artifacts", id.slice(0, 2), id);
-    const relativePath = path.join(directory, "manifest.json");
-    const targetDirectory = path.join(this.#store.rootDir, directory);
+    const directory = nodePath.join("artifacts", id.slice(0, 2), id);
+    const relativePath = nodePath.join(directory, "manifest.json");
+    const targetDirectory = nodePath.join(this.#store.rootDir, directory);
     if (!isWithin(this.#store.rootDir, targetDirectory)) {
       throw new Error("Artifact path escaped storage root");
     }
@@ -309,17 +309,17 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     const persisting = { ...base, state: "persisting" as const, updatedAt: this.#clock.now() };
     await this.#persistArtifact(persisting);
     try {
-      await mkdir(path.join(targetDirectory, "chunks"), { recursive: true, mode: 0o700 });
+      await mkdir(nodePath.join(targetDirectory, "chunks"), { recursive: true, mode: 0o700 });
       const bytes = Buffer.from(input.content, "utf8");
       const chunks = [];
       for (let offset = 0, ordinal = 0; offset < bytes.length; ordinal++) {
         const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + ARTIFACT_CHUNK_BYTES));
-        const chunkRelativePath = path.join(
+        const chunkRelativePath = nodePath.join(
           directory,
           "chunks",
           `${String(ordinal).padStart(6, "0")}.bin`,
         );
-        const chunkTarget = path.join(this.#store.rootDir, chunkRelativePath);
+        const chunkTarget = nodePath.join(this.#store.rootDir, chunkRelativePath);
         const temporary = `${chunkTarget}.${process.pid}.tmp`;
         await writeFile(temporary, chunk, { mode: 0o600 });
         await rename(temporary, chunkTarget);
@@ -338,7 +338,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
         chunks,
         updatedAt: this.#clock.now(),
       };
-      const manifestTarget = path.join(this.#store.rootDir, relativePath);
+      const manifestTarget = nodePath.join(this.#store.rootDir, relativePath);
       const temporaryManifest = `${manifestTarget}.${process.pid}.tmp`;
       await writeFile(temporaryManifest, JSON.stringify(ready), { encoding: "utf8", mode: 0o600 });
       await rename(temporaryManifest, manifestTarget);
@@ -498,7 +498,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     };
 
     if (artifact.chunks.length === 0) {
-      const target = path.join(this.#store.rootDir, artifact.relativePath);
+      const target = nodePath.join(this.#store.rootDir, artifact.relativePath);
       if (!isWithin(this.#store.rootDir, target))
         return { hits: [], crossScope: access.crossScope, deniedReason: undefined };
       const bytes = await readFile(target);
@@ -509,7 +509,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     } else {
       const ordered = [...artifact.chunks].sort((left, right) => left.ordinal - right.ordinal);
       for (const chunk of ordered) {
-        const target = path.join(this.#store.rootDir, chunk.relativePath);
+        const target = nodePath.join(this.#store.rootDir, chunk.relativePath);
         if (!isWithin(this.#store.rootDir, target)) continue;
         const bytes = await readFile(target);
         if (bytes.length !== chunk.byteLength || contentHash(bytes) !== chunk.contentHash) {
@@ -581,7 +581,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     const end = Math.min(artifact.byteLength, offset + length);
     if (offset >= end) return { bytes: Buffer.alloc(0), baseOffset: offset };
     if (artifact.chunks.length === 0) {
-      const legacy = path.join(this.#store.rootDir, artifact.relativePath);
+      const legacy = nodePath.join(this.#store.rootDir, artifact.relativePath);
       if (!isWithin(this.#store.rootDir, legacy)) return undefined;
       const complete = await readFile(legacy);
       if (
@@ -603,7 +603,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
       const chunkEnd = chunk.byteOffset + chunk.byteLength;
       if (chunkEnd <= offset || chunk.byteOffset >= end) continue;
       throwIfAborted(options.signal, "artifact-range-read");
-      const target = path.join(this.#store.rootDir, chunk.relativePath);
+      const target = nodePath.join(this.#store.rootDir, chunk.relativePath);
       if (!isWithin(this.#store.rootDir, target)) return undefined;
       const bytes = await readFile(target);
       if (bytes.length !== chunk.byteLength || contentHash(bytes) !== chunk.contentHash) {
@@ -629,7 +629,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     if (artifact.byteLength === 0) {
       buffers.push(Buffer.alloc(0));
     } else if (artifact.chunks.length === 0) {
-      const legacy = path.join(this.#store.rootDir, artifact.relativePath);
+      const legacy = nodePath.join(this.#store.rootDir, artifact.relativePath);
       if (!isWithin(this.#store.rootDir, legacy)) return undefined;
       buffers.push(await readFile(legacy));
     } else {
@@ -640,7 +640,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
         if (chunk.ordinal !== expectedOrdinal || chunk.byteOffset !== expectedOffset) {
           throw new Error(`Artifact ${artifact.id} chunk manifest is not contiguous`);
         }
-        const target = path.join(this.#store.rootDir, chunk.relativePath);
+        const target = nodePath.join(this.#store.rootDir, chunk.relativePath);
         if (!isWithin(this.#store.rootDir, target)) return undefined;
         const bytes = await readFile(target);
         if (bytes.length !== chunk.byteLength || contentHash(bytes) !== chunk.contentHash) {
@@ -676,7 +676,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
       }
       const artifact = JSON.parse(payload) as ArtifactRecord;
       try {
-        const manifestPath = path.join(this.#store.rootDir, artifact.relativePath);
+        const manifestPath = nodePath.join(this.#store.rootDir, artifact.relativePath);
         if (!isWithin(this.#store.rootDir, manifestPath))
           throw new Error("Artifact manifest escaped storage root");
         const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ArtifactRecord;
@@ -710,14 +710,14 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
     throwIfAborted(options.signal, "artifact-delete");
     const artifact = await this.getArtifact(id, options);
     if (artifact === undefined) return false;
-    const target = path.join(this.#store.rootDir, artifact.relativePath);
-    const expectedDirectory = path.join(this.#store.rootDir, "artifacts", id.slice(0, 2), id);
-    const chunked = artifact.chunks.length > 0 || path.basename(target) === "manifest.json";
+    const target = nodePath.join(this.#store.rootDir, artifact.relativePath);
+    const expectedDirectory = nodePath.join(this.#store.rootDir, "artifacts", id.slice(0, 2), id);
+    const chunked = artifact.chunks.length > 0 || nodePath.basename(target) === "manifest.json";
     if (chunked) {
       if (!isWithin(expectedDirectory, target)) return false;
     } else if (
-      !isWithin(path.join(this.#store.rootDir, "artifacts"), target) ||
-      !path.basename(target).startsWith(id)
+      !isWithin(nodePath.join(this.#store.rootDir, "artifacts"), target) ||
+      !nodePath.basename(target).startsWith(id)
     )
       return false;
     await this.#persistArtifact({ ...artifact, state: "deleted", updatedAt: this.#clock.now() });
@@ -867,7 +867,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
       carry = text.slice(-1024);
     };
     if (artifact.chunks.length === 0) {
-      const target = path.join(this.#store.rootDir, artifact.relativePath);
+      const target = nodePath.join(this.#store.rootDir, artifact.relativePath);
       if (!isWithin(this.#store.rootDir, target)) return [];
       const bytes = await readFile(target);
       if (bytes.length !== artifact.byteLength || contentHash(bytes) !== artifact.contentHash)
@@ -880,7 +880,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
         throwIfAborted(options.signal, "artifact-search");
         if (chunk.ordinal !== expectedOrdinal || chunk.byteOffset !== expectedOffset)
           throw new Error(`Artifact ${id} chunk manifest is not contiguous`);
-        const target = path.join(this.#store.rootDir, chunk.relativePath);
+        const target = nodePath.join(this.#store.rootDir, chunk.relativePath);
         if (!isWithin(this.#store.rootDir, target)) return [];
         const bytes = await readFile(target);
         if (bytes.length !== chunk.byteLength || contentHash(bytes) !== chunk.contentHash)

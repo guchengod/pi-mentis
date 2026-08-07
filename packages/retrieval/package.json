@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-retrieval",
-  "version": ".0 1 2.1",
+  "version": ".0 1 2.2",
   "description": "Knowledge-first fusion, RRF, authority, Rerank, MMR, and context budgets",
   "type": "module",
   "sideEffects": false,

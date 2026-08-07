@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-pi-extension-support",
-  "version": ".0 1 2.1",
+  "version": ".0 1 2.2",
   "description": "Shared Pi extension compatibility helpers for Pi Mentis",
   "type": "module",
   "sideEffects": false,
