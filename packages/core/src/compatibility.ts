@@ -6,22 +6,44 @@ import { fileURLToPath } from "node:url";
 import { UnsupportedPiVersionError } from "./errors.js";
 
 export interface PiCompatibility {
-  readonly supportedVersion: "0.84.0";
-  readonly sourceTag: "v0.84.0";
-  readonly sourceCommit: "91b8e1a";
+  readonly minVersion: string;
+  readonly sourceTag: string;
+  readonly sourceCommit: string;
 }
 
 export const PI_COMPATIBILITY: PiCompatibility = {
-  supportedVersion: "0.84.0",
+  minVersion: "0.84.0",
   sourceTag: "v0.84.0",
   sourceCommit: "91b8e1a",
 } as const;
 
-export const PI_VERSION = PI_COMPATIBILITY.supportedVersion;
+export const PI_VERSION = PI_COMPATIBILITY.minVersion;
+
+function parseSemver(version: string): [number, number, number] {
+  const parts = version.split(".").map((s) => {
+    const n = Number(s);
+    if (!Number.isInteger(n) || n < 0) return NaN;
+    return n;
+  });
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+    throw new UnsupportedPiVersionError(version, PI_COMPATIBILITY.minVersion);
+  }
+  return parts as [number, number, number];
+}
+
+export function isPiVersionSupported(currentVersion: string, minVersion: string): boolean {
+  const [cMajor, cMinor, cPatch] = parseSemver(currentVersion);
+  const [mMajor, mMinor, mPatch] = parseSemver(minVersion);
+  if (cMajor > mMajor) return true;
+  if (cMajor < mMajor) return false;
+  if (cMinor > mMinor) return true;
+  if (cMinor < mMinor) return false;
+  return cPatch >= mPatch;
+}
 
 export function assertPiCompatibility(currentVersion: string): void {
-  if (currentVersion !== PI_COMPATIBILITY.supportedVersion) {
-    throw new UnsupportedPiVersionError(currentVersion, PI_COMPATIBILITY.supportedVersion);
+  if (!isPiVersionSupported(currentVersion, PI_COMPATIBILITY.minVersion)) {
+    throw new UnsupportedPiVersionError(currentVersion, PI_COMPATIBILITY.minVersion);
   }
 }
 

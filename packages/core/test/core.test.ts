@@ -162,8 +162,10 @@ describe("faceted context resolution", () => {
 });
 
 describe("Pi compatibility and tool surface", () => {
-  it("locks Pi to the supported version before initialization", () => {
-    expect(() => assertPiCompatibility(PI_COMPATIBILITY.supportedVersion)).not.toThrow();
+  it("accepts Pi at or above the minimum required version", () => {
+    expect(() => assertPiCompatibility(PI_COMPATIBILITY.minVersion)).not.toThrow();
+    expect(() => assertPiCompatibility("0.85.0")).not.toThrow();
+    expect(() => assertPiCompatibility("1.0.0")).not.toThrow();
     expect(() => assertPiCompatibility("0.82.2")).toThrow(UnsupportedPiVersionError);
     try {
       assertPiCompatibility("0.81.0");
@@ -172,7 +174,7 @@ describe("Pi compatibility and tool surface", () => {
         code: "UNSUPPORTED_PI_VERSION",
         details: {
           currentVersion: "0.81.0",
-          supportedVersion: PI_COMPATIBILITY.supportedVersion,
+          minVersion: PI_COMPATIBILITY.minVersion,
           initializationStopped: true,
         },
       });

@@ -1,7 +1,7 @@
 {
   "name": "@galvinsan/pi-mentis-memory",
-  "version": "0.1.26",
-  "description": "Standalone Pi Mentis memory extension for Pi v0.83.0",
+  "version": "0.1.27",
+  "description": "Standalone Pi Mentis memory extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",
   "repository": {

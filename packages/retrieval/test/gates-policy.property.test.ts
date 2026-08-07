@@ -47,7 +47,7 @@ const fastContext: FastMentisContext = {
     packageManager: "pnpm",
   },
   capability: {
-    piVersion: PI_COMPATIBILITY.supportedVersion,
+    piVersion: PI_COMPATIBILITY.minVersion,
     extensionsHash: "extensions",
     skillsHash: "skills",
     mcpHash: "mcp",

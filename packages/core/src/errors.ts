@@ -124,27 +124,27 @@ export const EmbeddingMigrationError = defineError(
 
 export class UnsupportedPiVersionError extends MentisError {
   readonly currentVersion: string;
-  readonly supportedVersion: string;
+  readonly minVersion: string;
   readonly installCommand: string;
 
-  constructor(currentVersion: string, supportedVersion: string) {
-    const installCommand = `pnpm add -E @earendil-works/pi-coding-agent@${supportedVersion}`;
+  constructor(currentVersion: string, minVersion: string) {
+    const installCommand = `pnpm add -E @earendil-works/pi-coding-agent@^${minVersion}`;
     super(
       "UNSUPPORTED_PI_VERSION",
-      `Detected Pi ${currentVersion}; Pi Mentis supports only ${supportedVersion}. Install with: ${installCommand}. Initialization stopped before tool registration, Zvec open, or background startup.`,
+      `Detected Pi ${currentVersion}; Pi Mentis requires at least ${minVersion}. Update Pi with: ${installCommand}. Initialization stopped before tool registration, Zvec open, or background startup.`,
       {
         operation: "pi-compatibility-check",
         retryable: false,
         details: {
           currentVersion,
-          supportedVersion,
+          minVersion,
           installCommand,
           initializationStopped: true,
         },
       },
     );
     this.currentVersion = currentVersion;
-    this.supportedVersion = supportedVersion;
+    this.minVersion = minVersion;
     this.installCommand = installCommand;
   }
 }

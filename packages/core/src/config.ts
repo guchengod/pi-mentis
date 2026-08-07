@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { ConfigurationError } from "./errors.js";
 import { resolveStorageRoot, globalConfigPath } from "./mentis-home.js";
-import { PI_VERSION } from "./compatibility.js";
+import { PI_VERSION, isPiVersionSupported } from "./compatibility.js";
 
 export interface EmbeddingBatchPolicy {
   readonly maxItems: number;
@@ -48,7 +48,7 @@ export interface SiliconFlowConfig {
 }
 
 export interface RuntimeConfig {
-  readonly piVersion: typeof PI_VERSION;
+  readonly piVersion: string;
 }
 
 export interface KnowledgeConfig {
@@ -325,8 +325,8 @@ function requireRange(name: string, value: number, minimum: number, maximum: num
 }
 
 export function validateConfig(config: PiMentisConfig): PiMentisConfig {
-  if (config.runtime.piVersion !== PI_VERSION) {
-    throw new ConfigurationError(`runtime.piVersion must be exactly ${PI_VERSION}`, {
+  if (!isPiVersionSupported(config.runtime.piVersion, PI_VERSION)) {
+    throw new ConfigurationError(`runtime.piVersion must be at least ${PI_VERSION}; found ${config.runtime.piVersion}`, {
       operation: "configuration-validate",
       retryable: false,
     });
@@ -551,8 +551,12 @@ export async function loadConfig(
       typeof error === "object" && error !== null && "code" in error
         ? (error as { readonly code?: unknown }).code
         : undefined;
-    if (code === "ENOENT")
-      return validateConfig(applySiliconFlowEnvironment(defaults, environment));
+    if (code === "ENOENT") {
+      const resolved = validateConfig(applySiliconFlowEnvironment(defaults, environment));
+      await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
+      await writeFile(filename, JSON.stringify(resolved, null, 2), { mode: 0o600 });
+      return resolved;
+    }
     throw new ConfigurationError(`Unable to read Pi Mentis config ${filename}`, {
       operation: "configuration-load",
       retryable: false,
