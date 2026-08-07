@@ -5,8 +5,8 @@
  * the question. Always run a cheap Fast Recall, then decide based on what the
  * system actually found.
  *
- * Keywords and intent signals are WEAK boosters only (≤0.15 weight).
- * Task continuity, scope affinity, and actual candidate similarity dominate.
+ * Semantic intent is planned from the shared query embedding in
+ * SemanticQueryPlanner. This module only retains structural fast-lane scoring.
  */
 
 // ─── Intent Signals (weak, ≤0.15 weight) ──────────────────────────
@@ -31,9 +31,8 @@ export type RecallIntent =
 export type IntentScores = Record<RecallIntent, number>;
 
 /**
- * Classify intent with SOFT scores (not hard decisions).
- * Each intent gets a 0-1 score. Multiple intents can score >0.
- * These scores only boost candidate scores by at most 0.15.
+ * Backward-compatible structural signal surface. Semantic classifications are
+ * intentionally zero here; callers must use SemanticQueryPlanner.
  */
 export function classifyIntentScores(prompt: string): IntentScores {
   const normalized = prompt.toLowerCase().trim();
@@ -54,118 +53,6 @@ export function classifyIntentScores(prompt: string): IntentScores {
     scores["no_recall"] = 1;
     scores["current_input_only"] = 1;
     return scores as IntentScores;
-  }
-
-  // Greetings / simple operations → current_input_only
-  if (/^(?:你好|hi|hello|hey|thanks|thank you|ok|好的)[\s!！。，,.]*$/i.test(normalized)) {
-    scores["current_input_only"] = 0.9;
-    scores["no_recall"] = 0.8;
-    return scores as IntentScores;
-  }
-
-  // Calculations / pure translations → no recall needed
-  if (
-    /^(?:计算|translate|convert|翻译|what is \d+[\s+/*-]+\d+|tell me about\s+\w+$)/i.test(
-      normalized,
-    )
-  ) {
-    scores["current_input_only"] = 0.7;
-    scores["no_recall"] = 0.6;
-    return scores as IntentScores;
-  }
-
-  // ─── Weak keyword signals (0.1-0.7, not hard gates) ──────────
-
-  // User preference: 我(喜欢|习惯|偏好...)
-  if (
-    /我(?:喜欢|习惯|偏好|一般|平时|经常|总是)|i (?:prefer|like|usually|always|tend to)|my (?:preference|style|habit)/i.test(
-      normalized,
-    )
-  ) {
-    scores["user_preference"] = Math.max(scores["user_preference"] ?? 0, 0.6);
-  }
-
-  // ─── Agent profile: 你叫什么 / 你的名字 / 怎么称呼你 ───
-  if (
-    /你(?:叫|是)什?么名?字?|你的名?字|怎么称呼你|(?:what'?s? )?your name|call yourself/i.test(
-      normalized,
-    )
-  ) {
-    scores["agent_profile"] = 0.85;
-  }
-
-  // ─── User profile: 我叫什么 / 我的名字 ───
-  if (/我(?:叫|是)什?么名?字?|我的名?字|what'?s? my name|who am i/i.test(normalized)) {
-    scores["user_profile"] = 0.85;
-  }
-
-  // ─── Memory lookup: 记忆(?:中的|里)|remember|recall from memory ───
-  if (
-    /记忆(?:中的|里的?|过的?)|(?:remember|recall)(?:.{0,10})(?:from|in).{0,5}memory|记忆中/i.test(
-      normalized,
-    )
-  ) {
-    scores["explicit_memory_lookup"] = 0.8;
-  }
-
-  // ─── Credential reference: 凭据|密钥|token|密码在(?:哪里|哪) ───
-  if (
-    /(?:密码|凭据|凭证|token|令牌|密钥).{0,5}(?:在哪|哪里|怎么|位置)|where.*(?:credentials?|token|secret|key)|credential.*reference/i.test(
-      normalized,
-    )
-  ) {
-    scores["credential_reference"] = 0.9;
-  }
-
-  // ─── Knowledge lookup: explicit knowledge questions ───
-  if (
-    /(?:how does|what is|how to|documentation|文档|spec|规范|protocol|协议|oauth|实现|怎么.*实现)/i.test(
-      normalized,
-    )
-  ) {
-    scores["knowledge_lookup"] = 0.6;
-  }
-
-  // Task continuation: 继续|接着|上次的任务...
-  if (/继续|接着|上次的|未完|continue|last task|unfinished|resume/i.test(normalized)) {
-    scores["task_continuation"] = Math.max(scores["task_continuation"] ?? 0, 0.6);
-  }
-
-  // Historical reason: 为什么|原因|之前|当时...
-  if (
-    /为什么|原因|是怎么|上次|之前|当时|当初|why|reason|last time|before|previous|how did/i.test(
-      normalized,
-    )
-  ) {
-    scores["historical_reason"] = Math.max(scores["historical_reason"] ?? 0, 0.5);
-  }
-
-  // Procedure: 怎么做|步骤|流程|how to|怎么部署...
-  if (
-    /怎么做|步骤|流程|how (?:to|do|can)|procedure|steps|workflow|怎么(?:部署|配置|安装|设置|构建)/i.test(
-      normalized,
-    )
-  ) {
-    scores["procedure_reuse"] = Math.max(scores["procedure_reuse"] ?? 0, 0.5);
-  }
-
-  // Project state: 这个项目|项目(状态|配置...)|project...
-  if (
-    /这个项目|当前项目|项目(?:状态|配置|架构|情况|怎么样)|project (?:state|config|status|documentation|api)/i.test(
-      normalized,
-    )
-  ) {
-    scores["project_state"] = Math.max(scores["project_state"] ?? 0, 0.5);
-  }
-
-  // Capability: 能不能|可以吗|支持吗|can you...
-  if (/能不能|可以(?:.{0,5})?吗|支持(?:.{0,5})?吗|can (?:you|it)|capable/i.test(normalized)) {
-    scores["capability_recall"] = Math.max(scores["capability_recall"] ?? 0, 0.4);
-  }
-
-  // Topic: broader references
-  if (/(?:NAS|预算|配置|方案|计划|架构|存储|部署|那个|那种|ECC|低功耗)/i.test(normalized)) {
-    scores["topic_recall"] = Math.max(scores["topic_recall"] ?? 0, 0.3);
   }
 
   return scores as IntentScores;
@@ -553,8 +440,7 @@ export interface RecallSignals {
 /**
  * ALWAYS-ON Fast Recall: every non-command, non-trivial input triggers recall.
  *
- * Keywords are NOT used as gates. They are only used in `classifyIntentScores`
- * as weak boosters for candidate scoring.
+ * Semantic memory need is decided after embedding by SemanticQueryPlanner.
  */
 export function decideRecall(signals: RecallSignals): RecallDecision {
   const prompt = signals.prompt.trim();
@@ -579,18 +465,6 @@ export function decideRecall(signals: RecallSignals): RecallDecision {
       allowRemoteEmbedding: false,
       allowRerank: false,
       reason: "insufficient-query-signal",
-    };
-  }
-
-  // Pure greetings — skip
-  if (/^(?:你好|hi|hello|hey|thanks|thank you|ok|好的)[\s!！。，,.]*$/i.test(prompt)) {
-    return {
-      shouldRecall: false,
-      sources: [],
-      budgetTokens: 0,
-      allowRemoteEmbedding: false,
-      allowRerank: false,
-      reason: "greeting",
     };
   }
 

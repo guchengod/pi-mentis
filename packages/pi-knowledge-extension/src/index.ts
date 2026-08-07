@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import path from "node:path";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -378,10 +379,11 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
     config = await loadConfig(process.cwd());
   } catch (err) {
     initError = err instanceof Error ? err : new Error(String(err));
+    const initMessage = initError.message;
     pi.on("session_start", (_event, ctx) => {
       notifyWhenUiAvailable(
         ctx,
-        `Pi Mentis knowledge extension failed to initialize: ${initError!.message}`,
+        `Pi Mentis knowledge extension failed to initialize: ${initMessage}`,
         "error",
       );
     });
@@ -437,9 +439,14 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
     initialize: async () => {
       const knowledge = runtime.getKnowledge<KnowledgeService>();
       const reranker = runtime.getReranker<RerankProvider>();
+      const embedding = runtime.getEmbedding<EmbeddingProvider>();
       return createRetrievalService({
         ...(knowledge === undefined ? {} : { knowledge }),
         ...(reranker === undefined ? {} : { reranker }),
+        ...(embedding === undefined ? {} : { embedding }),
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        embeddingDimensions: config.inference.siliconflow.embedding.dimensions,
+        predicateCacheFile: path.join(config.storage.rootDir, "predicate-semantic-index.json"),
         rerankModel: config.inference.siliconflow.rerank.model,
         rerankContextTokens: config.inference.siliconflow.rerank.maxInputTokens,
         rerankCandidateLimit: config.inference.rerank.candidateLimit,
@@ -466,10 +473,10 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
 
     // Always register tools when running standalone (no memory extension co-installed).
     // When the memory extension is present, the integrated tools handle both knowledge and memory.
-    if (!registered && runtime.getMemory() === undefined) {
+    if (!registered && runtime.getMemory() === undefined && knowledge !== undefined) {
       registerKnowledgeTools(
         pi,
-        knowledge!,
+        knowledge,
         runtime.getRetrieval<RetrievalService>(),
         config.retrieval.manualSearchTimeoutMs,
         () => ({

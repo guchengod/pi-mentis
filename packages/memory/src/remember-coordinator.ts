@@ -26,6 +26,7 @@ import { shouldReject } from "./secret-detector.js";
 import { planScope, detectCorrectionSignal, type MemoryScopePlan } from "./scope-planner.js";
 import { classifyDomain } from "./commit-planner.js";
 import { deriveFactKey as deriveFactKeyService } from "./service.js";
+import { predicateDefinition } from "./predicate-registry.js";
 
 // ─── Public Result Type (mirrors pi-extension-support contract) ───
 
@@ -162,30 +163,6 @@ function inferType(content: string, action: MemoryAction): MemoryType {
 
 // ─── Cardinality (predicate-aware + semantic) ─────────────────────
 
-// Single-cardinality predicates (only one current value):
-const SINGLE_CARDINALITY_PREDICATES: Set<string> = new Set([
-  "assistant_alias",
-  "user_name",
-  "response_style",
-  "language_preference",
-  "package_manager_preference",
-  "general_package_manager_preference",
-  "project_package_manager",
-  "project_build_command",
-  "project_test_command",
-  "project_integration_test_command",
-  "project_lint_command",
-  "project_typecheck_command",
-  "project_format_command",
-  "project_database",
-  "project_deployment_target",
-  "task_goal",
-  "task_blocker",
-]);
-
-// Set-cardinality predicates (multiple members coexist):
-const SET_CARDINALITY_PREDICATES: Set<string> = new Set(["programming_language_preference"]);
-
 function inferCardinality(
   type: MemoryType,
   predicateKey: string | undefined,
@@ -193,8 +170,8 @@ function inferCardinality(
 ): TemporalCardinality {
   // Predicate-based (most specific and reliable)
   if (predicateKey !== undefined) {
-    if (SINGLE_CARDINALITY_PREDICATES.has(predicateKey)) return "single";
-    if (SET_CARDINALITY_PREDICATES.has(predicateKey)) return "set";
+    const registered = predicateDefinition(predicateKey);
+    if (registered !== undefined) return registered.cardinality;
   }
 
   // Type fallback (only when predicate is unknown)
@@ -347,12 +324,7 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
     // 4. Resolve Scope
     // Already done in planScope
 
-    // 5. Infer Cardinality (predicate-aware)
-    let predicateKey: string | undefined;
-    if (scopePlan.reasonCodes.includes("project_config")) {
-      predicateKey =
-        scopePlan.reasonCodes[0] !== "project_signal" ? scopePlan.reasonCodes[0] : undefined;
-    }
+    // 5. Infer Cardinality from the registered fact predicate.
     const type = inferType(content, action);
 
     // 6. Domain Classification
@@ -364,6 +336,7 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       type,
       domain: domainClassification.domain,
     });
+    const predicateKey = factKeyResult.split("/").pop();
 
     // 8. Build commit command
     const command: CommitMemoryCommand = {

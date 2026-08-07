@@ -1,38 +1,9 @@
 import { normalizeText } from "@pi-mentis/pi-mentis-core";
 
 import type { MemoryDomain, PiScopeContext } from "./types.js";
+import type { KnownPredicate } from "./predicate-registry.js";
 
 // ─── Predicate Registry ───────────────────────────────────────────
-
-export type KnownPredicate =
-  | "assistant_alias"
-  | "user_name"
-  | "response_style"
-  | "language_preference"
-  | "programming_language_preference"
-  | "package_manager_preference"
-  | "general_package_manager_preference"
-  | "project_package_manager"
-  | "project_build_command"
-  | "project_test_command"
-  | "project_integration_test_command"
-  | "project_lint_command"
-  | "project_typecheck_command"
-  | "project_format_command"
-  | "project_database"
-  | "project_deployment_target"
-  | "project_purpose"
-  | "architecture_decision"
-  | "task_status"
-  | "task_goal"
-  | "task_blocker"
-  | "capability_state"
-  | "verified_procedure"
-  | "known_failure"
-  | "runtime"
-  | "runtime_version"
-  | "language"
-  | "storage_engine";
 
 export interface FactKeyResult {
   readonly factKey: string;

@@ -155,6 +155,7 @@ export function detectAccessIntent(userText: string): AccessIntentDecision {
 
   // If the text also contains an ID alongside maintenance command, it's explicit maintenance
   const hasId = /\b[a-f0-9]{16,64}\b/i.test(userText);
+  if (hasId) reasons.push("explicit maintenance resource id present");
   if (hasNonMaintenance && matchedPhrases.length < 2) {
     reasons.push(
       "mixed signal: contains both maintenance and non-maintenance keywords → default to search",
@@ -180,6 +181,7 @@ export function detectAccessIntent(userText: string): AccessIntentDecision {
  * Currently always returns false — secret reveal via chat is not implemented.
  */
 export function userRequestsSecretReveal(_userText: string): boolean {
+  void _userText;
   // Reserved for future controlled-secret-reveal flows.
   return false;
 }

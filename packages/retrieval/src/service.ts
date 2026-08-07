@@ -18,9 +18,14 @@ import {
   type RerankCacheValue,
   type RerankDocument,
   type RerankProvider,
+  type EmbeddingProvider,
 } from "@pi-mentis/pi-mentis-inference";
 import type { KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
-import type { MemoryQuery, MemoryService } from "@pi-mentis/pi-mentis-memory-core";
+import type {
+  MemoryQuery,
+  MemoryService,
+  PredicateRegistry,
+} from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 
 import {
@@ -32,6 +37,13 @@ import {
 import { gateSearchHit, type GateRuntimeContext } from "./gates.js";
 import { EffectivenessService, type TaskOutcomeObservation } from "./effectiveness.js";
 import { AdaptivePolicyService } from "./policy.js";
+import { adaptiveCutoff } from "./adaptive-cutoff.js";
+import {
+  FilePredicateVectorCache,
+  SemanticQueryPlanner,
+  type MemoryQueryPlan,
+  type PredicateVectorCache,
+} from "./semantic-query-planner.js";
 
 export interface RetrievalQuery {
   readonly text: string;
@@ -43,6 +55,7 @@ export interface RetrievalQuery {
   readonly temporalMode?: "current" | "historical" | "all";
   readonly contextSnapshot?: MentisContextSnapshot;
   readonly gateContext?: Omit<GateRuntimeContext, "scope" | "snapshot" | "historical">;
+  readonly sources?: readonly ("knowledge" | "memory")[];
 }
 
 export interface RetrievalOptions {
@@ -74,6 +87,58 @@ export interface CreateRetrievalServiceOptions {
   readonly effectiveness?: EffectivenessService;
   readonly policy?: AdaptivePolicyService;
   readonly clock?: Clock;
+  readonly embedding?: EmbeddingProvider;
+  readonly embeddingModel?: string;
+  readonly embeddingDimensions?: number;
+  readonly predicateRegistry?: PredicateRegistry;
+  readonly predicateVectorCache?: PredicateVectorCache;
+  readonly predicateCacheFile?: string;
+  readonly semanticPlanner?: SemanticQueryPlanner;
+}
+
+function fallbackPlan(): MemoryQueryPlan {
+  return {
+    predicateCandidates: [],
+    subjectCandidates: [],
+    temporalIntent: "any",
+    retrievalMode: "broad",
+    confidence: 0,
+    memoryNeed: { required: true, confidence: 0 },
+    diagnostics: { plannerDegraded: true },
+  };
+}
+
+function predicatePrior(hit: SearchHit, plan: MemoryQueryPlan): number {
+  if (hit.kind !== "memory") return 0;
+  const factKey = hit.metadata?.["factKey"];
+  if (typeof factKey !== "string") return 0;
+  const predicate = factKey.split("/").pop();
+  if (predicate === undefined) return 0;
+  return (
+    plan.predicateCandidates.find((candidate) => candidate.predicate === predicate)?.confidence ?? 0
+  );
+}
+
+export function applyPredicateSoftPrior(
+  hit: SearchHit,
+  plan: MemoryQueryPlan,
+  now: number,
+  freshness: number,
+): SearchHit {
+  const base = authorityAndFreshness(hit, now, freshness);
+  const prior = predicatePrior(hit, plan);
+  return {
+    ...hit,
+    score: base * 0.84 + prior * 0.16,
+    metadata: {
+      ...(hit.metadata ?? {}),
+      recallScoreComponents: {
+        fused: hit.score,
+        authorityFreshness: base,
+        predicatePrior: prior,
+      },
+    },
+  };
 }
 
 function extractGuidance(hits: readonly SearchHit[]): string {
@@ -115,6 +180,7 @@ export class DefaultRetrievalService implements RetrievalService {
   readonly #effectiveness: EffectivenessService | undefined;
   readonly #policy: AdaptivePolicyService | undefined;
   readonly #clock: Clock;
+  readonly #semanticPlanner: SemanticQueryPlanner | undefined;
 
   constructor(options: CreateRetrievalServiceOptions) {
     this.#knowledge = options.knowledge;
@@ -131,6 +197,26 @@ export class DefaultRetrievalService implements RetrievalService {
     this.#effectiveness = options.effectiveness;
     this.#policy = options.policy;
     this.#clock = options.clock ?? systemClock;
+    const vectorCache =
+      options.predicateVectorCache ??
+      (options.predicateCacheFile === undefined
+        ? undefined
+        : new FilePredicateVectorCache(options.predicateCacheFile));
+    this.#semanticPlanner =
+      options.semanticPlanner ??
+      (options.embedding === undefined ||
+      options.embeddingModel === undefined ||
+      options.embeddingDimensions === undefined
+        ? undefined
+        : new SemanticQueryPlanner({
+            embedding: options.embedding,
+            modelId: options.embeddingModel,
+            dimensions: options.embeddingDimensions,
+            ...(options.predicateRegistry === undefined
+              ? {}
+              : { registry: options.predicateRegistry }),
+            ...(vectorCache === undefined ? {} : { cache: vectorCache }),
+          }));
   }
 
   async search(query: RetrievalQuery, options: RetrievalOptions = {}): Promise<SearchResult> {
@@ -147,6 +233,16 @@ export class DefaultRetrievalService implements RetrievalService {
         : AbortSignal.any([options.signal, controller.signal]);
     const degraded: string[] = [];
     const stages: Record<string, number> = {};
+    const plannerStarted = performance.now();
+    const prepared =
+      this.#semanticPlanner === undefined
+        ? { plan: fallbackPlan() }
+        : await this.#semanticPlanner.prepare(query.text, { signal });
+    const queryPlan = prepared.plan;
+    const queryEmbedding = prepared.queryEmbedding;
+    stages["semanticPlanner"] = performance.now() - plannerStarted;
+    if (queryPlan.diagnostics?.plannerDegraded === true) degraded.push("planner:degraded");
+    const sourceSet = new Set(query.sources ?? ["knowledge", "memory"]);
     const activePolicy = this.#policy?.forRequest(
       `${query.text}:${query.memoryScopeContext?.sessionId ?? "session"}`,
     );
@@ -156,11 +252,12 @@ export class DefaultRetrievalService implements RetrievalService {
     try {
       const knowledgeStarted = performance.now();
       const knowledgePromise =
-        this.#knowledge === undefined
+        this.#knowledge === undefined || !sourceSet.has("knowledge")
           ? Promise.resolve(undefined)
           : this.#knowledge.search(
               {
                 text: query.text,
+                ...(queryEmbedding === undefined ? {} : { queryEmbedding }),
                 ...(query.namespace === undefined ? {} : { namespace: query.namespace }),
                 ...(query.memoryScopeContext === undefined
                   ? {}
@@ -176,7 +273,12 @@ export class DefaultRetrievalService implements RetrievalService {
       stages["knowledge"] = performance.now() - knowledgeStarted;
       const viewStarted = performance.now();
       const viewHits: SearchHit[] = [];
-      if (this.#memory?.getView !== undefined && query.memoryScopes !== undefined) {
+      if (
+        this.#memory?.getView !== undefined &&
+        sourceSet.has("memory") &&
+        queryPlan.memoryNeed.required &&
+        query.memoryScopes !== undefined
+      ) {
         const supported = new Set(["project", "user", "topic", "task", "capability"]);
         const views = await Promise.all(
           query.memoryScopes
@@ -232,17 +334,26 @@ export class DefaultRetrievalService implements RetrievalService {
       const guidance = knowledgeResult === undefined ? "" : extractGuidance(knowledgeResult.hits);
       const memoryStarted = performance.now();
       let memoryResult =
-        this.#memory === undefined
+        this.#memory === undefined || !sourceSet.has("memory") || !queryPlan.memoryNeed.required
           ? undefined
           : await this.#memory
               .search(
                 {
                   text: guidance === "" ? query.text : `${query.text}\n${guidance}`,
+                  ...(queryEmbedding === undefined ? {} : { queryEmbedding }),
                   ...(query.memoryScopes === undefined ? {} : { scopes: query.memoryScopes }),
                   ...(query.memoryScopeContext === undefined
                     ? {}
                     : { scopeContext: query.memoryScopeContext }),
-                  ...(query.temporalMode === undefined ? {} : { temporalMode: query.temporalMode }),
+                  ...(query.temporalMode !== undefined
+                    ? { temporalMode: query.temporalMode }
+                    : queryPlan.temporalIntent === "current"
+                      ? { temporalMode: "current" as const }
+                      : queryPlan.temporalIntent === "historical"
+                        ? { temporalMode: "historical" as const }
+                        : queryPlan.temporalIntent === "evolution"
+                          ? { temporalMode: "all" as const }
+                          : {}),
                   limit: candidateLimit,
                 },
                 { signal, timeoutMs },
@@ -345,14 +456,14 @@ export class DefaultRetrievalService implements RetrievalService {
             },
           ];
         })
-        .map((hit) => ({
-          ...hit,
-          score: authorityAndFreshness(
+        .map((hit) =>
+          applyPredicateSoftPrior(
             hit,
+            queryPlan,
             this.#clock.now(),
             activePolicy?.parameters.freshnessWeight ?? 0.1,
           ),
-        }))
+        )
         .sort((left, right) => right.score - left.score)
         .slice(0, candidateLimit);
       const rrfRanking = fused.map((hit) => hit.id);
@@ -376,8 +487,9 @@ export class DefaultRetrievalService implements RetrievalService {
         }
         stages["rerank"] = performance.now() - rerankStarted;
       }
+      const cutoff = adaptiveCutoff({ hits: ranked, mode: queryPlan.retrievalMode });
       const diversified = maximalMarginalRelevance(
-        ranked,
+        cutoff,
         Math.min(
           query.limit ?? activePolicy?.parameters.topK ?? 20,
           activePolicy?.parameters.topK ?? query.limit ?? 20,
@@ -391,12 +503,14 @@ export class DefaultRetrievalService implements RetrievalService {
         query.contextTokens ?? policyContextTokens,
         policyContextTokens,
       );
-      const context = selectContext(
+      const selectedContext = selectContext(
         diversified,
         contextTokenLimit,
         Math.min(1_100, contextTokenLimit),
         Math.min(500, contextTokenLimit),
       );
+      const selectedIds = new Set(selectedContext.map((hit) => hit.id));
+      const context = diversified.filter((hit) => selectedIds.has(hit.id));
       const traceId = options.traceId ?? `trace:${contentHash(`${query.text}:${started}`)}`;
       options.onTrace?.(traceId);
       const namespace = [scope.tenantId, scope.userId, scope.appId, scope.agentId]
@@ -478,7 +592,9 @@ export class DefaultRetrievalService implements RetrievalService {
             "rrf",
             "applicability-gates",
             "authority-freshness",
+            "predicate-soft-prior",
             ...(stages["rerank"] === undefined ? [] : ["rerank"]),
+            "adaptive-cutoff",
             "mmr",
             "context-budget",
           ],
@@ -488,6 +604,7 @@ export class DefaultRetrievalService implements RetrievalService {
             mmr: mmrRanking,
           },
           traceId,
+          semanticQueryPlan: queryPlan,
         },
       };
     } finally {

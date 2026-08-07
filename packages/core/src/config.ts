@@ -181,7 +181,8 @@ export interface PiMentisConfig {
   readonly intelligence: IntelligenceConfig;
 }
 
-export function createDefaultConfig(_cwd: string): PiMentisConfig {
+export function createDefaultConfig(cwd: string): PiMentisConfig {
+  void cwd;
   const availableProcessors = globalThis.navigator?.hardwareConcurrency ?? 2;
   return {
     runtime: { piVersion: PI_VERSION },
@@ -326,10 +327,13 @@ function requireRange(name: string, value: number, minimum: number, maximum: num
 
 export function validateConfig(config: PiMentisConfig): PiMentisConfig {
   if (!isPiVersionSupported(config.runtime.piVersion, PI_VERSION)) {
-    throw new ConfigurationError(`runtime.piVersion must be at least ${PI_VERSION}; found ${config.runtime.piVersion}`, {
-      operation: "configuration-validate",
-      retryable: false,
-    });
+    throw new ConfigurationError(
+      `runtime.piVersion must be at least ${PI_VERSION}; found ${config.runtime.piVersion}`,
+      {
+        operation: "configuration-validate",
+        retryable: false,
+      },
+    );
   }
   if (config.intelligence.temporal.enabled !== true) {
     throw new ConfigurationError(

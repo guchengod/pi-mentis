@@ -4,11 +4,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  detectCorrectionSignal,
-  detectProfileSignal,
-  detectProjectSignal,
-} from "../src/scope-planner.js";
+import { detectCorrectionSignal, detectProjectSignal } from "../src/scope-planner.js";
 import { deriveFactKey } from "../src/fact-key.js";
 import { classifyDomain, resolveScope } from "../src/commit-planner.js";
 import { shouldReject, detectSecrets } from "../src/secret-detector.js";

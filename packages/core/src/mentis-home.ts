@@ -1,4 +1,4 @@
-import { homedir, platform } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 
 /**

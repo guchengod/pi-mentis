@@ -13,7 +13,6 @@ import {
   type RecallQueryContext,
   type FastRecallCandidate,
 } from "../src/recall.js";
-import { classifyIntent } from "../src/recall-intent.js";
 
 function signals(overrides: Partial<RecallSignals> = {}): RecallSignals {
   return {
@@ -38,15 +37,14 @@ describe("decideRecall — always-on fast recall", () => {
     expect(result.shouldRecall).toBe(false);
   });
 
-  it("skips recall for pure greeting", () => {
+  it("defers greeting memory need to the semantic planner", () => {
     const result = decideRecall(signals({ prompt: "你好" }));
-    expect(result.shouldRecall).toBe(false);
-    expect(result.reason).toBe("greeting");
+    expect(result.shouldRecall).toBe(true);
   });
 
-  it("skips recall for 'hi'", () => {
+  it("defers short natural-language memory need to the semantic planner", () => {
     const result = decideRecall(signals({ prompt: "hi" }));
-    expect(result.shouldRecall).toBe(false);
+    expect(result.shouldRecall).toBe(true);
   });
 
   it("triggers recall for any non-trivial input — no keyword gate", () => {
@@ -87,53 +85,27 @@ describe("decideRecall — always-on fast recall", () => {
   });
 });
 
-describe("classifyIntentScores — weak signals only", () => {
+describe("classifyIntentScores — structural compatibility surface", () => {
   it("returns all-zero for empty input", () => {
     const scores = classifyIntentScores("");
     expect(scores["no_recall"]).toBe(1);
     expect(scores["current_input_only"]).toBe(1);
   });
 
-  it("returns greeting signals for hello", () => {
+  it("does not classify greeting semantics with language rules", () => {
     const scores = classifyIntentScores("你好");
-    expect(scores["current_input_only"]).toBeGreaterThanOrEqual(0.8);
-    expect(scores["no_recall"]).toBeGreaterThanOrEqual(0.7);
+    expect(Object.values(scores).every((score) => score === 0)).toBe(true);
   });
 
-  it("user preference keywords give weak signal", () => {
-    const scores = classifyIntentScores("我平时喜欢简洁的回答");
-    expect(scores["user_preference"]).toBeGreaterThanOrEqual(0.5);
-  });
-
-  it("task continuation keywords give weak signal", () => {
-    const scores = classifyIntentScores("继续之前的任务");
-    expect(scores["task_continuation"]).toBeGreaterThanOrEqual(0.5);
-  });
-
-  it("NAS/预算 keywords give topic signal", () => {
-    const scores = classifyIntentScores("NAS 的预算是多少？");
-    expect(scores["topic_recall"]).toBeGreaterThanOrEqual(0.2);
-  });
-
-  it("implicit NAS question still picks up topic signal", () => {
-    // "那台低功耗机器准备花多少钱？" — contains 低功耗
-    const scores = classifyIntentScores("那台低功耗机器准备花多少钱？");
-    expect(scores["topic_recall"]).toBeGreaterThanOrEqual(0.2);
-  });
-
-  it("all scores are ≤ 0.7 (keywords are weak)", () => {
+  it("does not classify preference, task, or topic domains", () => {
     const scores = classifyIntentScores("我平时习惯用 pnpm，项目构建是 turbo build");
-    for (const [, val] of Object.entries(scores)) {
-      expect(val).toBeLessThanOrEqual(0.7);
-    }
+    expect(Object.values(scores).every((score) => score === 0)).toBe(true);
   });
 
   it("keyword-free natural question has mostly zero scores", () => {
     const scores = classifyIntentScores("那这个呢？");
-    // Should have very low or zero for most intents
     const totalSignal = Object.values(scores).reduce((sum: number, v: number) => sum + v, 0);
-    // Total keyword signal should be minimal
-    expect(totalSignal).toBeLessThanOrEqual(0.5);
+    expect(totalSignal).toBe(0);
   });
 });
 
@@ -330,102 +302,5 @@ describe("evaluateRecallDecision", () => {
     );
     // With margin < 0.08, it should go to quality_search, not inject_fast
     expect(result.kind).not.toBe("inject_fast");
-  });
-});
-
-// ─── Intent Classification (from recall-intent.ts) ─────────────────
-
-describe("classifyIntent — profile routes", () => {
-  it('routes "你叫什么？" to agent_profile', () => {
-    const result = classifyIntent("你叫什么？");
-    expect(result.primary).toBe("agent_profile");
-    expect(result.scores["agent_profile"]).toBeGreaterThanOrEqual(0.9);
-  });
-
-  it('routes "你的名字是什么？" to agent_profile', () => {
-    const result = classifyIntent("你的名字是什么？");
-    expect(result.primary).toBe("agent_profile");
-  });
-
-  it('routes "怎么称呼你？" to agent_profile', () => {
-    const result = classifyIntent("怎么称呼你？");
-    expect(result.primary).toBe("agent_profile");
-  });
-
-  it('routes "我叫什么？" to user_profile', () => {
-    const result = classifyIntent("我叫什么？");
-    expect(result.primary).toBe("user_profile");
-  });
-
-  it('routes "你记得我的名字吗？" to user_profile (via preference)', () => {
-    const result = classifyIntent("你记得我的名字吗？");
-    // Contains 我...名字 → user_profile
-    expect(result.primary).not.toBe("no_recall");
-  });
-
-  it('routes "我喜欢什么样的回答？" to user_profile', () => {
-    const result = classifyIntent("我喜欢什么样的回答？");
-    expect(result.primary).toBe("user_profile");
-    expect(result.scores["user_profile"]).toBeGreaterThanOrEqual(0.8);
-  });
-
-  it('routes "我喜欢什么样的回答方式？" to user_profile', () => {
-    const result = classifyIntent("我喜欢什么样的回答方式？");
-    expect(result.primary).toBe("user_profile");
-  });
-
-  it("does NOT skip short profile questions", () => {
-    const result = classifyIntent("你叫什么？");
-    expect(result.primary).not.toBe("no_recall");
-  });
-
-  it("does NOT skip short project questions", () => {
-    const result = classifyIntent("怎么构建？");
-    // "怎么构建" matches "怎么(构建)" pattern in current_project_fact
-    expect(result.primary).not.toBe("no_recall");
-  });
-});
-
-describe("classifyIntent — project routes", () => {
-  it('routes "这个项目怎么构建？" to current_project_fact', () => {
-    const result = classifyIntent("这个项目怎么构建？");
-    expect(result.primary).toBe("current_project_fact");
-  });
-
-  it('routes "构建命令是什么？" to current_project_fact', () => {
-    const result = classifyIntent("构建命令是什么？");
-    expect(result.primary).toBe("current_project_fact");
-  });
-
-  it('routes "这个项目用 npm 还是 pnpm？" to current_project_fact', () => {
-    const result = classifyIntent("这个项目用 npm 还是 pnpm？");
-    expect(result.primary).toBe("current_project_fact");
-  });
-
-  it('routes "怎么 build？" to a recall lane (not no_recall)', () => {
-    const result = classifyIntent("怎么 build？");
-    expect(result.primary).not.toBe("no_recall");
-  });
-
-  it('routes "数据库用的什么？" to a recall lane (not no_recall)', () => {
-    const result = classifyIntent("数据库用的什么？");
-    expect(result.primary).not.toBe("no_recall");
-  });
-
-  it('routes "这个项目怎么测试？" to current_project_fact', () => {
-    const result = classifyIntent("这个项目怎么测试？");
-    expect(result.primary).toBe("current_project_fact");
-  });
-});
-
-describe("classifyIntent — correction / update routes", () => {
-  it('routes "刚才说错了" content to unknown (not blocked)', () => {
-    const result = classifyIntent("刚才说错了，数据库实际是 PostgreSQL");
-    expect(result.primary).not.toBe("no_recall");
-  });
-
-  it("natural correction query about history", () => {
-    const result = classifyIntent("数据库以前发生过什么变化？");
-    expect(result.primary).not.toBe("no_recall");
   });
 });

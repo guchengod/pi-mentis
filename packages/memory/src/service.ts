@@ -43,9 +43,6 @@ import type {
   MemoryService,
   MemoryDomain,
   PiScopeContext,
-  MentisSecurityMode,
-  ResourceOwnership,
-  RelevanceScope,
 } from "./types.js";
 
 export interface CreateMemoryServiceOptions {
@@ -910,9 +907,13 @@ export class DefaultMemoryService implements MemoryService {
           String(this.#dimensions),
           contentHash(query.text),
         );
-        let vector = this.#queryCache.get(key);
+        let vector = query.queryEmbedding ?? this.#queryCache.get(key);
         const stages: Record<string, number> = {};
         const degraded: string[] = [];
+        if (vector !== undefined && vector.values.length !== this.#dimensions) {
+          degraded.push("embedding:dimension-mismatch");
+          vector = undefined;
+        }
         if (vector === undefined) {
           // Security gate: produce remote-safe content before sending to provider
           const safe = toRemoteSafe(query.text);

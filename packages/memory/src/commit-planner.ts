@@ -22,7 +22,6 @@ export function classifyDomain(
   const normalized = normalizeText(content).toLowerCase();
   const reasons: string[] = [];
   const inRepo = scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined;
-
   // preference: default to user
   if (type === "preference") {
     // Explicit global/user preference signals
@@ -140,8 +139,6 @@ export function resolveScope(
 ): ScopeResolution {
   const normalized = normalizeText(content).toLowerCase();
   const reasons: string[] = [];
-  const inRepo = scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined;
-
   // Detect explicit global/user preference override
   const explicitGlobal =
     hasPhrase(normalized, "不管", "不论", "无论", "个人", "全局", "这不只") ||
@@ -282,31 +279,7 @@ export function resolveScope(
 
 // ─── Cardinality Defaults ─────────────────────────────────────────
 
-// Single-cardinality predicates
-const SINGLE_PREDICATE_SET: Set<string> = new Set([
-  "assistant_alias",
-  "user_name",
-  "response_style",
-  "language_preference",
-  "package_manager_preference",
-  "general_package_manager_preference",
-  "project_package_manager",
-  "project_build_command",
-  "project_test_command",
-  "project_integration_test_command",
-  "project_lint_command",
-  "project_typecheck_command",
-  "project_format_command",
-  "project_database",
-  "project_deployment_target",
-  "task_goal",
-  "task_blocker",
-]);
-
-function defaultCardinality(
-  type: MemoryType,
-  _predicateKey?: string,
-): "single" | "set" | "ordered" | "event" {
+function defaultCardinality(type: MemoryType): "single" | "set" | "ordered" | "event" {
   // Type-based fallback is only for event/episodic/task
   if (type === "episodic" || type === "task") return "event";
   return "single";

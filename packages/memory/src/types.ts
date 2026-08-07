@@ -4,6 +4,7 @@ import type {
   OperationOptions,
   SearchResult,
 } from "@pi-mentis/pi-mentis-core";
+import type { EmbeddingVector } from "@pi-mentis/pi-mentis-inference";
 import type { MaterializedView, ViewKind } from "./views.js";
 
 // ─── Ownership & Relevance Split ─────────────────────────────────
@@ -221,6 +222,8 @@ export interface CommitMemoryResult {
 
 export interface MemoryQuery {
   readonly text: string;
+  /** Reuses the caller's remote-safe query embedding for dense search. */
+  readonly queryEmbedding?: EmbeddingVector;
   readonly scopes?: readonly MemoryScope[];
   readonly scopeContext?: PiScopeContext;
   readonly limit?: number;

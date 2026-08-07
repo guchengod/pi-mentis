@@ -10,10 +10,11 @@
  *   - No-repo safety: never generate project scope without a repository
  */
 
-import { normalizeText, stableHash } from "@pi-mentis/pi-mentis-core";
+import { normalizeText } from "@pi-mentis/pi-mentis-core";
 import { createHash } from "node:crypto";
 
 import type { MemoryDomain, MemoryScope, PiScopeContext } from "./types.js";
+import { predicateDefinition, type KnownPredicate } from "./predicate-registry.js";
 
 // ─── Scope Plan ───────────────────────────────────────────────────
 
@@ -25,166 +26,27 @@ export interface MemoryScopePlan {
   readonly alternatives: readonly { scope: MemoryScope; score: number }[];
 }
 
-// ─── Known Predicates (expanded) ───────────────────────────────────
-
-type KnownPredicate =
-  | "user_name"
-  | "assistant_alias"
-  | "response_style"
-  | "language_preference"
-  | "programming_language_preference"
-  | "package_manager_preference"
-  | "general_package_manager_preference"
-  | "project_package_manager"
-  | "project_build_command"
-  | "project_test_command"
-  | "project_integration_test_command"
-  | "project_lint_command"
-  | "project_typecheck_command"
-  | "project_format_command"
-  | "project_database"
-  | "project_deployment_target"
-  | "task_goal"
-  | "task_blocker";
-
-// ─── Predicate to Domain Mapping ──────────────────────────────────
-
-interface PredicateMeta {
-  readonly predicate: KnownPredicate;
-  readonly domain: MemoryDomain;
-  readonly scopeKind: MemoryScope["kind"];
-  readonly reasonCode: string;
-  readonly cardinality: "single" | "set" | "event";
+function predicateScopeMeta(predicate: KnownPredicate):
+  | {
+      readonly domain: MemoryDomain;
+      readonly reasonCode: string;
+    }
+  | undefined {
+  const registered = predicateDefinition(predicate);
+  const domain = registered?.memoryDomains[0];
+  if (domain === undefined) return undefined;
+  const reasonCode =
+    predicate === "assistant_alias"
+      ? "agent_profile"
+      : predicate === "user_name"
+        ? "user_identity"
+        : domain === "project"
+          ? "project_config"
+          : domain === "task"
+            ? "task_state"
+            : "user_preference";
+  return { domain, reasonCode };
 }
-
-const PREDICATE_META: Record<KnownPredicate, PredicateMeta> = {
-  user_name: {
-    predicate: "user_name",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_identity",
-    cardinality: "single",
-  },
-  assistant_alias: {
-    predicate: "assistant_alias",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "agent_profile",
-    cardinality: "single",
-  },
-  response_style: {
-    predicate: "response_style",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_preference",
-    cardinality: "single",
-  },
-  language_preference: {
-    predicate: "language_preference",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_preference",
-    cardinality: "single",
-  },
-  programming_language_preference: {
-    predicate: "programming_language_preference",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_preference",
-    cardinality: "set",
-  },
-  package_manager_preference: {
-    predicate: "package_manager_preference",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_preference",
-    cardinality: "single",
-  },
-  general_package_manager_preference: {
-    predicate: "general_package_manager_preference",
-    domain: "user",
-    scopeKind: "user",
-    reasonCode: "user_preference",
-    cardinality: "single",
-  },
-  project_package_manager: {
-    predicate: "project_package_manager",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_build_command: {
-    predicate: "project_build_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_test_command: {
-    predicate: "project_test_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_integration_test_command: {
-    predicate: "project_integration_test_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_lint_command: {
-    predicate: "project_lint_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_typecheck_command: {
-    predicate: "project_typecheck_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_format_command: {
-    predicate: "project_format_command",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_database: {
-    predicate: "project_database",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  project_deployment_target: {
-    predicate: "project_deployment_target",
-    domain: "project",
-    scopeKind: "repository",
-    reasonCode: "project_config",
-    cardinality: "single",
-  },
-  task_goal: {
-    predicate: "task_goal",
-    domain: "task",
-    scopeKind: "task",
-    reasonCode: "task_state",
-    cardinality: "single",
-  },
-  task_blocker: {
-    predicate: "task_blocker",
-    domain: "task",
-    scopeKind: "task",
-    reasonCode: "task_state",
-    cardinality: "single",
-  },
-};
 
 // ─── Chinese boundary helpers ──────────────────────────────────────
 
@@ -553,7 +415,8 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
   // 1. Check profile signals
   const profile = detectProfileSignal(content);
   if (profile.confidence >= 0.6) {
-    const meta = profile.predicate !== undefined ? PREDICATE_META[profile.predicate] : undefined;
+    const meta =
+      profile.predicate === undefined ? undefined : predicateScopeMeta(profile.predicate);
     const scope: MemoryScope = {
       kind: "user",
       id: scopeContext.userId || "local",
@@ -598,7 +461,8 @@ export function planScope(content: string, scopeContext: PiScopeContext): Memory
         : scopeContext.projectId !== undefined
           ? { kind: "project", id: scopeContext.projectId }
           : { kind: "user", id: scopeContext.userId };
-    const meta = project.predicate !== undefined ? PREDICATE_META[project.predicate] : undefined;
+    const meta =
+      project.predicate === undefined ? undefined : predicateScopeMeta(project.predicate);
     return {
       domain: meta?.domain ?? "project",
       scope,

@@ -91,6 +91,25 @@ export interface SearchDiagnostics {
     readonly mmr: readonly string[];
   }>;
   readonly traceId?: string;
+  readonly semanticQueryPlan?: Readonly<{
+    readonly predicateCandidates: readonly Readonly<{
+      readonly predicate: string;
+      readonly confidence: number;
+    }>[];
+    readonly subjectCandidates: readonly Readonly<{
+      readonly subject: string;
+      readonly confidence: number;
+    }>[];
+    readonly temporalIntent: "current" | "historical" | "evolution" | "any";
+    readonly retrievalMode: "focused" | "broad";
+    readonly confidence: number;
+    readonly memoryNeed: Readonly<{ readonly required: boolean; readonly confidence: number }>;
+    readonly diagnostics?: Readonly<{
+      readonly predicateMargin?: number;
+      readonly predicateEntropy?: number;
+      readonly plannerDegraded?: boolean;
+    }>;
+  }>;
 }
 
 export interface SearchResult {

@@ -2,14 +2,11 @@ import { stat } from "node:fs/promises";
 import { arch, homedir, platform } from "node:os";
 import path from "node:path";
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 
 import {
   BackgroundScheduler,
   MentisContextResolver,
-  EvidenceAuthority,
   ProviderPriority,
   TaskPriority,
   assertPiCompatibility,
@@ -40,7 +37,6 @@ import {
   createTaskGraphService,
   createMemoryService,
   deriveExperienceObservation,
-  memoryContentGroundedInUserPrompt,
   referencedMemoryIds,
   resolvePiProjectIdentity,
   taskIdentityId,
@@ -56,7 +52,6 @@ import {
   normalizePiPathArgument,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
-  PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 import { CapabilityIndexer, scanPiInstallation } from "@pi-mentis/pi-mentis-pi-capabilities";
 import {
@@ -290,11 +285,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     config = await loadConfig(process.cwd());
   } catch (err) {
     initError = err instanceof Error ? err : new Error(String(err));
+    const initMessage = initError.message;
     // Register a session_start handler to surface the error to the user.
     pi.on("session_start", (_event, ctx) => {
       notifyWhenUiAvailable(
         ctx,
-        `Pi Mentis extension failed to initialize: ${initError!.message}`,
+        `Pi Mentis extension failed to initialize: ${initMessage}`,
         "error",
       );
     });
@@ -395,6 +391,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       const knowledge = runtime.getKnowledge<KnowledgeService>();
       const memory = runtime.getMemory<MemoryService>();
       const reranker = runtime.getReranker<RerankProvider>();
+      const embedding = runtime.getEmbedding<EmbeddingProvider>();
       if (memoryStore !== undefined) {
         if (config.intelligence.effectiveness.enabled) {
           effectiveness ??= new EffectivenessService(memoryStore.store, {
@@ -413,6 +410,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ...(knowledge === undefined ? {} : { knowledge }),
         ...(memory === undefined ? {} : { memory }),
         ...(reranker === undefined ? {} : { reranker }),
+        ...(embedding === undefined ? {} : { embedding }),
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        embeddingDimensions: config.inference.siliconflow.embedding.dimensions,
+        predicateCacheFile: path.join(config.storage.rootDir, "predicate-semantic-index.json"),
         rerankModel: config.inference.siliconflow.rerank.model,
         rerankContextTokens: config.inference.siliconflow.rerank.maxInputTokens,
         rerankCandidateLimit: config.inference.rerank.candidateLimit,
@@ -520,8 +521,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     if (memoryStore === undefined) return;
 
     // /kb command requires the knowledge service to be available.
-    let kbCommandRegistered = false;
-    if (!kbCommandRegistered && knowledgeStore !== undefined) {
+    if (knowledgeStore !== undefined) {
       registerKbCommand(
         pi,
         knowledge,
@@ -571,7 +571,6 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         },
         () => scopeContext,
       );
-      kbCommandRegistered = true;
     }
     const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
       fallbackProjectIdentity(context.cwd),

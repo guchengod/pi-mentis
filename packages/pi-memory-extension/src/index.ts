@@ -1,4 +1,5 @@
 import { arch, platform } from "node:os";
+import path from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -151,10 +152,11 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     config = await loadConfig(process.cwd());
   } catch (err) {
     initError = err instanceof Error ? err : new Error(String(err));
+    const initMessage = initError.message;
     pi.on("session_start", (_event, ctx) => {
       notifyWhenUiAvailable(
         ctx,
-        `Pi Mentis memory extension failed to initialize: ${initError!.message}`,
+        `Pi Mentis memory extension failed to initialize: ${initMessage}`,
         "error",
       );
     });
@@ -227,6 +229,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         runtime.getKnowledge<NonNullable<CreateRetrievalServiceOptions["knowledge"]>>();
       const memory = runtime.getMemory<MemoryService>();
       const reranker = runtime.getReranker<RerankProvider>();
+      const embedding = runtime.getEmbedding<EmbeddingProvider>();
       if (storeHandle !== undefined) {
         if (config.intelligence.effectiveness.enabled) {
           effectiveness ??= new EffectivenessService(storeHandle.store, {
@@ -247,6 +250,10 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         ...(knowledge === undefined ? {} : { knowledge }),
         ...(memory === undefined ? {} : { memory }),
         ...(reranker === undefined ? {} : { reranker }),
+        ...(embedding === undefined ? {} : { embedding }),
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        embeddingDimensions: config.inference.siliconflow.embedding.dimensions,
+        predicateCacheFile: path.join(config.storage.rootDir, "predicate-semantic-index.json"),
         rerankModel: config.inference.siliconflow.rerank.model,
         rerankContextTokens: config.inference.siliconflow.rerank.maxInputTokens,
         rerankCandidateLimit: config.inference.rerank.candidateLimit,

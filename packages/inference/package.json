@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-inference",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Provider-neutral Embedding and Rerank contracts, batching, caches, and budget planning",
   "type": "module",
   "sideEffects": false,

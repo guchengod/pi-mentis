@@ -10,7 +10,6 @@ import type {
   RelevanceScope,
   MentisSecurityMode,
   ResourceAccessIntent,
-  Sensitivity,
 } from "../src/types.js";
 
 // ─── Ownership & Relevance Types ──────────────────────────────────

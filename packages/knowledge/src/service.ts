@@ -685,12 +685,18 @@ export class DefaultKnowledgeService implements KnowledgeService {
         const stages: Record<string, number> = {};
         const degraded: string[] = [];
         const embeddingStarted = performance.now();
-        let queryVector: EmbeddingVector | undefined;
-        try {
-          queryVector = await this.#queryEmbedding(query.text, { ...options, signal });
-        } catch (error: unknown) {
-          throwIfAborted(signal, "knowledge-search");
-          degraded.push(`embedding:${error instanceof Error ? error.name : "error"}`);
+        let queryVector: EmbeddingVector | undefined = query.queryEmbedding;
+        if (queryVector !== undefined && queryVector.values.length !== this.#dimensions) {
+          degraded.push("embedding:dimension-mismatch");
+          queryVector = undefined;
+        }
+        if (queryVector === undefined) {
+          try {
+            queryVector = await this.#queryEmbedding(query.text, { ...options, signal });
+          } catch (error: unknown) {
+            throwIfAborted(signal, "knowledge-search");
+            degraded.push(`embedding:${error instanceof Error ? error.name : "error"}`);
+          }
         }
         stages["embedding"] = performance.now() - embeddingStarted;
         const namespace = secureNamespace(
@@ -998,10 +1004,11 @@ export class DefaultKnowledgeService implements KnowledgeService {
       },
     });
     if (options.onDone) {
+      const onDone = options.onDone;
       void scheduled.promise
-        .then((result) => options.onDone!(result))
+        .then((result) => onDone(result))
         .catch((error: unknown) =>
-          options.onDone!(error instanceof Error ? error : new Error(String(error))),
+          onDone(error instanceof Error ? error : new Error(String(error))),
         );
     }
     return scheduled;

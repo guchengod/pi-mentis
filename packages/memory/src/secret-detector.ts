@@ -174,7 +174,7 @@ function detectContextSignals(text: string): SecretKind[] {
     if (!kinds.includes("api_key")) kinds.push("api_key");
   }
   for (const [pattern, kind] of SENSITIVE_FIELD_PATTERNS) {
-    const fieldRegex = new RegExp(`\\b${pattern}\\s*[:=]\\s*['\"]?\\S{6,}`, "i");
+    const fieldRegex = new RegExp(`\\b${pattern}\\s*[:=]\\s*['"]?\\S{6,}`, "i");
     if (fieldRegex.test(lower)) {
       if (!kinds.includes(kind)) kinds.push(kind);
     }

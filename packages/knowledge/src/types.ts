@@ -6,7 +6,7 @@ import type {
   SearchResult,
   SourceLocation,
 } from "@pi-mentis/pi-mentis-core";
-import type { EmbeddingSpaceIdentity } from "@pi-mentis/pi-mentis-inference";
+import type { EmbeddingSpaceIdentity, EmbeddingVector } from "@pi-mentis/pi-mentis-inference";
 import type { KnowledgeSourceInput } from "@pi-mentis/pi-mentis-file-parsers";
 
 export interface KnowledgeSecurityScope {
@@ -93,6 +93,8 @@ export interface IngestKnowledgeResult {
 
 export interface KnowledgeQuery {
   readonly text: string;
+  /** Reuses the caller's remote-safe query embedding for dense search. */
+  readonly queryEmbedding?: EmbeddingVector;
   readonly namespace?: string;
   readonly limit?: number;
   readonly scopeContext?: KnowledgeSecurityScope;
