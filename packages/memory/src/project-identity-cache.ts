@@ -1,9 +1,9 @@
 import { stat } from "node:fs/promises";
-import path from "node:path";
+import nodePath from "node:path";
 
 import { systemClock, type Clock } from "@pi-mentis/pi-mentis-core";
 
-import type { PiProjectIdentity } from "./project-identity.js";
+import { resolvePiProjectIdentity, type PiProjectIdentity } from "./project-identity.js";
 
 interface CacheEntry {
   readonly identity: PiProjectIdentity;
@@ -29,14 +29,13 @@ export class ProjectIdentityCache {
   }
 
   async resolve(cwd: string): Promise<PiProjectIdentity> {
-    const { resolvePiProjectIdentity: resolve } = await import("./project-identity.js");
-    const identity = await resolve(cwd);
+    const identity = await resolvePiProjectIdentity(cwd);
     this.#set(cwd, identity);
     return identity;
   }
 
   async getOrResolve(cwd: string): Promise<{ identity: PiProjectIdentity; cacheHit: boolean }> {
-    const canonicalRoot = path.resolve(cwd);
+    const canonicalRoot = nodePath.resolve(cwd);
 
     const entry = this.#cache.get(canonicalRoot);
     if (entry !== undefined) {
@@ -47,14 +46,13 @@ export class ProjectIdentityCache {
       }
     }
 
-    const { resolvePiProjectIdentity } = await import("./project-identity.js");
     const identity = await resolvePiProjectIdentity(cwd);
     this.#set(canonicalRoot, identity);
     return { identity, cacheHit: false };
   }
 
   invalidate(cwd: string): void {
-    this.#cache.delete(path.resolve(cwd));
+    this.#cache.delete(nodePath.resolve(cwd));
   }
 
   clear(): void {
@@ -69,7 +67,7 @@ export class ProjectIdentityCache {
     const now = this.#clock.now();
     const gitDir =
       identity.repositoryRoot !== undefined
-        ? path.join(identity.repositoryRoot, ".git")
+        ? nodePath.join(identity.repositoryRoot, ".git")
         : undefined;
     this.#cache.set(canonicalRoot, {
       identity,
@@ -88,10 +86,10 @@ export class ProjectIdentityCache {
 
   async #checkFresh(entry: CacheEntry): Promise<boolean> {
     const root = entry.identity.repositoryRoot ?? entry.canonicalRoot;
-    const gitDir = path.join(root, ".git");
+    const gitDir = nodePath.join(root, ".git");
     try {
-      const configStat = await stat(path.join(gitDir, "config")).catch(() => undefined);
-      const headStat = await stat(path.join(gitDir, "HEAD")).catch(() => undefined);
+      const configStat = await stat(nodePath.join(gitDir, "config")).catch(() => undefined);
+      const headStat = await stat(nodePath.join(gitDir, "HEAD")).catch(() => undefined);
 
       const configChanged =
         configStat !== undefined && entry.gitConfigMtime !== undefined

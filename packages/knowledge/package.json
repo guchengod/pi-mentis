@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-knowledge-core",
-  "version": "0.1.2",
+  "version": ".0 1 2.1",
   "description": "Knowledge ingestion, revisioning, incremental indexing, and search",
   "type": "module",
   "sideEffects": false,
