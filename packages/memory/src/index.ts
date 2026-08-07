@@ -21,6 +21,8 @@ export * from "./projection.js";
 export * from "./remote-policy.js";
 export * from "./remember-coordinator.js";
 export * from "./scope-planner.js";
+export * from "./scope-semantics.js";
+export * from "./commit-semantics.js";
 export * from "./secret-detector.js";
 export { DefaultMemoryService, createMemoryService, deriveFactKey } from "./service.js";
 export type { CreateMemoryServiceOptions } from "./service.js";

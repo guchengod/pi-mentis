@@ -37,6 +37,10 @@ import {
   referencedMemoryIds,
   resolvePiProjectIdentity,
   taskIdentityId,
+  ScopeSemanticPlanner,
+  FileScopePrototypeCache,
+  CommitSemanticPlanner,
+  FileCommitSemanticCache,
   type MemoryService,
   type PiEvidenceStore,
   type PiProjectIdentity,
@@ -96,12 +100,16 @@ function registerMemoryTools(
   getScopeContext: () => PiScopeContext,
   getContextSnapshot: () => MentisContextSnapshot | undefined,
   getEvidenceRef: () => EvidenceRef | undefined,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _onTrace: (traceId: string) => void,
+  getScopePlanner: () => ScopeSemanticPlanner | undefined,
+  getCommitPlanner: () => CommitSemanticPlanner | undefined,
 ): void {
   // Build coordinators and register shared tool pair.
   const memory = services.getMemory();
-  const rememberCoord = memory !== undefined ? new DefaultRememberCoordinator(memory) : undefined;
+  const rememberCoord =
+    memory !== undefined
+      ? new DefaultRememberCoordinator(memory, getScopePlanner(), getCommitPlanner())
+      : undefined;
   const recallCoord =
     services.getRetrieval() !== undefined ? new DefaultRecallCoordinator(services) : undefined;
 
@@ -166,6 +174,10 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   const telemetry = new InMemoryTelemetry();
   const runtime = getOrCreateRuntime();
   let storeHandle: SharedZvecStoreHandle | undefined;
+  let scopePlanner: ScopeSemanticPlanner | undefined;
+  let scopePrototypeCache: FileScopePrototypeCache | undefined;
+  let commitPlanner: CommitSemanticPlanner | undefined;
+  let commitSemanticCache: FileCommitSemanticCache | undefined;
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
@@ -204,6 +216,22 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       if (embedding === undefined) throw new Error("Embedding provider is unavailable");
       storeHandle = await acquireSharedZvecStore(config.storage, spaces(config));
       contextState ??= new ContextStateService(storeHandle.store);
+      scopePrototypeCache ??= new FileScopePrototypeCache(
+        path.join(config.storage.rootDir, "scope-semantic-index.json"),
+      );
+      scopePlanner ??= new ScopeSemanticPlanner({
+        embedding,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+        cache: scopePrototypeCache,
+      });
+      commitSemanticCache ??= new FileCommitSemanticCache(
+        path.join(config.storage.rootDir, "commit-semantic-index.json"),
+      );
+      commitPlanner ??= new CommitSemanticPlanner({
+        embedding,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+        cache: commitSemanticCache,
+      });
       return createMemoryService({
         store: storeHandle.store,
         embedding,
@@ -212,6 +240,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         telemetry,
         viewsEnabled: config.intelligence.views.enabled,
         viewTtlMs: config.intelligence.views.ttlMs,
+        scopePlanner,
+        commitPlanner,
       });
     },
     dispose: async (memory) => {
@@ -312,6 +342,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         (traceId) => {
           latestRetrievalTraceId = traceId;
         },
+        () => scopePlanner,
+        () => commitPlanner,
       );
       pi.registerCommand("mentis", {
         description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",

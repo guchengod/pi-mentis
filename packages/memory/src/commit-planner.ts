@@ -1,5 +1,3 @@
-import { normalizeText } from "@pi-mentis/pi-mentis-core";
-
 import type { MemoryDomain, MemoryScope, MemoryType, PiScopeContext } from "./types.js";
 
 // ─── Domain Classification ────────────────────────────────────────
@@ -13,35 +11,23 @@ export interface DomainClassification {
 /**
  * Classify memory content into a domain based on type + content + context.
  * The model does NOT directly set the domain — the system derives it.
+ *
+ * Ownership-first: the domain is driven by the semantic scope ownership
+ * decision; this classifier only maps MEMORY TYPE to a domain and never
+ * reads natural-language content via phrases. Generic durable facts
+ * default to USER domain, never the active topic.
  */
 export function classifyDomain(
   content: string,
   type: MemoryType,
   scopeContext?: PiScopeContext,
 ): DomainClassification {
-  const normalized = normalizeText(content).toLowerCase();
+  void content;
+  void scopeContext;
   const reasons: string[] = [];
-  const inRepo = scopeContext?.repositoryId !== undefined || scopeContext?.projectId !== undefined;
+
   // preference: default to user
   if (type === "preference") {
-    // Explicit global/user preference signals
-    if (
-      hasPhrase(normalized, "不管", "不论", "无论", "个人", "全局") ||
-      /global(?:ly)?|always|personally|my (?:personal|own)|in general/i.test(normalized)
-    ) {
-      reasons.push("explicit global preference signal");
-      return { domain: "user", confidence: 0.9, reasons };
-    }
-    // Project-specific preference signals
-    if (
-      hasPhrase(normalized, "项目里", "这个项目", "仓库里") ||
-      /this project|this repo|code style|format|lint|testing|build|commit|branch|merge/i.test(
-        normalized,
-      )
-    ) {
-      reasons.push("project-scoped preference signal");
-      return { domain: "project", confidence: 0.85, reasons };
-    }
     reasons.push("preference type defaults to user domain");
     return { domain: "user", confidence: 0.75, reasons };
   }
@@ -64,56 +50,10 @@ export function classifyDomain(
     return { domain: "task", confidence: 0.9, reasons };
   }
 
-  // fact: classify by content
-  if (type === "fact") {
-    // User identity / profile facts
-    if (
-      hasPhrase(normalized, "我叫", "我的名字", "你叫") ||
-      /i am|my name|记住你叫|call (?:yourself|me)|your name|称呼|偏好|习惯|喜欢|prefer|style/i.test(
-        normalized,
-      )
-    ) {
-      reasons.push("user identity/profile fact");
-      return { domain: "user", confidence: 0.85, reasons };
-    }
-    // Environment facts (runtime, platform, OS — NOT database/project config)
-    if (
-      hasPhrase(normalized, "运行时", "操作系统", "平台") ||
-      /\b(?:runtime|node|deno|bun|operating system|platform|arch|architecture)\b/i.test(normalized)
-    ) {
-      reasons.push("content matches environment/runtime pattern");
-      return { domain: "environment", confidence: 0.8, reasons };
-    }
-    // Capability facts
-    if (
-      hasPhrase(normalized, "能力", "可以", "不能", "支持") ||
-      /can |cannot |able to|capable of|supports?/i.test(normalized)
-    ) {
-      reasons.push("capability-related fact");
-      return { domain: "capability", confidence: 0.7, reasons };
-    }
-    // Default: if in repo, project; otherwise topic (NOT unknown-project)
-    if (inRepo) {
-      reasons.push("fact in repository context defaults to project");
-      return { domain: "project", confidence: 0.6, reasons };
-    }
-    reasons.push("fact outside repo defaults to topic");
-    return { domain: "topic", confidence: 0.5, reasons };
-  }
-
-  // decision / requirement: project if in repo, else topic
-  if (inRepo) {
-    reasons.push(`${type} in repository context -> project domain`);
-    return { domain: "project", confidence: 0.7, reasons };
-  }
-  reasons.push(`${type} outside repo -> topic domain`);
-  return { domain: "topic", confidence: 0.55, reasons };
-}
-
-// ─── Chinese-aware matching ────────────────────────────────────────
-
-function hasPhrase(text: string, ...phrases: string[]): boolean {
-  return phrases.some((phrase) => text.includes(phrase));
+  // fact / decision / requirement: generic durable facts belong to the
+  // user. Narrower domains come from the semantic scope ownership decision.
+  reasons.push("generic durable fact defaults to user domain");
+  return { domain: "user", confidence: 0.65, reasons };
 }
 
 // ─── Scope Resolution ─────────────────────────────────────────────
@@ -125,26 +65,20 @@ export interface ScopeResolution {
 }
 
 /**
- * Resolve the storage scope from the classified domain, content, and context.
- * Scope cannot be directly set by the model.
+ * Resolve the storage scope from the classified domain and active context.
+ * The active context only supplies candidate owner ids — it never decides
+ * the owner kind. No natural-language content is read.
  *
  * NEVER returns "unknown-project" as a scope ID.
  * No-repo context must fall back to user/task/topic/session, not project.
  */
 export function resolveScope(
   domain: MemoryDomain,
-  content: string,
+  _content: string,
   _type: MemoryType,
   scopeContext?: PiScopeContext,
 ): ScopeResolution {
-  const normalized = normalizeText(content).toLowerCase();
   const reasons: string[] = [];
-  // Detect explicit global/user preference override
-  const explicitGlobal =
-    hasPhrase(normalized, "不管", "不论", "无论", "个人", "全局", "这不只") ||
-    /global(?:ly)?|always|personally|my (?:personal|own)|in general|not (?:just|only) (?:this|the) (?:project|repo)/i.test(
-      normalized,
-    );
 
   switch (domain) {
     case "user": {
@@ -159,16 +93,6 @@ export function resolveScope(
     case "project":
     case "environment":
     case "procedure": {
-      // Explicit global preference signals override project context
-      if (explicitGlobal) {
-        reasons.push("explicit global preference overrides project context -> user scope");
-        return {
-          scope: { kind: "user", id: scopeContext?.userId ?? "local" },
-          confidence: 0.85,
-          reasons,
-        };
-      }
-
       // Require real repository/project context for project scope
       if (scopeContext?.repositoryId !== undefined) {
         reasons.push(`using repository scope: ${scopeContext.repositoryId}`);

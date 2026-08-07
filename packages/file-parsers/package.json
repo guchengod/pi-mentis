@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-file-parsers",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Registry-based structured parsers and symbol-aware chunking",
   "type": "module",
   "sideEffects": false,

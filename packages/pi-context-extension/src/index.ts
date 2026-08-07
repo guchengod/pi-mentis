@@ -39,6 +39,10 @@ import {
   deriveExperienceObservation,
   referencedMemoryIds,
   taskIdentityId,
+  ScopeSemanticPlanner,
+  FileScopePrototypeCache,
+  CommitSemanticPlanner,
+  FileCommitSemanticCache,
   type MemoryService,
   type MemoryScope,
   type PiEvidenceStore,
@@ -122,11 +126,15 @@ function registerIntegratedTools(
   getScopeContext: () => PiScopeContext,
   getContextSnapshot: () => MentisContextSnapshot | undefined,
   getEvidenceRef: () => EvidenceRef | undefined,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _onTrace: (traceId: string) => void,
+  getScopePlanner: () => ScopeSemanticPlanner | undefined,
+  getCommitPlanner: () => CommitSemanticPlanner | undefined,
 ): void {
   const memory = services.getMemory();
-  const rememberCoord = memory !== undefined ? new DefaultRememberCoordinator(memory) : undefined;
+  const rememberCoord =
+    memory !== undefined
+      ? new DefaultRememberCoordinator(memory, getScopePlanner(), getCommitPlanner())
+      : undefined;
   const recallCoord = new DefaultRecallCoordinator(services);
 
   registerMemoryToolPair(pi, {
@@ -328,6 +336,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     maxConcurrency: 2,
     maxQueueLength: 64,
   });
+  let scopePlanner: ScopeSemanticPlanner | undefined;
+  let scopePrototypeCache: FileScopePrototypeCache | undefined;
+  let commitPlanner: CommitSemanticPlanner | undefined;
+  let commitSemanticCache: FileCommitSemanticCache | undefined;
 
   runtime.registerEmbedding({
     id: "siliconflow-integrated",
@@ -376,6 +388,22 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       if (embedding === undefined) throw new Error("Embedding provider is unavailable");
       memoryStore = await acquireSharedZvecStore(config.storage, generationSpaces(config));
       contextState ??= new ContextStateService(memoryStore.store);
+      scopePrototypeCache ??= new FileScopePrototypeCache(
+        path.join(config.storage.rootDir, "scope-semantic-index.json"),
+      );
+      scopePlanner ??= new ScopeSemanticPlanner({
+        embedding,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+        cache: scopePrototypeCache,
+      });
+      commitSemanticCache ??= new FileCommitSemanticCache(
+        path.join(config.storage.rootDir, "commit-semantic-index.json"),
+      );
+      commitPlanner ??= new CommitSemanticPlanner({
+        embedding,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+        cache: commitSemanticCache,
+      });
       return createMemoryService({
         store: memoryStore.store,
         embedding,
@@ -384,6 +412,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         telemetry,
         viewsEnabled: config.intelligence.views.enabled,
         viewTtlMs: config.intelligence.views.ttlMs,
+        scopePlanner,
+        commitPlanner,
       });
     },
     dispose: async (memory) => {
@@ -506,6 +536,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         (traceId) => {
           latestRetrievalTraceId = traceId;
         },
+        () => scopePlanner,
+        () => commitPlanner,
       );
       registered = true;
     }

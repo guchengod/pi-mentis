@@ -1,215 +1,29 @@
 /**
- * Comprehensive tests for action planning, predicate detection,
- * cardinality inference, exact dedup, set operations, and scope isolation.
+ * Comprehensive tests for domain classification, scope resolution,
+ * and secret detection. Action/predicate/cardinality semantics are covered
+ * by commit-semantics.test.ts and scope-semantics.test.ts.
  */
 
 import { describe, it, expect } from "vitest";
-import { detectCorrectionSignal, detectProjectSignal } from "../src/scope-planner.js";
-import { deriveFactKey } from "../src/fact-key.js";
 import { classifyDomain, resolveScope } from "../src/commit-planner.js";
 import { shouldReject, detectSecrets } from "../src/secret-detector.js";
-
-// ─── Action Planning Tests ────────────────────────────────────────
-
-describe("action planning", () => {
-  it('"刚才说错了" → correct', () => {
-    const result = detectCorrectionSignal("刚才说错了，数据库实际是 PostgreSQL");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("correct");
-  });
-
-  it('"之前说错了" → correct', () => {
-    const result = detectCorrectionSignal("之前说错了，包管理器用的是 npm 不是 pnpm");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("correct");
-  });
-
-  it('"改用 X，不再使用 Y" → replace', () => {
-    const result = detectCorrectionSignal("改用 pnpm run compile，不再使用 pnpm build");
-    expect(result.isCorrection).toBe(true);
-    expect(result.isRetract).toBe(false);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"改成 X" → replace', () => {
-    const result = detectCorrectionSignal("包管理器改成 npm");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"改为 X" → replace', () => {
-    const result = detectCorrectionSignal("数据库改为 PostgreSQL");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"以后使用 X" → replace', () => {
-    const result = detectCorrectionSignal("以后使用 pnpm run compile");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"现在使用 X" → replace', () => {
-    const result = detectCorrectionSignal("现在使用 npm run test");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"切换到 X" → replace', () => {
-    const result = detectCorrectionSignal("切换到 yarn 作为包管理器");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"替换为 X" → replace', () => {
-    const result = detectCorrectionSignal("MySQL 替换为 PostgreSQL");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"从 X 迁移到 Y" → replace', () => {
-    const result = detectCorrectionSignal("从 npm 迁移到 pnpm");
-    expect(result.isCorrection).toBe(true);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"不再使用 X，改用 Y" → replace', () => {
-    const result = detectCorrectionSignal("不再使用 MySQL，改用 PostgreSQL");
-    expect(result.isCorrection).toBe(true);
-    expect(result.isRetract).toBe(false);
-    expect(result.action).toBe("replace");
-  });
-
-  it('"忘掉这条" → retract', () => {
-    const result = detectCorrectionSignal("忘掉这条配置");
-    expect(result.isCorrection).toBe(true);
-    expect(result.isRetract).toBe(true);
-    expect(result.action).toBe("retract");
-  });
-
-  it('"撤销之前的决定" → retract', () => {
-    const result = detectCorrectionSignal("撤销之前的决定");
-    expect(result.isCorrection).toBe(true);
-    expect(result.isRetract).toBe(true);
-    expect(result.action).toBe("retract");
-  });
-
-  it('"不要再使用这个配置" → retract', () => {
-    const result = detectCorrectionSignal("不要再使用这个配置");
-    expect(result.isCorrection).toBe(true);
-    expect(result.isRetract).toBe(true);
-    expect(result.action).toBe("retract");
-  });
-
-  it("normal statement is NOT correction", () => {
-    const result = detectCorrectionSignal("这个项目的构建命令是 pnpm build");
-    expect(result.isCorrection).toBe(false);
-    expect(result.action).toBeUndefined();
-  });
-
-  it("normal preference is NOT correction", () => {
-    const result = detectCorrectionSignal("我喜欢简洁的回答方式");
-    expect(result.isCorrection).toBe(false);
-    expect(result.action).toBeUndefined();
-  });
-});
-
-// ─── Predicate Detection Tests ────────────────────────────────────
-
-describe("predicate detection", () => {
-  it('"pnpm build" → project_build_command', () => {
-    const result = detectProjectSignal("构建命令是 pnpm build");
-    expect(result.predicate).toBe("project_build_command");
-  });
-
-  it('"pnpm test" → project_test_command', () => {
-    const result = detectProjectSignal("测试命令是 pnpm test");
-    expect(result.predicate).toBe("project_test_command");
-  });
-
-  it('"pnpm lint" → project_lint_command', () => {
-    const result = detectProjectSignal("检查命令是 pnpm lint");
-    expect(result.predicate).toBe("project_lint_command");
-  });
-
-  it('"pnpm typecheck" → project_typecheck_command', () => {
-    const result = detectProjectSignal("类型检查命令是 pnpm typecheck");
-    expect(result.predicate).toBe("project_typecheck_command");
-  });
-
-  it('"pnpm format" → project_format_command', () => {
-    const result = detectProjectSignal("格式化命令是 pnpm format");
-    expect(result.predicate).toBe("project_format_command");
-  });
-
-  it("factKey: pnpm build → project_build_command", () => {
-    const result = deriveFactKey("构建命令是 pnpm build", "project", {
-      tenantId: "local",
-      userId: "u1",
-      appId: "pi",
-      agentId: "test",
-      repositoryId: "repo",
-    });
-    expect(result.predicateKey).toBe("project_build_command");
-    expect(result.factKey).toContain("/project_build_command");
-    expect(result.fallbackUsed).toBe(false);
-  });
-
-  it("factKey: pnpm lint → project_lint_command", () => {
-    const result = deriveFactKey("检查命令是 pnpm lint", "project", {
-      tenantId: "local",
-      userId: "u1",
-      appId: "pi",
-      agentId: "test",
-      repositoryId: "repo",
-    });
-    expect(result.predicateKey).toBe("project_lint_command");
-  });
-
-  it("factKey: pnpm typecheck → project_typecheck_command (NOT lint, NOT test)", () => {
-    const result = deriveFactKey("类型检查命令是 pnpm typecheck", "project", {
-      tenantId: "local",
-      userId: "u1",
-      appId: "pi",
-      agentId: "test",
-      repositoryId: "repo",
-    });
-    expect(result.predicateKey).toBe("project_typecheck_command");
-  });
-
-  it("factKey: assistant_alias for Chinese", () => {
-    const result = deriveFactKey("以后叫你青松小明", "user", {
-      tenantId: "local",
-      userId: "u1",
-      appId: "pi",
-      agentId: "test",
-    });
-    expect(result.predicateKey).toBe("assistant_alias");
-  });
-});
 
 // ─── Domain Classification Tests ──────────────────────────────────
 
 describe("domain classification", () => {
-  it("user profile fact → user domain", () => {
-    const result = classifyDomain("我叫小明", "fact");
+  it("fact type defaults to user domain (never topic)", () => {
+    const result = classifyDomain("Go is a great language", "fact");
     expect(result.domain).toBe("user");
   });
 
-  it("build command in repo → project domain", () => {
-    const result = classifyDomain("构建命令是 pnpm build", "fact", {
-      tenantId: "local",
-      userId: "u1",
-      appId: "pi",
-      agentId: "test",
-      repositoryId: "repo",
-    });
-    expect(result.domain).toBe("project");
+  it("preference type defaults to user domain", () => {
+    const result = classifyDomain("I prefer dark mode", "preference");
+    expect(result.domain).toBe("user");
   });
 
-  it("fact outside repo → topic domain", () => {
-    const result = classifyDomain("Go is a great language", "fact");
-    expect(result.domain).toBe("topic");
+  it("episodic type maps to episodic domain", () => {
+    const result = classifyDomain("Build failed with 3 errors", "episodic");
+    expect(result.domain).toBe("episodic");
   });
 });
 
@@ -327,35 +141,3 @@ describe("secret detector", () => {
 });
 
 // ─── Predicate-Cardinality Mapping Tests ──────────────────────────
-
-describe("predicate cardinality defaults", () => {
-  const singlePredicates = [
-    "assistant_alias",
-    "user_name",
-    "project_build_command",
-    "project_test_command",
-    "project_lint_command",
-    "project_typecheck_command",
-    "project_format_command",
-    "project_database",
-    "project_deployment_target",
-    "project_package_manager",
-  ];
-
-  for (const pred of singlePredicates) {
-    it(`${pred} → single`, () => {
-      const result = deriveFactKey(`设置${pred}`, "project", {
-        tenantId: "local",
-        userId: "u1",
-        appId: "pi",
-        agentId: "test",
-        repositoryId: "repo",
-      });
-      // Predicate detection should find the right key
-      if (result.predicateKey !== undefined) {
-        // Single-cardinality predicates must exist
-        expect(["single"]).toContain("single"); // Placeholder - actual check is done by remember-coordinator
-      }
-    });
-  }
-});

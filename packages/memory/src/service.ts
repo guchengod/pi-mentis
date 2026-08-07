@@ -31,6 +31,12 @@ import { HierarchicalViewService, type ViewKind } from "./views.js";
 import { deriveFactKey as deriveFactKeyNew } from "./fact-key.js";
 import { planCommit } from "./commit-planner.js";
 import { classifySensitivity, toRemoteSafe } from "./secret-detector.js";
+import {
+  ScopeSemanticPlanner,
+  memoryScopeForDecision,
+  type ScopeOwnershipDecision,
+} from "./scope-semantics.js";
+import type { CommitSemanticPlanner } from "./commit-semantics.js";
 
 import type {
   CommitMemoryCommand,
@@ -54,6 +60,10 @@ export interface CreateMemoryServiceOptions {
   readonly clock?: Clock;
   readonly viewsEnabled?: boolean;
   readonly viewTtlMs?: number;
+  /** Optional semantic scope planner; defaults to one built from the embedding provider. */
+  readonly scopePlanner?: ScopeSemanticPlanner;
+  /** Optional unified commit semantic planner (predicate/action/type/cardinality). */
+  readonly commitPlanner?: CommitSemanticPlanner;
 }
 
 function quoteFilter(value: string): string {
@@ -90,8 +100,24 @@ function fields(document: { readonly fields: Record<string, unknown> }): Record<
   return document.fields;
 }
 
+/** Legacy fallback for records written before semantic polarity existed. */
 function polarity(text: string): "positive" | "negative" {
   return /\b(?:not|never|no longer|禁止|不要|不能|不再)\b/i.test(text) ? "negative" : "positive";
+}
+
+/** Stored semantic polarity, with legacy regex fallback for old records. */
+function storedPolarity(payload: Readonly<Record<string, unknown>>): "positive" | "negative" {
+  const stored = payload["polarity"];
+  if (stored === "negative" || stored === "positive") return stored;
+  const content = payload["content"];
+  return typeof content === "string" ? polarity(content) : "positive";
+}
+
+function recordPolarity(
+  incoming: "positive" | "negative" | undefined,
+  incomingText: string,
+): "positive" | "negative" {
+  return incoming ?? polarity(incomingText);
 }
 
 function extractPredicate(factKey: string | undefined): string | undefined {
@@ -103,6 +129,35 @@ function extractPredicate(factKey: string | undefined): string | undefined {
 function cosineSimilarity(score: number): number {
   // Zvec returns cosine distance (0 is identical), not cosine similarity.
   return 1 - score;
+}
+
+async function embedContent(
+  embedding: EmbeddingProvider,
+  content: string,
+  dimensions: number,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<EmbeddingVector> {
+  const response = await embedding.embed(
+    {
+      inputs: [normalizeText(content)],
+      inputKind: "memory",
+      dimensions,
+      truncate: "reject",
+    },
+    { priority: "interactive", ...(options.signal === undefined ? {} : { signal: options.signal }) },
+  );
+  const vector = response.vectors[0];
+  if (vector === undefined) {
+    throw new Error("Memory content Embedding response is empty");
+  }
+  return vector;
+}
+
+function scopeForDecision(
+  decision: ScopeOwnershipDecision,
+  scopeContext: PiScopeContext,
+): MemoryRecord["scope"] {
+  return memoryScopeForDecision(decision, scopeContext);
 }
 
 function inferDomain(command: CommitMemoryCommand): MemoryDomain {
@@ -152,6 +207,7 @@ export class DefaultMemoryService implements MemoryService {
   readonly #idempotent = new Map<string, Promise<CommitMemoryResult>>();
   readonly #factLocks = new Map<string, Promise<void>>();
   readonly #views: HierarchicalViewService | undefined;
+  readonly #scopePlanner: ScopeSemanticPlanner;
 
   constructor(options: CreateMemoryServiceOptions) {
     this.#store = options.store;
@@ -170,6 +226,38 @@ export class DefaultMemoryService implements MemoryService {
             clock: this.#clock,
             ...(options.viewTtlMs === undefined ? {} : { ttlMs: options.viewTtlMs }),
           });
+    this.#scopePlanner =
+      options.scopePlanner ??
+      new ScopeSemanticPlanner({
+        embedding: options.embedding,
+        dimensions: options.dimensions,
+      });
+  }
+
+  /** Semantic scope planning for callers that did not provide an embedding. */
+  async planScopeSemantic(
+    command: Pick<CommitMemoryCommand, "content" | "scopeContext"> & {
+      readonly embedding?: EmbeddingVector;
+    },
+    options: OperationOptions = {},
+  ): Promise<{ readonly scope: MemoryRecord["scope"]; readonly embedding: EmbeddingVector }> {
+    const embedding = command.embedding
+      ? command.embedding
+      : await embedContent(this.#embedding, command.content, this.#dimensions, {
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+    const scopeContext = command.scopeContext ?? {
+      tenantId: "local",
+      userId: "local",
+      appId: "pi",
+      agentId: "pi-mentis",
+    };
+    const decision = await this.#scopePlanner.decideOwnership(
+      { content: command.content, embedding: embedding.values },
+      scopeContext,
+      options.signal === undefined ? undefined : { signal: options.signal },
+    );
+    return { scope: scopeForDecision(decision, scopeContext), embedding };
   }
 
   async commit(
@@ -367,6 +455,7 @@ export class DefaultMemoryService implements MemoryService {
         ...(exNextNormalizedValue !== undefined ? { normalizedValue: exNextNormalizedValue } : {}),
         ...(exNextSetMemberKey !== undefined ? { setMemberKey: exNextSetMemberKey } : {}),
         temporalState: temporalPlan.temporalState,
+        ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
         observedAt: Math.max(existing.observedAt, command.observedAt ?? now),
         authority: Math.max(existing.authority, command.authority) as MemoryRecord["authority"],
         supersedesIds: [...new Set([...existing.supersedesIds, ...temporalPlan.supersedesIds])],
@@ -405,7 +494,12 @@ export class DefaultMemoryService implements MemoryService {
     const skipEmbedding = remoteSafe.policy === "local_only" || remoteSafe.policy === "drop";
     let embedding: { values: Float32Array } | undefined;
 
-    if (skipEmbedding) {
+    // Reuse the embedding already computed during scope planning (0 extra
+    // remote calls on the common path). The planner embedded the normalized
+    // content; the stored content may differ only by remote-safe redaction.
+    if (command.embedding !== undefined) {
+      embedding = command.embedding;
+    } else if (skipEmbedding) {
       embedding = { values: new Float32Array(this.#dimensions) };
     } else {
       const contentForEmbedding = remoteSafe.text ?? normalizedContent;
@@ -479,7 +573,8 @@ export class DefaultMemoryService implements MemoryService {
             return (
               cosineSimilarity(neighbor.score) >= 0.78 &&
               typeof existingContent === "string" &&
-              polarity(existingContent) === polarity(normalizedContent)
+              storedPolarity(payload) ===
+                recordPolarity(command.polarity, normalizedContent)
             );
           });
     if (semanticDuplicate !== undefined) {
@@ -525,6 +620,7 @@ export class DefaultMemoryService implements MemoryService {
           ...(nextNormalizedValue !== undefined ? { normalizedValue: nextNormalizedValue } : {}),
           ...(nextSetMemberKey !== undefined ? { setMemberKey: nextSetMemberKey } : {}),
           temporalState: temporalPlan.temporalState,
+          ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
           observedAt: Math.max(existing.observedAt, command.observedAt ?? now),
           authority: Math.max(existing.authority, command.authority) as MemoryRecord["authority"],
           supersedesIds: [...new Set([...existing.supersedesIds, ...temporalPlan.supersedesIds])],
@@ -561,13 +657,13 @@ export class DefaultMemoryService implements MemoryService {
     }
     const semanticConflicts = neighbors
       .filter(
-        (neighbor) =>
-          cosineSimilarity(neighbor.score) >= 0.82 &&
-          polarity(
-            typeof decodeStoredPayload(neighbor)["content"] === "string"
-              ? (decodeStoredPayload(neighbor)["content"] as string)
-              : "",
-          ) !== polarity(normalizedContent),
+        (neighbor) => {
+          const payload = decodeStoredPayload(neighbor);
+          return (
+            cosineSimilarity(neighbor.score) >= 0.82 &&
+            storedPolarity(payload) !== recordPolarity(command.polarity, normalizedContent)
+          );
+        },
       )
       .map((neighbor) => neighbor.id);
     let supersedesIds = [...new Set(command.supersedesIds ?? [])];
@@ -647,6 +743,7 @@ export class DefaultMemoryService implements MemoryService {
       ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
       ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
       temporalState: temporalPlan.temporalState,
+      ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
       ...(command.branchClaimState === undefined
         ? {}
         : { branchClaimState: command.branchClaimState }),
@@ -1199,6 +1296,135 @@ export class DefaultMemoryService implements MemoryService {
     };
     await this.#store.upsertVectors("memory", [this.#record(record)]);
     return withoutEmbedding(record);
+  }
+
+  async diagnoseMemoryScope(id: string): Promise<
+    | {
+        readonly id: string;
+        readonly currentScope: MemoryRecord["scope"];
+        readonly recommendedScope: MemoryRecord["scope"];
+        readonly confidence: number;
+        readonly reason: string;
+      }
+    | undefined
+  > {
+    throwIfAborted(undefined, "memory-diagnose-scope");
+    const stored = (await this.#store.fetchVectors("memory", [id])).get(id);
+    if (stored === undefined) return undefined;
+    const payload = decodeStoredPayload(stored) as unknown as Omit<MemoryRecord, "embedding">;
+    const scopeContext = payload.scopeContext ?? {
+      tenantId: "local",
+      userId: payload.ownership?.userId ?? "local",
+      appId: "pi",
+      agentId: "pi-mentis",
+    };
+    const embedding = stored.vectors["embedding"];
+    if (!(embedding instanceof Float32Array) && !Array.isArray(embedding)) {
+      return {
+        id,
+        currentScope: payload.scope,
+        recommendedScope: payload.scope,
+        confidence: 0,
+        reason: "record has no embedding; cannot run semantic scope planning",
+      };
+    }
+    const decision = await this.#scopePlanner.decideOwnership(
+      {
+        content: payload.content,
+        embedding: embedding instanceof Float32Array ? embedding : Float32Array.from(embedding),
+      },
+      scopeContext,
+    );
+    const recommended = scopeForDecision(decision, scopeContext);
+    return {
+      id,
+      currentScope: payload.scope,
+      recommendedScope: recommended,
+      confidence: decision.confidence,
+      reason: decision.reason,
+    };
+  }
+
+  async repairMemoryScope(id: string): Promise<
+    | {
+        readonly id: string;
+        readonly action: "unchanged" | "repaired" | "not_found";
+        readonly fromScope?: MemoryRecord["scope"];
+        readonly toScope?: MemoryRecord["scope"];
+        readonly reason: string;
+      }
+    | undefined
+  > {
+    const diagnosis = await this.diagnoseMemoryScope(id);
+    if (diagnosis === undefined) {
+      return { id, action: "not_found", reason: "record not found" };
+    }
+    const sameScope =
+      diagnosis.currentScope.kind === diagnosis.recommendedScope.kind &&
+      diagnosis.currentScope.id === diagnosis.recommendedScope.id;
+    if (sameScope) {
+      return { id, action: "unchanged", reason: diagnosis.reason };
+    }
+
+    const stored = (await this.#store.fetchVectors("memory", [id])).get(id);
+    if (stored === undefined) {
+      return { id, action: "not_found", reason: "record not found at repair time" };
+    }
+    const payload = decodeStoredPayload(stored) as unknown as Omit<MemoryRecord, "embedding">;
+    const vector = stored.vectors["embedding"];
+    if (!(vector instanceof Float32Array) && !Array.isArray(vector)) {
+      return {
+        id,
+        action: "unchanged",
+        fromScope: diagnosis.currentScope,
+        toScope: diagnosis.recommendedScope,
+        reason: "record has no embedding; cannot reindex",
+      };
+    }
+    const scopeContext = payload.scopeContext ?? {
+      tenantId: "local",
+      userId: payload.ownership?.userId ?? "local",
+      appId: "pi",
+      agentId: "pi-mentis",
+    };
+    const targetNamespace = scopedNamespace(diagnosis.recommendedScope, scopeContext);
+
+    // Avoid duplicates: if a record with the same content_hash already lives
+    // in the target namespace, drop this one instead of copying it.
+    const duplicate = await this.#store.filterVectors(
+      "memory",
+      `content_hash = ${quoteFilter(payload.contentHash)} AND namespace = ${quoteFilter(targetNamespace)}`,
+      2,
+    );
+    if (duplicate.some((item) => item.id !== id)) {
+      await this.#store.deleteVectors("memory", [id]);
+      return {
+        id,
+        action: "repaired",
+        fromScope: diagnosis.currentScope,
+        toScope: diagnosis.recommendedScope,
+        reason: `duplicate content already exists in target namespace; removed this record (${diagnosis.reason})`,
+      };
+    }
+
+    const now = this.#clock.now();
+    const record: MemoryRecord = {
+      ...payload,
+      id,
+      scope: diagnosis.recommendedScope,
+      embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+      updatedAt: now,
+      lastAccessedAt: now,
+      revision: payload.revision + 1,
+    };
+    await this.#store.upsertVectors("memory", [this.#record(record)]);
+    return {
+      id,
+      action: "repaired",
+      fromScope: diagnosis.currentScope,
+      toScope: diagnosis.recommendedScope,
+      reason: diagnosis.reason,
+    };
   }
 
   #record(record: MemoryRecord): StoredVectorRecord {

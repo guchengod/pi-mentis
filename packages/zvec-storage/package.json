@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-zvec",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Zvec-only durable storage, generations, write serialization, and process locking",
   "type": "module",
   "sideEffects": false,

@@ -15,6 +15,7 @@
 import type { SearchHit, SearchResult, MentisContextSnapshot } from "@pi-mentis/pi-mentis-core";
 import type {
   MemoryService,
+  MemoryScope,
   PiScopeContext,
   PiEvidenceStore,
   ArtifactRecord,
@@ -114,6 +115,31 @@ function mapKind(sourceKind: SearchHit["kind"], _namespace: string): PublicRecal
   return "topic";
 }
 
+/**
+ * Public projection of a stored MemoryScope kind. The public `kind` must
+ * reflect the record's real ownership scope — NOT a hardcoded "topic".
+ */
+function projectScopeKind(scope: MemoryScope): PublicRecallHit["kind"] {
+  switch (scope.kind) {
+    case "user":
+      return "user";
+    case "project":
+      return "project";
+    case "repository":
+      return "repository";
+    case "task":
+      return "task";
+    case "session":
+    case "branch":
+    case "run":
+      return "event";
+    case "topic":
+      return "topic";
+    default:
+      return "topic";
+  }
+}
+
 function trimContent(text: string): string {
   if (text.length <= MAX_CONTENT_LENGTH) return text;
   return text.slice(0, MAX_CONTENT_LENGTH) + "...";
@@ -192,7 +218,7 @@ async function exactMemoryRead(
     const hit: PublicRecallHit = {
       id: record.id,
       content: trimContent(sanitizedContent),
-      kind: "topic",
+      kind: projectScopeKind(record.scope),
       status:
         record.temporalState === "historical"
           ? "historical"
@@ -245,7 +271,7 @@ async function memoryEvolutionChain(
     hits.push({
       id: record.id,
       content: trimContent(currentSanitized),
-      kind: "topic",
+      kind: projectScopeKind(record.scope),
       status:
         record.temporalState === "historical"
           ? "historical"
@@ -265,7 +291,7 @@ async function memoryEvolutionChain(
         hits.push({
           id: newer.id,
           content: trimContent(s),
-          kind: "topic",
+          kind: projectScopeKind(newer.scope),
           status: "current",
           match: "anchored",
           resourceType: "memory",
@@ -283,7 +309,7 @@ async function memoryEvolutionChain(
         hits.push({
           id: old.id,
           content: trimContent(s),
-          kind: "topic",
+          kind: projectScopeKind(old.scope),
           status: "historical",
           match: "anchored",
           resourceType: "memory",
@@ -301,7 +327,7 @@ async function memoryEvolutionChain(
         hits.push({
           id: conflict.id,
           content: trimContent(s),
-          kind: "topic",
+          kind: projectScopeKind(conflict.scope),
           status: "conflicted",
           match: "anchored",
           resourceType: "memory",

@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-observability",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Sensitive-content-safe metrics, tracing, and diagnostics",
   "type": "module",
   "sideEffects": false,

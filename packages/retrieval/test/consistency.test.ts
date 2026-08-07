@@ -108,6 +108,7 @@ function mockMemoryService(
 function mockRetrievalService(memory: MemoryService): RetrievalService {
   const svc = {
     async search(retrievalQuery: RetrievalQuery, _retrievalOpts?: RetrievalOptions): Promise<SearchResult> {
+      void _retrievalOpts;
       const memoryResult = await memory.search(
         {
           text: retrievalQuery.text,

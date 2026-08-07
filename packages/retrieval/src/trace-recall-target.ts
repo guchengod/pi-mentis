@@ -25,6 +25,12 @@ export interface RecallTargetTrace {
   readonly targetId: string;
   readonly query: string;
   readonly stages: readonly RecallTargetStage[];
+  /** Query-visibility invariant diagnostics: did the scope filter allow the target? */
+  readonly scopeEligible: boolean;
+  readonly scopeRejectReason?: string;
+  readonly memoryOwner?: string;
+  readonly currentContext?: string;
+  readonly requiredScope?: string;
 }
 
 export interface TraceRecallTargetOptions {
@@ -106,8 +112,49 @@ export async function traceRecallTarget(
       : { reason: `status=${record.status} kind=${record.scope.kind}` }),
   });
   if (record === undefined) {
-    return { targetId, query, stages };
+    return {
+      targetId,
+      query,
+      stages,
+      scopeEligible: false,
+      scopeRejectReason: "Target not found in primary store — cannot evaluate scope eligibility",
+    };
   }
+
+  // ── Stage 1.5: Query Visibility Invariant (scope eligibility) ──
+  // A current, readable, durable memory owned by a scope visible in the
+  // current context MUST reach candidate retrieval. This stage computes
+  // exactly which scopes the query would search (mirroring the extension's
+  // memoryScopes construction) and reports whether the target's ownership
+  // scope is included — BEFORE any FTS/dense ranking can even see it.
+  const memoryOwner = `${record.scope.kind}:${record.scope.id}`;
+  const requiredScope = memoryOwner;
+  const queryScopes: readonly { kind: string; id: string }[] = [
+    ...(ctx.repositoryId === undefined
+      ? []
+      : [{ kind: "repository" as const, id: ctx.repositoryId }]),
+    ...(ctx.projectId === undefined ? [] : [{ kind: "project" as const, id: ctx.projectId }]),
+    ...(ctx.taskId === undefined ? [] : [{ kind: "task" as const, id: ctx.taskId }]),
+    { kind: "user" as const, id: ctx.userId },
+    ...(ctx.topicIds ?? []).map((topicId) => ({ kind: "topic" as const, id: topicId })),
+  ];
+  const scopeEligible = queryScopes.some(
+    (scope) => scope.kind === record.scope.kind && scope.id === record.scope.id,
+  );
+  const scopeRejectReason = scopeEligible
+    ? undefined
+    : `memory owner=${memoryOwner} is NOT among query scopes ` +
+      `[${queryScopes.map((s) => `${s.kind}:${s.id}`).join(", ")}] — ` +
+      `scope filter would exclude the target before FTS/Dense. ` +
+      `Current context: repository=${ctx.repositoryId ?? "-"} project=${ctx.projectId ?? "-"} ` +
+      `task=${ctx.taskId ?? "-"} topic=[${(ctx.topicIds ?? []).join(", ")}]`;
+  stages.push({
+    stage: "scope_eligibility",
+    present: scopeEligible,
+    ...(scopeEligible
+      ? { reason: `memory owner=${memoryOwner} is visible in current query scopes` }
+      : { reason: scopeRejectReason ?? "scope filter excludes target" }),
+  });
 
   const searchOpts = signal === undefined ? { timeoutMs: 5_000 } : { signal, timeoutMs: 5_000 };
 
@@ -241,5 +288,5 @@ export async function traceRecallTarget(
     });
   }
 
-  return { targetId, query, stages };
+  return { targetId, query, stages, scopeEligible, ...(scopeRejectReason === undefined ? {} : { scopeRejectReason }), ...(memoryOwner === undefined ? {} : { memoryOwner }), currentContext: `repository=${ctx.repositoryId ?? "-"} project=${ctx.projectId ?? "-"} task=${ctx.taskId ?? "-"} topic=[${(ctx.topicIds ?? []).join(", ")}]`, ...(requiredScope === undefined ? {} : { requiredScope }) };
 }

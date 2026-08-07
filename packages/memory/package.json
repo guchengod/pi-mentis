@@ -1,6 +1,6 @@
 {
   "name": "@pi-mentis/pi-mentis-memory-core",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Evidence-bound durable memory, capture, conflict, and reinforcement",
   "type": "module",
   "sideEffects": false,

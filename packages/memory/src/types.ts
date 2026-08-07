@@ -163,6 +163,8 @@ export interface MemoryRecord {
   readonly premises?: readonly MemoryPremise[];
   readonly contentOrigin?: MemoryContentOrigin;
   readonly evidenceIntegrity?: "valid" | "missing" | "invalid";
+  /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
+  readonly polarity?: "positive" | "negative";
 }
 
 export interface CommitMemoryCommand {
@@ -187,6 +189,10 @@ export interface CommitMemoryCommand {
   readonly contentOrigin?: MemoryContentOrigin;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  /** Precomputed content embedding (reused from scope planning — avoids a second remote call). */
+  readonly embedding?: EmbeddingVector;
+  /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
+  readonly polarity?: "positive" | "negative";
 }
 
 export type MemoryContentOrigin =
@@ -282,6 +288,34 @@ export interface MemoryService {
   }>;
   flushBackground?(): Promise<void>;
   abandonBranch?(branchId: string, scopeContext: PiScopeContext): Promise<number>;
+  /** Internal debug/migration: diagnose the ownership scope of a stored memory. */
+  diagnoseMemoryScope?(
+    id: string,
+    options?: OperationOptions,
+  ): Promise<
+    | {
+        readonly id: string;
+        readonly currentScope: MemoryScope;
+        readonly recommendedScope: MemoryScope;
+        readonly confidence: number;
+        readonly reason: string;
+      }
+    | undefined
+  >;
+  /** Internal debug/migration: rewrite a stored memory into its recommended ownership scope. */
+  repairMemoryScope?(
+    id: string,
+    options?: OperationOptions,
+  ): Promise<
+    | {
+        readonly id: string;
+        readonly action: "unchanged" | "repaired" | "not_found";
+        readonly fromScope?: MemoryScope;
+        readonly toScope?: MemoryScope;
+        readonly reason: string;
+      }
+    | undefined
+  >;
 }
 
 export interface TemporalClaimPointer {

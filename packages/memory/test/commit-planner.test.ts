@@ -16,10 +16,9 @@ describe("classifyDomain", () => {
       { tenantId: "local", userId: "u1", appId: "pi", agentId: "test", repositoryId: "my-repo" },
     );
     expect(result.domain).toBe("user");
-    expect(result.confidence).toBeGreaterThanOrEqual(0.85);
   });
 
-  it("classifies project-scoped preference as project domain", () => {
+  it("classifies preference as user domain (no content-phrase routing)", () => {
     const result = classifyDomain("this project should use tabs for indentation", "preference", {
       tenantId: "local",
       userId: "u1",
@@ -27,10 +26,10 @@ describe("classifyDomain", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(result.domain).toBe("project");
+    expect(result.domain).toBe("user");
   });
 
-  it("classifies build-related fact as environment domain", () => {
+  it("classifies fact as user domain (no content-phrase routing)", () => {
     const result = classifyDomain("The project uses Node.js 22.14.0 with pnpm@10.20.0", "fact", {
       tenantId: "local",
       userId: "u1",
@@ -38,7 +37,7 @@ describe("classifyDomain", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    expect(result.domain).toBe("environment");
+    expect(result.domain).toBe("user");
   });
 
   it("classifies episodic as episodic domain", () => {
@@ -127,7 +126,7 @@ describe("planCommit", () => {
     expect(plan.scope.kind).toBe("user");
   });
 
-  it("plans build command → project domain, repository scope", () => {
+  it("plans build command type as fact → user domain default (ownership decides scope)", () => {
     const plan = planCommit("Build command is pnpm build", "fact", {
       tenantId: "local",
       userId: "u1",
@@ -135,9 +134,8 @@ describe("planCommit", () => {
       agentId: "test",
       repositoryId: "my-repo",
     });
-    // Build commands are project config facts, not environment facts
-    expect(plan.domain).toBe("project");
-    expect(plan.scope.kind).toBe("repository");
+    // Domain is type-driven; the semantic scope planner decides ownership.
+    expect(plan.domain).toBe("user");
   });
 
   it("plans event → episodic domain", () => {
