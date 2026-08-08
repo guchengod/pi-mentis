@@ -31,4 +31,5 @@ export * from "./task-graph.js";
 export * from "./temporal.js";
 export * from "./turn-context.js";
 export * from "./types.js";
+export * from "./value-relation.js";
 export * from "./views.js";

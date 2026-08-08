@@ -373,6 +373,7 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       ...(embedding === undefined ? {} : { embedding }),
       ...(action === "retract" ? { retractsFact: true } : {}),
       polarity: semanticPlan.polarity,
+      semanticIntent: semanticPlan.actionIntent,
       ...(factKeyResult.normalizedValue !== undefined
         ? { normalizedValue: factKeyResult.normalizedValue }
         : {}),

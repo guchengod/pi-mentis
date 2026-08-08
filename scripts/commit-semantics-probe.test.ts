@@ -2,7 +2,11 @@
 import { describe, it, expect } from "vitest";
 import { loadConfig } from "@pi-mentis/pi-mentis-core";
 import { SiliconFlowEmbeddingProvider } from "@pi-mentis/pi-mentis-siliconflow";
-import { ACTION_PROTOTYPES, POLARITY_PROTOTYPES } from "@pi-mentis/pi-mentis-memory-core";
+import {
+  ACTION_PROTOTYPES,
+  POLARITY_PROTOTYPES,
+  decideValueRelation,
+} from "@pi-mentis/pi-mentis-memory-core";
 
 const CASES: readonly {
   label: string;
@@ -84,6 +88,118 @@ describe("commit semantics prototype routing probe (live)", () => {
     }
     console.log("\n" + rows.join("\n"));
     console.log(`\nRAW ACTION: ${actionOk}/${CASES.length}  POLARITY: ${polarityOk}/${CASES.length}  GATED DECISION: ${gatedOkCount}/${CASES.length}`);
+    expect(true).toBe(true);
+  }, 120_000);
+});
+
+// ─── Value-relation probe: same fact, equivalent vs changed value ──
+
+const VALUE_CASES: readonly {
+  label: string;
+  incoming: string;
+  existing: string;
+  predicate: string;
+  expected: string;
+}[] = [
+  {
+    label: "V1 (real regression)",
+    incoming: "我对实验分支的命名偏好是使用星体、星座等天文主题名称，避免单纯的数字名称。",
+    existing: "我个人给实验性分支起名字时，更喜欢使用天文相关的名称，不喜欢纯数字编号。",
+    predicate: "user_name",
+    expected: "equivalent",
+  },
+  {
+    label: "V2 (Case A)",
+    incoming: "写实现时我倾向直白、少层级。",
+    existing: "我喜欢简单直接的代码。",
+    predicate: "code_style_preference",
+    expected: "equivalent",
+  },
+  {
+    label: "V3 (Case C)",
+    incoming: "我的默认 shell 使用 zsh。",
+    existing: "默认 shell 是 zsh。",
+    predicate: "runtime",
+    expected: "equivalent",
+  },
+  {
+    label: "V4 (Case D)",
+    incoming: "默认 shell 现在是 fish。",
+    existing: "默认 shell 是 zsh。",
+    predicate: "runtime",
+    expected: "different",
+  },
+  {
+    label: "V5 (Case E)",
+    incoming: "TypeScript 也是我喜欢的语言。",
+    existing: "我喜欢 Go。",
+    predicate: "language",
+    expected: "additive",
+  },
+  {
+    label: "V6 (Case F)",
+    incoming: "我喜欢自动生成分支名。",
+    existing: "我不喜欢自动生成分支名。",
+    predicate: "user_name",
+    expected: "contradictory",
+  },
+  {
+    label: "V7 (false positive)",
+    incoming: "我喜欢简单直接的回答。",
+    existing: "我喜欢简单直接的实现。",
+    predicate: "code_style_preference",
+    expected: "not-equivalent",
+  },
+  {
+    label: "V8 (false positive)",
+    incoming: "生产分支使用天文命名。",
+    existing: "实验分支使用天文命名。",
+    predicate: "user_name",
+    expected: "not-equivalent",
+  },
+];
+
+describe("value relation probe (live)", () => {
+  it("routes equivalent vs changed value on same fact", async () => {
+    const config = await loadConfig(process.cwd());
+    const provider = new SiliconFlowEmbeddingProvider(config.inference.siliconflow);
+    const dims = config.inference.siliconflow.embedding.dimensions;
+    const embed = async (texts: string[]) => {
+      const resp = await provider.embed({ inputs: texts, inputKind: "document", dimensions: dims });
+      return resp.vectors.map((v: { values: Float32Array }) => v.values);
+    };
+    const rows: string[] = [];
+    for (const c of VALUE_CASES) {
+      const [incomingVec, existingVec] = await embed([c.incoming, c.existing]);
+      const decision = decideValueRelation({
+        incoming: {
+          content: c.incoming,
+          embedding: incomingVec,
+          polarity: c.incoming.includes("不喜欢") ? "negative" : "positive",
+          normalizedValue: undefined,
+          setMemberKey: undefined,
+          cardinality: c.predicate === "language" ? "set" : "single",
+          semanticIntent: undefined,
+        },
+        existing: {
+          content: c.existing,
+          embedding: existingVec,
+          polarity: c.existing.includes("不喜欢") ? "negative" : "positive",
+          normalizedValue: undefined,
+          setMemberKey: undefined,
+          cardinality: c.predicate === "language" ? "set" : "single",
+        },
+        predicate: c.predicate,
+      });
+      const ok =
+        c.expected === "not-equivalent"
+          ? decision.relation !== "equivalent"
+          : decision.relation === c.expected;
+      rows.push(
+        `${ok ? "✓" : "✗"} ${c.label.padEnd(20)} relation=${decision.relation.padEnd(13)} (exp ${c.expected.padEnd(13)}) cosine=${decision.embeddingSimilarity?.toFixed(3)} signal=${decision.signal}`,
+      );
+    }
+    console.log("\n" + rows.join("\n"));
     expect(true).toBe(true);
   }, 120_000);
 });

@@ -37,6 +37,7 @@ import {
   type ScopeOwnershipDecision,
 } from "./scope-semantics.js";
 import type { CommitSemanticPlanner } from "./commit-semantics.js";
+import { decideValueRelation, type ValueRelationDecision } from "./value-relation.js";
 
 import type {
   CommitMemoryCommand,
@@ -447,6 +448,7 @@ export class DefaultMemoryService implements MemoryService {
         importance: Math.min(1, Math.max(existing.importance, command.importance ?? 0.5)),
         updatedAt: now,
         lastAccessedAt: now,
+        lastReinforcedAt: now,
         reinforceCount: existing.reinforceCount + 1,
         revision: existing.revision + 1,
         status: statusForTemporalState(temporalPlan.temporalState),
@@ -678,7 +680,164 @@ export class DefaultMemoryService implements MemoryService {
     let conflicts = semanticConflicts;
     const factKey = command.factKey ?? deriveFactKey(command);
     const cardinality = command.cardinality ?? defaultCardinality(command.type);
-    const temporalPlan: TemporalPlan = await this.#temporal.prepare({
+
+    // ── Same-fact value relation routing ──
+    // Find the existing current claim(s) for the same factKey and decide the
+    // relation between the incoming value and the stored value. Same fact +
+    // equivalent value (paraphrase) → reinforce the existing record IN PLACE
+    // (logical ID stays stable, no temporal version chain). Unknown → create
+    // a conflicted review candidate instead of a destructive supersede.
+    let equivalentReinforce:
+      | {
+          readonly decision: ValueRelationDecision;
+          readonly existing: Omit<MemoryRecord, "embedding">;
+          readonly embedding: Float32Array;
+        }
+      | undefined;
+    let unknownGuardExistingId: string | undefined;
+    let comparedDecision: ValueRelationDecision | undefined;
+    let comparedExistingId: string | undefined;
+    let comparedExistingFactKey: string | undefined;
+    if (
+      !isEvent &&
+      command.retractsFact !== true &&
+      (command.supersedesIds?.length ?? 0) === 0 &&
+      command.branchClaimState !== "hypothesis"
+    ) {
+      const head = await this.#temporal.head(factKey, command.scope, command.scopeContext);
+      const claimIds = head?.currentClaims.map((claim) => claim.memoryId) ?? [];
+      if (claimIds.length > 0) {
+        const stored = await this.#store.fetchVectors("memory", claimIds);
+        for (const [existingId, item] of stored) {
+          const payload = decodeStoredPayload(item) as unknown as Omit<MemoryRecord, "embedding">;
+          const vector = item.vectors["embedding"];
+          if (!(vector instanceof Float32Array) && !Array.isArray(vector)) continue;
+          const existingEmbedding =
+            vector instanceof Float32Array ? vector : Float32Array.from(vector);
+          const decision = decideValueRelation({
+            incoming: {
+              content: command.content,
+              embedding: embedding.values,
+              polarity: command.polarity,
+              normalizedValue: command.normalizedValue,
+              setMemberKey: command.setMemberKey,
+              cardinality,
+              semanticIntent: command.semanticIntent,
+            },
+            existing: {
+              content: payload.content,
+              embedding: existingEmbedding,
+              polarity: storedPolarity(payload),
+              normalizedValue: payload["normalizedValue"] as string | undefined,
+              setMemberKey: payload["setMemberKey"] as string | undefined,
+              cardinality: payload["cardinality"] as MemoryRecord["cardinality"],
+            },
+            predicate: extractPredicate(factKey) ?? factKey,
+          });
+          comparedDecision = decision;
+          comparedExistingId = existingId;
+          comparedExistingFactKey = payload.factKey;
+          if (decision.relation === "equivalent") {
+            equivalentReinforce = {
+              decision,
+              existing: payload,
+              embedding: existingEmbedding,
+            };
+            break;
+          }
+          if (decision.relation === "unknown") {
+            unknownGuardExistingId = existingId;
+          }
+        }
+      }
+      const finalAction =
+        equivalentReinforce !== undefined
+          ? "reinforce"
+          : unknownGuardExistingId !== undefined
+            ? "conflicted-candidate"
+            : comparedDecision === undefined
+              ? undefined
+              : comparedDecision.relation === "different"
+                ? cardinality === "set" || cardinality === "ordered"
+                  ? "coexist"
+                  : "supersede"
+                : comparedDecision.relation === "additive"
+                  ? "coexist"
+                  : comparedDecision.relation === "contradictory"
+                    ? "conflict"
+                    : "create";
+      this.#telemetry.trace("memory_value_relation", {
+        existingId:
+          equivalentReinforce?.existing.id ??
+          unknownGuardExistingId ??
+          comparedExistingId ??
+          "none-found",
+        incomingFactKey: factKey,
+        existingFactKey:
+          equivalentReinforce?.existing.factKey ??
+          comparedExistingFactKey ??
+          undefined,
+        valueRelation: comparedDecision?.relation ?? "not-applicable",
+        valueRelationConfidence: comparedDecision?.confidence,
+        embeddingSimilarity: comparedDecision?.embeddingSimilarity,
+        normalizedIncomingValue: comparedDecision?.normalizedIncomingValue,
+        normalizedExistingValue: comparedDecision?.normalizedExistingValue,
+        semanticIntent: command.semanticIntent,
+        finalStorageAction: finalAction,
+        actionReason: comparedDecision?.signal,
+      });
+    }
+
+    if (equivalentReinforce !== undefined) {
+      // Same fact identity + semantically equivalent value → reinforce the
+      // canonical record in place: keep ID and content, add reinforcement
+      // evidence. No new record, no supersede, no temporal version.
+      const { existing, embedding: existingEmbedding } = equivalentReinforce;
+      const reinforced: MemoryRecord = {
+        ...existing,
+        embedding: existingEmbedding,
+        confidence: Math.min(1, Math.max(existing.confidence, command.confidence ?? 0.8)),
+        importance: Math.min(1, Math.max(existing.importance, command.importance ?? 0.5)),
+        updatedAt: now,
+        lastAccessedAt: now,
+        lastReinforcedAt: now,
+        reinforceCount: existing.reinforceCount + 1,
+        revision: existing.revision + 1,
+        status: existing.status === "active" ? "active" : existing.status,
+        factKey: existing.factKey ?? factKey,
+        observedAt: Math.max(existing.observedAt, command.observedAt ?? now),
+        authority: Math.max(existing.authority, command.authority) as MemoryRecord["authority"],
+        evidenceRefs: [
+          ...existing.evidenceRefs,
+          ...(command.evidenceRefs ?? []).filter(
+            (candidate) =>
+              !existing.evidenceRefs.some(
+                (item) => item.kind === candidate.kind && item.id === candidate.id,
+              ),
+          ),
+        ],
+        evidenceIntegrity,
+      };
+      await this.#store.upsertVectors("memory", [this.#record(reinforced)]);
+      await this.#views?.enqueueMemory(withoutEmbedding(reinforced));
+      const relPredicate = extractPredicate(factKey);
+      return {
+        outcome: "reinforced",
+        record: withoutEmbedding(reinforced),
+        relatedIds: [reinforced.id],
+        ...(relPredicate !== undefined ? { predicate: relPredicate } : {}),
+        cardinality,
+        ...(command.normalizedValue !== undefined
+          ? { normalizedValue: command.normalizedValue }
+          : {}),
+        ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
+      };
+    }
+    const unknownGuard = unknownGuardExistingId !== undefined;
+
+    const temporalPlan: TemporalPlan | undefined = unknownGuard
+      ? undefined
+      : await this.#temporal.prepare({
       factKey,
       cardinality,
       scope: command.scope,
@@ -692,20 +851,27 @@ export class DefaultMemoryService implements MemoryService {
         ? {}
         : { branchClaimState: command.branchClaimState }),
     });
-    supersedesIds = [...new Set([...supersedesIds, ...temporalPlan.supersedesIds])];
-    conflicts = [...new Set([...conflicts, ...temporalPlan.conflictsWithIds])];
+    supersedesIds = [...new Set([...supersedesIds, ...(temporalPlan?.supersedesIds ?? [])])];
+    const planConflicts = [
+      ...new Set([...conflicts, ...(temporalPlan?.conflictsWithIds ?? [])]),
+    ];
+    const finalConflicts = unknownGuard
+      ? [...new Set([unknownGuardExistingId, ...conflicts])]
+      : planConflicts;
     const status =
-      temporalPlan?.temporalState === "rejected"
-        ? "rejected"
-        : temporalPlan?.temporalState === "retracted"
-          ? "tombstoned"
-          : temporalPlan?.temporalState === "historical"
-            ? "superseded"
-            : temporalPlan?.temporalState === "conflicted" || conflicts.length > 0
-              ? "conflicted"
-              : temporalPlan?.temporalState === "pending" || pending
-                ? "pending"
-                : "active";
+      unknownGuard
+        ? "conflicted"
+        : temporalPlan?.temporalState === "rejected"
+          ? "rejected"
+          : temporalPlan?.temporalState === "retracted"
+            ? "tombstoned"
+            : temporalPlan?.temporalState === "historical"
+              ? "superseded"
+              : temporalPlan?.temporalState === "conflicted" || planConflicts.length > 0
+                ? "conflicted"
+                : temporalPlan?.temporalState === "pending" || pending
+                  ? "pending"
+                  : "active";
     const record: MemoryRecord = {
       id,
       content: command.content,
@@ -726,8 +892,8 @@ export class DefaultMemoryService implements MemoryService {
       importance,
       authority: command.authority,
       evidenceRefs: command.evidenceRefs ?? [],
-      supersedesIds,
-      conflictsWithIds: conflicts,
+      supersedesIds: unknownGuard ? [] : supersedesIds,
+      conflictsWithIds: finalConflicts.filter((item): item is string => item !== undefined),
       status,
       embeddingSpaceId: this.#embeddingSpaceId,
       embedding: embedding.values,
@@ -742,7 +908,7 @@ export class DefaultMemoryService implements MemoryService {
       cardinality,
       ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
       ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
-      temporalState: temporalPlan.temporalState,
+      ...(temporalPlan === undefined ? {} : { temporalState: temporalPlan.temporalState }),
       ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
       ...(command.branchClaimState === undefined
         ? {}
@@ -777,7 +943,7 @@ export class DefaultMemoryService implements MemoryService {
       }
       await this.#store.upsertVectors("memory", updates);
     }
-    if (conflicts.length > 0) {
+    if (!unknownGuard && conflicts.length > 0) {
       const previous = await this.#store.fetchVectors("memory", conflicts);
       const updates: StoredVectorRecord[] = [];
       for (const [previousId, stored] of previous) {
@@ -804,18 +970,26 @@ export class DefaultMemoryService implements MemoryService {
       await this.#views.enqueueMemory(withoutEmbedding(record));
     }
     const outcome =
-      temporalPlan?.decision === "reject"
-        ? "rejected"
-        : conflicts.length > 0
-          ? "conflict"
-          : supersedesIds.length > 0
-            ? "superseded"
-            : "created";
+      unknownGuard
+        ? "conflict"
+        : temporalPlan?.decision === "reject"
+          ? "rejected"
+          : conflicts.length > 0
+            ? "conflict"
+            : supersedesIds.length > 0
+              ? "superseded"
+              : "created";
     const newPredicate = extractPredicate(factKey);
     return {
       outcome,
       record: withoutEmbedding(record),
-      relatedIds: [...supersedesIds, ...conflicts],
+      relatedIds: [
+        ...supersedesIds,
+        ...conflicts,
+        ...(unknownGuard && unknownGuardExistingId !== undefined
+          ? [unknownGuardExistingId]
+          : []),
+      ],
       ...(newPredicate !== undefined ? { predicate: newPredicate } : {}),
       cardinality,
       ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),

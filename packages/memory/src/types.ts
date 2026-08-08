@@ -5,6 +5,7 @@ import type {
   SearchResult,
 } from "@pi-mentis/pi-mentis-core";
 import type { EmbeddingVector } from "@pi-mentis/pi-mentis-inference";
+import type { CommitActionIntent } from "./commit-semantics.js";
 import type { MaterializedView, ViewKind } from "./views.js";
 
 // ─── Ownership & Relevance Split ─────────────────────────────────
@@ -151,6 +152,8 @@ export interface MemoryRecord {
   readonly supersededById?: string;
   readonly lastAccessedAt: number;
   readonly reinforceCount: number;
+  /** Last time the record was reinforced with semantically equivalent content. */
+  readonly lastReinforcedAt?: number;
   readonly revision: number;
   readonly factKey?: string;
   readonly cardinality?: TemporalCardinality;
@@ -193,6 +196,11 @@ export interface CommitMemoryCommand {
   readonly embedding?: EmbeddingVector;
   /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
   readonly polarity?: "positive" | "negative";
+  /**
+   * Action intent from CommitSemanticPlanner (create/reinforce/correct/
+   * replace/retract). Used by the value-relation router as a tiebreak only.
+   */
+  readonly semanticIntent?: CommitActionIntent;
 }
 
 export type MemoryContentOrigin =
