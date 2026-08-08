@@ -103,6 +103,13 @@ export interface PredicateVectorCacheRecord {
   readonly providerId: string;
   readonly modelId: string;
   readonly dimensions: number;
+  /**
+   * Content fingerprint of the predicate semantic texts (and any other
+   * embedded prototype texts). When the predicate registry definitions or
+   * their semantic texts change, the fingerprint changes and the cache is
+   * rebuilt. When nothing changed, the cache is reused — no remote calls.
+   */
+  readonly textFingerprint?: string;
   readonly entries: readonly {
     readonly predicate: string;
     readonly vector: readonly number[];
@@ -175,6 +182,11 @@ export class InMemoryPredicateSemanticIndex implements PredicateSemanticIndex {
       .sort((left, right) => right.score - left.score)
       .slice(0, limit);
   }
+}
+
+/** Empty index — degrades to a broad, memory-need-required fallback plan. */
+function emptyPredicateSemanticIndex(): PredicateSemanticIndex {
+  return new InMemoryPredicateSemanticIndex([]);
 }
 
 function clamp01(value: number): number {
@@ -266,6 +278,7 @@ export class SemanticQueryPlanner {
   readonly #queryCacheEntries: number;
   readonly #queryCache = new Map<string, EmbeddingVector>();
   readonly #initialization: Promise<PredicateSemanticIndex>;
+  #backgroundInit: Promise<PredicateSemanticIndex> | undefined;
 
   constructor(options: SemanticQueryPlannerOptions) {
     this.#embedding = options.embedding;
@@ -274,12 +287,56 @@ export class SemanticQueryPlanner {
     this.#registry = options.registry ?? DEFAULT_PREDICATE_REGISTRY;
     this.#cache = options.cache;
     this.#queryCacheEntries = Math.max(1, options.queryCacheEntries ?? 256);
-    this.#initialization = this.#initialize();
+    // Fast path: load the persisted cache. If it hits, this resolves in
+    // milliseconds. If it misses, this returns a degraded index immediately
+    // and the remote embedding continues in the background.
+    this.#initialization = this.#loadIndex();
   }
 
-  async #initialize(): Promise<PredicateSemanticIndex> {
+  /**
+   * Resolve the real (fully built) predicate index. Never blocks on remote
+   * embedding in the common cache-hit case; on a cache miss it waits for
+   * the background build.
+   */
+  async ready(): Promise<PredicateSemanticIndex> {
+    if (this.#backgroundInit !== undefined) {
+      try {
+        return await this.#backgroundInit;
+      } catch {
+        return emptyPredicateSemanticIndex();
+      }
+    }
+    try {
+      return await this.#initialization;
+    } catch {
+      return emptyPredicateSemanticIndex();
+    }
+  }
+
+  /**
+   * Background warmup: ensure the real index is computed. Never throws.
+   * Used by session startup to pre-warm predicate vectors without blocking
+   * the agent's first turn.
+   */
+  warmup(): void {
+    void this.#backgroundBuild();
+  }
+
+  /**
+   * Fast path: load the persisted cache and return a usable index.
+   *
+   * On a cache hit this resolves in milliseconds (disk read only). On a
+   * cache miss it delegates to the background build — the promise resolves
+   * once the remote embedding completes. The warmup() call at session
+   * startup means this is usually already done by the first search.
+   */
+  async #loadIndex(): Promise<PredicateSemanticIndex> {
     const cached = await this.#cache?.load().catch(() => undefined);
     const definitions = this.#registry.list();
+    const texts = definitions.map(buildPredicateSemanticText);
+    const textFingerprint = contentHash(
+      `${this.#registry.schemaVersion}:${JSON.stringify(texts)}`,
+    );
     if (
       cached !== undefined &&
       cached.schemaVersion === this.#registry.schemaVersion &&
@@ -287,6 +344,9 @@ export class SemanticQueryPlanner {
       cached.modelId === this.#modelId &&
       cached.dimensions === this.#dimensions &&
       cached.entries.length === definitions.length &&
+      // Content fingerprint: only rebuild when the semantic texts changed.
+      // A plain `/new` reuses the cache — zero remote embedding calls.
+      cached.textFingerprint === textFingerprint &&
       cached.entries.every(
         (entry) => this.#registry.has(entry.predicate) && entry.vector.length === this.#dimensions,
       )
@@ -299,7 +359,24 @@ export class SemanticQueryPlanner {
       );
     }
 
+    // Cache miss → build in the background and wait for it.
+    return this.#backgroundBuild();
+  }
+
+  #backgroundBuild(): Promise<PredicateSemanticIndex> {
+    if (this.#backgroundInit === undefined) {
+      this.#backgroundInit = this.#buildIndex()
+        .catch(() => emptyPredicateSemanticIndex());
+    }
+    return this.#backgroundInit;
+  }
+
+  async #buildIndex(): Promise<PredicateSemanticIndex> {
+    const definitions = this.#registry.list();
     const texts = definitions.map(buildPredicateSemanticText);
+    const textFingerprint = contentHash(
+      `${this.#registry.schemaVersion}:${JSON.stringify(texts)}`,
+    );
     const entries: PredicateSemanticEntry[] = [];
     for (let offset = 0; offset < texts.length; offset += 32) {
       const response = await this.#embedding.embed(
@@ -328,6 +405,7 @@ export class SemanticQueryPlanner {
         providerId: this.#embedding.id,
         modelId: this.#modelId,
         dimensions: this.#dimensions,
+        textFingerprint,
         entries: entries.map((entry) => ({
           predicate: entry.predicate,
           vector: [...entry.vector],

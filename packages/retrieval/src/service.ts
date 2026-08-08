@@ -75,6 +75,12 @@ export interface RetrievalService {
   search(query: RetrievalQuery, options?: RetrievalOptions): Promise<SearchResult>;
   recordOutcome?(namespace: string, outcome: TaskOutcomeObservation): Promise<void>;
   flush?(): Promise<void>;
+  /**
+   * Background warmup of semantic indices (predicate vectors). Non-blocking.
+   * Call during session startup so the first search does not stall on a
+   * cache-miss remote embedding.
+   */
+  warmup?(): void;
 }
 
 export interface CreateRetrievalServiceOptions {
@@ -224,6 +230,10 @@ export class DefaultRetrievalService implements RetrievalService {
               : { registry: options.predicateRegistry }),
             ...(vectorCache === undefined ? {} : { cache: vectorCache }),
           }));
+  }
+
+  warmup(): void {
+    this.#semanticPlanner?.warmup();
   }
 
   async search(query: RetrievalQuery, options: RetrievalOptions = {}): Promise<SearchResult> {

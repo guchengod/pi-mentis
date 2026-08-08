@@ -589,6 +589,10 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         createTaskGraphService(storeHandle.store),
       );
     }
+
+    // Pre-warm semantic indices off the hot path so the first search does
+    // not stall the agent's first turn on a cache-miss remote embedding.
+    runtime.getRetrieval<RetrievalService>()?.warmup?.();
   });
   pi.on("session_tree", (event, context) => {
     branchId = event.newLeafId ?? "root";

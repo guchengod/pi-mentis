@@ -215,6 +215,12 @@ export interface ScopePrototypeVectorCacheRecord {
   readonly providerId: string;
   readonly modelId: string;
   readonly dimensions: number;
+  /**
+   * Content fingerprint of the scope/subject prototype anchor texts. When
+   * the prototypes change, the fingerprint changes and the cache is rebuilt.
+   * Otherwise it is reused across sessions — no remote calls on `/new`.
+   */
+  readonly textFingerprint?: string;
   readonly scopes: readonly {
     readonly kind: string;
     readonly vectors: readonly (readonly number[])[];
@@ -341,13 +347,28 @@ export class ScopeSemanticPlanner {
       return;
     }
 
-    // 1. Try the persisted cache
+    // 1. Try the persisted cache — only when the prototype texts are unchanged
+    const allTexts: { readonly kind: string; readonly text: string; readonly subject: boolean }[] = [
+      ...SCOPE_PROTOTYPES.flatMap((prototype) =>
+        prototype.anchors.map((text) => ({ kind: prototype.kind, text, subject: false })),
+      ),
+      ...SCOPE_SUBJECT_PROTOTYPES.flatMap((prototype) =>
+        prototype.anchors.map((text) => ({ kind: prototype.kind, text, subject: true })),
+      ),
+    ];
+    const textFingerprint = contentHash(
+      `${allTexts.length}:${allTexts.map((item) => item.text).join("\u0001")}`,
+    );
+
     if (this.#cache !== undefined) {
       const cached = await this.#cache.load();
       if (
         cached !== undefined &&
         cached.dimensions === this.dimensions &&
-        cached.providerId === this.embedding.id
+        cached.providerId === this.embedding.id &&
+        cached.textFingerprint === textFingerprint &&
+        cached.scopes.length === SCOPE_PROTOTYPES.length &&
+        cached.subjects.length === SCOPE_SUBJECT_PROTOTYPES.length
       ) {
         for (const entry of cached.scopes) {
           this.#scopeVectors.set(entry.kind, entry.vectors.map((v) => Float32Array.from(v)));
@@ -361,14 +382,6 @@ export class ScopeSemanticPlanner {
     }
 
     // 2. Embed all prototype anchors in one batched call.
-    const allTexts: { readonly kind: string; readonly text: string; readonly subject: boolean }[] = [
-      ...SCOPE_PROTOTYPES.flatMap((prototype) =>
-        prototype.anchors.map((text) => ({ kind: prototype.kind, text, subject: false })),
-      ),
-      ...SCOPE_SUBJECT_PROTOTYPES.flatMap((prototype) =>
-        prototype.anchors.map((text) => ({ kind: prototype.kind, text, subject: true })),
-      ),
-    ];
     const response = await this.embedding.embed(
       {
         inputs: allTexts.map((item) => item.text),
@@ -403,6 +416,7 @@ export class ScopeSemanticPlanner {
           providerId: this.embedding.id,
           modelId: "scope-semantics",
           dimensions: this.dimensions,
+          textFingerprint,
           scopes: [...vectorsByKind.entries()].map(([kind, vectors]) => ({
             kind,
             vectors: vectors.map((v) => [...v]),

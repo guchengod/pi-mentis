@@ -835,6 +835,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       },
     });
     void capabilityJob.promise.catch(() => undefined);
+
+    // Pre-warm the semantic predicate index in the background so the first
+    // search does not block the agent's first turn. On a cache hit this is
+    // a no-op; on a cache miss the remote embedding runs off the hot path.
+    const retrievalService = runtime.getRetrieval<RetrievalService>();
+    retrievalService?.warmup?.();
     telemetry.record("startup_duration_ms", performance.now() - startup);
   });
 

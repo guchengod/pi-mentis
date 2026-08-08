@@ -166,6 +166,13 @@ export interface CommitSemanticCacheRecord {
   readonly schemaVersion: string;
   readonly providerId: string;
   readonly dimensions: number;
+  /**
+   * Content fingerprint of the embedded texts (predicate semantic texts +
+   * action anchors + polarity anchors). When the registry or prototypes
+   * change, the fingerprint changes and the cache is rebuilt. Otherwise it
+   * is reused across sessions — no remote embedding calls on `/new`.
+   */
+  readonly textFingerprint?: string;
   readonly actions: readonly { readonly kind: string; readonly vectors: readonly (readonly number[])[] }[];
   readonly polarities: readonly { readonly kind: string; readonly vectors: readonly (readonly number[])[] }[];
   readonly predicates: readonly { readonly predicate: string; readonly vector: readonly number[] }[];
@@ -322,9 +329,30 @@ export class CommitSemanticPlanner {
       return;
     }
 
+    // Compute the content fingerprint FIRST (cheap, local). It covers the
+    // predicate semantic texts, action anchors, and polarity anchors — any
+    // registry/prototype change invalidates the cache; a plain session
+    // restart reuses it with zero remote calls.
+    const definitions = this.#registry.list();
+    const predicateTexts = definitions.map(buildPredicateSemanticText);
+    const actionAnchors = ACTION_PROTOTYPES.flatMap((p) => p.anchors);
+    const polarityAnchors = POLARITY_PROTOTYPES.flatMap((p) => p.anchors);
+    const textFingerprint = contentHash(
+      JSON.stringify({ texts: predicateTexts, actions: actionAnchors, polarities: polarityAnchors }),
+    );
+
     if (this.#cache !== undefined) {
       const cached = await this.#cache.load();
-      if (cached !== undefined && cached.dimensions === this.dimensions && cached.providerId === this.embedding.id) {
+      if (
+        cached !== undefined &&
+        cached.dimensions === this.dimensions &&
+        cached.providerId === this.embedding.id &&
+        cached.textFingerprint === textFingerprint &&
+        // Predicate count must match — otherwise vectors would be misaligned.
+        cached.predicates.length === definitions.length &&
+        cached.actions.length === ACTION_PROTOTYPES.length &&
+        cached.polarities.length === POLARITY_PROTOTYPES.length
+      ) {
         for (const entry of cached.actions) {
           this.#actionVectors.set(entry.kind, entry.vectors.map((v) => Float32Array.from(v)));
         }
@@ -340,10 +368,6 @@ export class CommitSemanticPlanner {
       }
     }
 
-    const definitions = this.#registry.list();
-    const predicateTexts = definitions.map(buildPredicateSemanticText);
-    const actionAnchors = ACTION_PROTOTYPES.flatMap((p) => p.anchors);
-    const polarityAnchors = POLARITY_PROTOTYPES.flatMap((p) => p.anchors);
     const response = await this.embedding.embed(
       {
         inputs: [...predicateTexts, ...actionAnchors, ...polarityAnchors],
@@ -395,6 +419,7 @@ export class CommitSemanticPlanner {
           schemaVersion: "1",
           providerId: this.embedding.id,
           dimensions: this.dimensions,
+          textFingerprint,
           actions: [...actionVectors.entries()].map(([kind, vectors]) => ({
             kind,
             vectors: vectors.map((v) => [...v]),
