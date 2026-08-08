@@ -59,6 +59,8 @@ export interface PublicRememberResult {
   readonly cardinality?: TemporalCardinality;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  readonly semanticKey?: string;
+  readonly membershipState?: "present" | "absent" | "unknown";
   /**
    * True only when the memory is immediately available to normal recall
    * (`remembered`/`updated`/`reinforced`). `pending_review` and friends are
@@ -214,6 +216,8 @@ function toPublicResult(
   cardinality?: TemporalCardinality,
   normalizedValue?: string,
   setMemberKey?: string,
+  semanticKey?: string,
+  membershipState?: "present" | "absent" | "unknown",
 ): PublicRememberResult {
   if (!consistency.persisted) {
     return {
@@ -240,6 +244,7 @@ function toPublicResult(
     reinforced: "reinforced",
     corrected: "updated",
     superseded: "updated",
+    retracted: "retracted",
     rejected_sensitive: "rejected_sensitive",
     rejected: "failed",
     conflict: "pending_review",
@@ -250,17 +255,28 @@ function toPublicResult(
       ? "retracted"
       : (outcomeMap[outcome] ?? "remembered");
 
+  // Build a summary that accurately reflects the outcome.
+  // This is the Tool Result → Agent Claim contract: the summary must
+  // be consistent with the outcome so the Agent cannot misrepresent it.
+  const summaryText = (() => {
+    if (finalOutcome === "pending_review") {
+      return `已保存为待审核候选（conflicted），尚未进入正常召回。原因：${record?.content?.slice(0, 80) ?? "与既有记忆冲突"}`;
+    }
+    if (finalOutcome === "retracted") {
+      const memberLabel = setMemberKey ?? "该条目";
+      return `已撤回：${memberLabel} 不再保留为当前偏好。`;
+    }
+    const content = record?.content;
+    if (content !== undefined) {
+      return content.length > 120 ? content.slice(0, 120) + "..." : content;
+    }
+    return "Memory committed.";
+  })();
+
   return {
     outcome: finalOutcome,
     ...(record?.id !== undefined ? { id: record.id } : {}),
-    summary:
-      finalOutcome === "pending_review"
-        ? `已保存为待审核候选（conflicted），尚未进入正常召回。原因：${record?.content?.slice(0, 80) ?? "与既有记忆冲突"}`
-        : record?.content
-          ? record.content.length > 120
-            ? record.content.slice(0, 120) + "..."
-            : record.content
-          : "Memory committed.",
+    summary: summaryText,
     readable: true,
     recallable:
       finalOutcome === "remembered" ||
@@ -272,6 +288,8 @@ function toPublicResult(
     ...(cardinality !== undefined ? { cardinality } : {}),
     ...(normalizedValue !== undefined ? { normalizedValue } : {}),
     ...(setMemberKey !== undefined ? { setMemberKey } : {}),
+    ...(semanticKey !== undefined ? { semanticKey } : {}),
+    ...(membershipState !== undefined ? { membershipState } : {}),
   };
 }
 
@@ -379,7 +397,18 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
     const domain = domainForOwnerKind(decision.ownerKind);
 
     // 5. FactIdentityBuilder — deterministic key from the semantic predicate.
-    const factKeyResult = deriveFactKeyNew(content, domain, scopeContext, semanticPlan.predicate);
+    const factKeyResult = deriveFactKeyNew(
+      content,
+      domain,
+      scopeContext,
+      semanticPlan.predicate,
+      {
+        ...(semanticPlan.semanticKey !== undefined ? { semanticKey: semanticPlan.semanticKey } : {}),
+        ...(semanticPlan.membershipState !== undefined
+          ? { membershipState: semanticPlan.membershipState }
+          : {}),
+      },
+    );
 
     // 6. Build commit command (embedding reused — no second remote call)
     const command: CommitMemoryCommand = {
@@ -400,6 +429,16 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       ...(action === "retract" ? { retractsFact: true } : {}),
       polarity: semanticPlan.polarity,
       semanticIntent: semanticPlan.actionIntent,
+      ...(semanticPlan.semanticKey !== undefined ? { semanticKey: semanticPlan.semanticKey } : {}),
+      ...(semanticPlan.membershipState !== undefined
+        ? { membershipState: semanticPlan.membershipState }
+        : {}),
+      ...(semanticPlan.orderedItems !== undefined
+        ? { orderedItems: semanticPlan.orderedItems }
+        : {}),
+      ...(semanticPlan.temporalKind !== undefined
+        ? { temporalKind: semanticPlan.temporalKind }
+        : {}),
       ...(factKeyResult.normalizedValue !== undefined
         ? { normalizedValue: factKeyResult.normalizedValue }
         : {}),
@@ -430,6 +469,8 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
         result.cardinality,
         result.normalizedValue,
         result.setMemberKey,
+        result.semanticKey,
+        result.membershipState,
       );
     } catch (err) {
       if (signal?.aborted) {

@@ -27,6 +27,52 @@ export interface PredicateDefinition {
   readonly temporalBehavior: PredicateTemporalBehavior;
   readonly memoryDomains: readonly MemoryDomain[];
   readonly examples?: readonly string[];
+  /**
+   * Value type constraints for structural compatibility rerank. When absent,
+   * any value type is accepted.
+   */
+  readonly valueShape?:
+    | "personal_name"
+    | "tool_name"
+    | "language_name"
+    | "port_number"
+    | "command_string"
+    | "natural_language"
+    | "enum_value"
+    | "boolean_value"
+    | "numeric_value"
+    | "ordered_sequence"
+    | "event_description"
+    | "open_text";
+  /**
+   * True for generic fallback predicates that should be selected when no
+   * specialized predicate clears the confidence/margin threshold.
+   */
+  readonly isGeneric?: boolean;
+  /**
+   * Relation type — the semantic relation this predicate expresses
+   * (e.g. "preference", "identity_name", "configuration", "procedure",
+   * "event", "decision"). This is a structural ontology field, NOT a
+   * natural-language boundary description. Defines what the predicate IS,
+   * not what it is NOT.
+   */
+  readonly relationType?:
+    | "preference"
+    | "identity_name"
+    | "configuration"
+    | "procedure"
+    | "event"
+    | "decision"
+    | "command"
+    | "fact"
+    | "requirement";
+  /**
+   * Object type — the semantic type of the object/value this predicate's
+   * fact is about (e.g. "package_management_tool", "programming_language",
+   * "personal_name", "scalar_value", "ordered_sequence"). This is a
+   * structural ontology field defining what the value MUST be.
+   */
+  readonly objectType?: string;
 }
 
 export interface PredicateRegistrySnapshot {
@@ -35,12 +81,22 @@ export interface PredicateRegistrySnapshot {
 }
 
 export function buildPredicateSemanticText(definition: PredicateDefinition): string {
-  return [
+  const parts = [
     definition.id,
     definition.description,
     definition.retrievalDescription,
     ...(definition.examples ?? []),
-  ].join("\n");
+  ];
+  // Structural ontology fields participate in the embedding text so the
+  // embedding encodes what the predicate IS (relation + object type), not
+  // a case blacklist of what it is not.
+  if (definition.relationType !== undefined) {
+    parts.push(`relation: ${definition.relationType}`);
+  }
+  if (definition.objectType !== undefined) {
+    parts.push(`object: ${definition.objectType}`);
+  }
+  return parts.join("\n");
 }
 
 export class PredicateRegistry {
@@ -104,6 +160,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["user"],
+    relationType: "identity_name",
+    objectType: "assistant_alias",
   }),
   definition({
     id: "user_name",
@@ -113,6 +171,9 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "string",
     cardinality: "single",
     temporalBehavior: "current",
+    valueShape: "personal_name",
+    relationType: "identity_name",
+    objectType: "personal_name",
   }),
   definition({
     id: "response_style",
@@ -123,6 +184,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "single",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "response_presentation",
     examples: ["Lead with the conclusion and then explain the reasons."],
   }),
   definition({
@@ -133,6 +196,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "single",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "human_language",
   }),
   definition({
     id: "programming_language_preference",
@@ -143,6 +208,9 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    valueShape: "language_name",
+    relationType: "preference",
+    objectType: "programming_language",
   }),
   definition({
     id: "package_manager_preference",
@@ -153,6 +221,9 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "single",
     temporalBehavior: "evolving",
+    valueShape: "tool_name",
+    relationType: "preference",
+    objectType: "package_management_tool",
     examples: ["Prefer pnpm for JavaScript projects."],
   }),
   definition({
@@ -164,6 +235,9 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "single",
     temporalBehavior: "evolving",
+    valueShape: "tool_name",
+    relationType: "preference",
+    objectType: "package_management_tool",
   }),
   definition({
     id: "code_style_preference",
@@ -174,9 +248,11 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    valueShape: "natural_language",
+    relationType: "preference",
+    objectType: "code_implementation_style",
     examples: [
-      "Prefer simple direct implementations and avoid unnecessary abstraction.",
-      "Follow my usual coding habits when designing this module.",
+      "Prefer simple direct implementations over unnecessary abstraction.",
     ],
   }),
   definition({
@@ -188,6 +264,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "architecture_style",
   }),
   definition({
     id: "abstraction_preference",
@@ -198,6 +276,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "abstraction_level",
   }),
   definition({
     id: "testing_preference",
@@ -208,6 +288,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "testing_strategy",
   }),
   definition({
     id: "error_handling_preference",
@@ -218,6 +300,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "error_handling_approach",
   }),
   definition({
     id: "documentation_preference",
@@ -228,6 +312,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "documentation_style",
   }),
   definition({
     id: "review_preference",
@@ -238,6 +324,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "review_approach",
   }),
   definition({
     id: "deployment_preference",
@@ -248,6 +336,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "deployment_approach",
   }),
   definition({
     id: "database_preference",
@@ -258,6 +348,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     valueType: "preference",
     cardinality: "set",
     temporalBehavior: "evolving",
+    relationType: "preference",
+    objectType: "database_technology",
   }),
   definition({
     id: "project_package_manager",
@@ -269,6 +361,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "configuration",
+    objectType: "package_management_tool",
   }),
   definition({
     id: "project_build_command",
@@ -279,6 +373,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "build_command",
   }),
   definition({
     id: "project_test_command",
@@ -289,6 +385,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "test_command",
   }),
   definition({
     id: "project_integration_test_command",
@@ -299,6 +397,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "integration_test_command",
   }),
   definition({
     id: "project_lint_command",
@@ -309,6 +409,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "lint_command",
   }),
   definition({
     id: "project_typecheck_command",
@@ -319,6 +421,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "typecheck_command",
   }),
   definition({
     id: "project_format_command",
@@ -329,6 +433,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "command",
+    objectType: "format_command",
   }),
   definition({
     id: "project_database",
@@ -339,6 +445,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "configuration",
+    objectType: "database_technology",
   }),
   definition({
     id: "project_deployment_target",
@@ -350,6 +458,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["project"],
+    relationType: "configuration",
+    objectType: "deployment_target",
   }),
   definition({
     id: "project_purpose",
@@ -361,6 +471,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "evolving",
     memoryDomains: ["project"],
+    relationType: "fact",
+    objectType: "project_purpose",
   }),
   definition({
     id: "architecture_decision",
@@ -372,6 +484,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "set",
     temporalBehavior: "evolving",
     memoryDomains: ["project"],
+    relationType: "decision",
+    objectType: "architecture_decision",
   }),
   definition({
     id: "runtime",
@@ -382,6 +496,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["environment"],
+    relationType: "configuration",
+    objectType: "runtime_technology",
   }),
   definition({
     id: "runtime_version",
@@ -393,6 +509,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["environment"],
+    relationType: "configuration",
+    objectType: "runtime_version",
   }),
   definition({
     id: "language",
@@ -404,6 +522,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "set",
     temporalBehavior: "evolving",
     memoryDomains: ["project"],
+    relationType: "configuration",
+    objectType: "programming_language",
   }),
   definition({
     id: "storage_engine",
@@ -415,6 +535,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["environment", "project"],
+    relationType: "configuration",
+    objectType: "storage_technology",
   }),
   definition({
     id: "task_goal",
@@ -426,6 +548,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "evolving",
     memoryDomains: ["task"],
+    relationType: "requirement",
+    objectType: "task_goal",
   }),
   definition({
     id: "task_status",
@@ -436,6 +560,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "event",
     temporalBehavior: "event",
     memoryDomains: ["task"],
+    relationType: "event",
+    objectType: "task_progress_event",
   }),
   definition({
     id: "task_blocker",
@@ -447,6 +573,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "single",
     temporalBehavior: "current",
     memoryDomains: ["task"],
+    relationType: "fact",
+    objectType: "task_blocker",
   }),
   definition({
     id: "capability_state",
@@ -457,6 +585,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "set",
     temporalBehavior: "evolving",
     memoryDomains: ["capability"],
+    relationType: "fact",
+    objectType: "capability_availability",
   }),
   definition({
     id: "verified_procedure",
@@ -468,6 +598,8 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "set",
     temporalBehavior: "evolving",
     memoryDomains: ["procedure"],
+    relationType: "procedure",
+    objectType: "verified_workflow",
   }),
   definition({
     id: "known_failure",
@@ -479,6 +611,102 @@ export const DEFAULT_PREDICATE_DEFINITIONS = [
     cardinality: "event",
     temporalBehavior: "event",
     memoryDomains: ["episodic", "procedure"],
+    relationType: "event",
+    objectType: "failure_mode",
+  }),
+  // ── Generic Fallback Predicates ──────────────────────────────────
+  // Selected when no specialized predicate clears the confidence/margin
+  // threshold. These provide a STABLE fact identity (not a content-hash
+  // fallback) so corrections and updates can be linked to the same fact.
+  definition({
+    id: "generic_setting",
+    description:
+      "A user-specific configuration value, default, or setting that does not fit a specialized predicate.",
+    retrievalDescription:
+      "Relevant when the user has a specific default, setting, or configuration value that should be recalled.",
+    subjectTypes: USER,
+    valueType: "fact",
+    cardinality: "single",
+    temporalBehavior: "current",
+    valueShape: "open_text",
+    isGeneric: true,
+    relationType: "configuration",
+    objectType: "scalar_value",
+    examples: [
+      "The default retry count for API calls is 3.",
+    ],
+  }),
+  definition({
+    id: "generic_preference",
+    description:
+      "A user preference, convention, or habit that does not fit a specialized predicate.",
+    retrievalDescription:
+      "Relevant when a user preference or convention should influence behavior.",
+    subjectTypes: USER,
+    valueType: "preference",
+    cardinality: "set",
+    temporalBehavior: "evolving",
+    valueShape: "natural_language",
+    isGeneric: true,
+    relationType: "preference",
+    objectType: "user_convention",
+    examples: [
+      "I prefer naming branches after the feature rather than using dates.",
+    ],
+  }),
+  definition({
+    id: "naming_preference",
+    description:
+      "The user's preferences for naming artifacts — branches, files, scripts, experiments, or other named entities.",
+    retrievalDescription:
+      "Relevant when naming something according to the user's established conventions.",
+    subjectTypes: USER,
+    valueType: "preference",
+    cardinality: "set",
+    temporalBehavior: "evolving",
+    valueShape: "natural_language",
+    relationType: "preference",
+    objectType: "naming_convention",
+    examples: [
+      "Branch names should be feature-based, not date-based.",
+    ],
+  }),
+  definition({
+    id: "user_procedure",
+    description:
+      "An ordered sequence of steps the user wants followed for a specific workflow. The order of steps matters and is not interchangeable.",
+    retrievalDescription:
+      "Relevant when the user has a defined ordered procedure, troubleshooting flow, or step-by-step workflow to follow.",
+    subjectTypes: USER,
+    valueType: "procedure",
+    cardinality: "ordered",
+    temporalBehavior: "evolving",
+    valueShape: "ordered_sequence",
+    memoryDomains: ["procedure"],
+    relationType: "procedure",
+    objectType: "ordered_workflow",
+    examples: [
+      "Troubleshooting flow: first check logs, then inspect config, then restart service.",
+    ],
+  }),
+  definition({
+    id: "generic_event",
+    description:
+      "A specific event that occurred at a point in time — an episodic occurrence with a date and outcome.",
+    retrievalDescription:
+      "Relevant when recalling what happened during a specific past event, drill, or incident.",
+    subjectTypes: USER,
+    valueType: "event",
+    cardinality: "event",
+    temporalBehavior: "event",
+    valueShape: "event_description",
+    memoryDomains: ["episodic"],
+    isGeneric: true,
+    relationType: "event",
+    objectType: "dated_occurrence",
+    examples: [
+      "A recovery drill on 2026-08-07: first attempt failed, configuration adjusted, second attempt succeeded.",
+    ],
   }),
 ] as const satisfies readonly PredicateDefinition[];
 

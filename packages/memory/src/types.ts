@@ -177,6 +177,37 @@ export interface MemoryRecord {
   /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
   readonly polarity?: "positive" | "negative";
   /**
+   * Semantic key — what attribute this fact is about (e.g.
+   * "local temporary service default port"). Distinct from the fact content
+   * sentence; used for fact identity and value-relation comparison.
+   */
+  readonly semanticKey?: string;
+  /**
+   * Set membership assertion state. For set/ordered predicates:
+   *   present  → the member is currently in the set
+   *   absent   → the member has been retracted from the set
+   *   unknown  → state could not be determined
+   */
+  readonly membershipState?: "present" | "absent" | "unknown";
+  /**
+   * Ordered procedure items with stable positions. Only present when
+   * cardinality=ordered. Each item has a 1-indexed position and a value.
+   */
+  readonly orderedItems?: readonly {
+    readonly position: number;
+    readonly value: string;
+  }[];
+  /**
+   * Temporal kind: "current" for ongoing facts, "event" for episodic
+   * occurrences that happened at a specific point in time.
+   */
+  readonly temporalKind?: "current" | "event";
+  /**
+   * When this fact's event occurred (episodic records). Distinct from
+   * observedAt/createdAt which record the write time.
+   */
+  readonly occurredAt?: number;
+  /**
    * Set/ordered record written without a usable member identity. Such records
    * must never block (or be blocked by) properly keyed set members.
    */
@@ -226,6 +257,19 @@ export interface CommitMemoryCommand {
    * replace/retract). Used by the value-relation router as a tiebreak only.
    */
   readonly semanticIntent?: CommitActionIntent;
+  /** Semantic key — what attribute this fact is about. */
+  readonly semanticKey?: string;
+  /** Set membership assertion state (present/absent/unknown). */
+  readonly membershipState?: "present" | "absent" | "unknown";
+  /** Ordered procedure items with stable positions (cardinality=ordered). */
+  readonly orderedItems?: readonly {
+    readonly position: number;
+    readonly value: string;
+  }[];
+  /** Temporal kind: "current" or "event". */
+  readonly temporalKind?: "current" | "event";
+  /** When an episodic event occurred. */
+  readonly occurredAt?: number;
 }
 
 export type MemoryContentOrigin =
@@ -258,13 +302,16 @@ export interface CommitMemoryResult {
     | "superseded"
     | "conflict"
     | "rejected"
-    | "rejected_sensitive";
+    | "rejected_sensitive"
+    | "retracted";
   readonly record?: Omit<MemoryRecord, "embedding">;
   readonly relatedIds: readonly string[];
   readonly predicate?: string;
   readonly cardinality?: TemporalCardinality;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  readonly semanticKey?: string;
+  readonly membershipState?: "present" | "absent" | "unknown";
 }
 
 export interface MemoryQuery {

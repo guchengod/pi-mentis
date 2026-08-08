@@ -13,6 +13,20 @@ import { normalizeText } from "@pi-mentis/pi-mentis-core";
 import type { MemoryDomain, PiScopeContext } from "./types.js";
 import { predicateDefinition, type KnownPredicate } from "./predicate-registry.js";
 
+/**
+ * Produce a stable hash component from a semantic key for use in the factKey.
+ *
+ * The semantic key is now a structured identity (relationType:objectType:region),
+ * not raw text. We normalize separators and truncate to keep factKeys manageable.
+ */
+function stableSemanticKeyHash(semanticKey: string): string {
+  return normalizeText(semanticKey)
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_:+-]/g, "")
+    .slice(0, 60);
+}
+
 // ─── FactKey Result ───────────────────────────────────────────────
 
 export interface FactKeyResult {
@@ -30,6 +44,15 @@ export interface FactKeyResult {
   readonly reasons: string[];
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  /**
+   * Semantic key — what attribute this fact is about. When present, it is
+   * embedded into the factKey so that different attributes under the same
+   * predicate produce different identities (e.g. CSV-column-count vs
+   * JSON-key-count both under a data-inspection predicate).
+   */
+  readonly semanticKey?: string;
+  /** Membership state for set/ordered predicates (present/absent). */
+  readonly membershipState?: "present" | "absent" | "unknown";
 }
 
 // ─── Subject Key Extraction (deterministic metadata, not content rules) ──
@@ -93,6 +116,7 @@ function extractNormalizedValue(
  * the predicate chosen by CommitSemanticPlanner.
  *
  * FactKey format: `<domain>:<subjectKey>/<predicateKey>`
+ * With semanticKey: `<domain>:<subjectKey>/<predicateKey>/<semanticKeyHash>`
  * Member identity (set/ordered): memberFactKey = `<factKey>/<setMemberKey>`
  *
  * If no predicate was confidently selected, returns a deterministic
@@ -103,6 +127,10 @@ export function deriveFactKey(
   domain: MemoryDomain,
   scopeContext?: PiScopeContext,
   predicate?: KnownPredicate,
+  options?: {
+    readonly semanticKey?: string;
+    readonly membershipState?: "present" | "absent" | "unknown";
+  },
 ): FactKeyResult {
   const subjKey = subjectKey(domain, scopeContext);
   const reasons: string[] = [];
@@ -110,10 +138,15 @@ export function deriveFactKey(
   const cardinality = predicate !== undefined ? predicateDefinition(predicate)?.cardinality : undefined;
   const setMemberKey =
     cardinality === "set" ? (normalizedValue ?? normalizeText(content).toLowerCase().slice(0, 60)) : undefined;
+  const semanticKey = options?.semanticKey;
+  const membershipState = options?.membershipState;
 
   if (predicate !== undefined) {
     reasons.push(`predicate "${predicate}" selected semantically`);
-    const groupFactKey = `${domain}:${subjKey}/${predicate}`;
+    const baseFactKey = `${domain}:${subjKey}/${predicate}`;
+    const groupFactKey = semanticKey !== undefined
+      ? `${baseFactKey}/${stableSemanticKeyHash(semanticKey)}`
+      : baseFactKey;
     const memberFactKey =
       (cardinality === "set" || cardinality === "ordered") && setMemberKey !== undefined
         ? `${groupFactKey}/${setMemberKey.replaceAll("/", "_")}`
@@ -128,6 +161,8 @@ export function deriveFactKey(
       reasons,
       ...(normalizedValue !== undefined ? { normalizedValue } : {}),
       ...(setMemberKey !== undefined ? { setMemberKey } : {}),
+      ...(semanticKey !== undefined ? { semanticKey } : {}),
+      ...(membershipState !== undefined ? { membershipState } : {}),
     };
   }
 
@@ -146,6 +181,8 @@ export function deriveFactKey(
     confidence: 0.3,
     fallbackUsed: true,
     reasons,
+    ...(semanticKey !== undefined ? { semanticKey } : {}),
+    ...(membershipState !== undefined ? { membershipState } : {}),
   };
 }
 

@@ -18,6 +18,35 @@ import type {
 export type QueryRetrievalMode = "focused" | "broad";
 export type TemporalQueryIntent = "current" | "historical" | "evolution" | "any";
 
+// ─── Source Dependency Ontology ──────────────────────────────────
+// Abstract semantic definitions — NOT utterance examples. Each class
+// defines what kind of information source the answer requires.
+// MemoryNeed is derived from predicate routing metadata + this
+// ontology, NOT from enumerated natural-language sentences.
+
+export type SourceDependency =
+  | "prior_user_state"
+  | "general_knowledge"
+  | "unknown";
+
+export interface MemoryNeedClass {
+  readonly id: SourceDependency;
+  readonly semanticDescription: string;
+}
+
+export const MEMORY_NEED_ONTOLOGY: readonly MemoryNeedClass[] = [
+  {
+    id: "prior_user_state",
+    semanticDescription:
+      "The answer depends on user-specific state, preferences, conventions, or history established before the current turn.",
+  },
+  {
+    id: "general_knowledge",
+    semanticDescription:
+      "The answer can be produced from general knowledge, current context, or live runtime state without requiring prior user-specific information.",
+  },
+];
+
 export interface PredicateSemanticEntry {
   readonly predicate: string;
   readonly vector: Float32Array;
@@ -55,10 +84,12 @@ export interface MemoryQueryPlan {
     readonly required: boolean;
     readonly confidence: number;
   };
+  readonly sourceDependency?: SourceDependency;
   readonly diagnostics?: {
     readonly predicateMargin?: number;
     readonly predicateEntropy?: number;
     readonly plannerDegraded?: boolean;
+    readonly sourceDependencySignal?: string;
   };
 }
 
@@ -212,6 +243,7 @@ function degradedPlan(): MemoryQueryPlan {
     retrievalMode: "broad",
     confidence: 0,
     memoryNeed: { required: true, confidence: 0 },
+    sourceDependency: "unknown",
     diagnostics: { plannerDegraded: true },
   };
 }
@@ -369,7 +401,7 @@ export class SemanticQueryPlanner {
     const second = ranked[1]?.score ?? -1;
     const entropy = normalizedEntropy(ranked.slice(0, 6).map((entry) => entry.score));
     const memoryConfidence = clamp01((top - 0.25) / 0.5);
-    const required = top >= 0.42;
+
     const candidateFloor =
       mode === "focused" ? Math.max(0.42, top - 0.2) : Math.max(0.38, top - 0.18);
     const predicateCandidates = ranked
@@ -385,17 +417,73 @@ export class SemanticQueryPlanner {
     const subjectCandidates = [...subjects]
       .map(([subject, confidence]) => ({ subject, confidence }))
       .sort((left, right) => right.confidence - left.confidence);
+
+    // ── Source Dependency Inference ──
+    // Memory need is derived from predicate routing metadata, NOT from
+    // enumerated natural-language anchor sentences. The existing predicate
+    // candidate scores (from query embedding vs predicate semantic texts)
+    // already tell us what KIND of topic the query is about. We check the
+    // predicate registry metadata to determine if the answer depends on
+    // prior user state.
+    //
+    // Signal: if any candidate predicate (even below the usual 0.42 floor)
+    // has subjectTypes including "user" AND temporalBehavior is "evolving"
+    // or "event", the answer depends on prior user-specific state.
+    //
+    // This uses ZERO additional embeddings — pure metadata inference from
+    // the predicate routing that already happened.
+    const USER_STATE_FLOOR = 0.30;
+    const hasUserStatePredicate = ranked.some((entry) => {
+      if (entry.score < USER_STATE_FLOOR) return false;
+      const def = this.#registry.get(entry.predicate);
+      if (def === undefined) return false;
+      return (
+        def.subjectTypes.includes("user") &&
+        (def.temporalBehavior === "evolving" || def.temporalBehavior === "event")
+      );
+    });
+
+    // Also check project/task/environment subjects (stored in memory)
+    const hasStoredStatePredicate = ranked.some((entry) => {
+      if (entry.score < 0.33) return false;
+      const def = this.#registry.get(entry.predicate);
+      if (def === undefined) return false;
+      return def.subjectTypes.some(
+        (s) => s === "project" || s === "repository" || s === "task" || s === "environment",
+      );
+    });
+
+    let sourceDependency: SourceDependency;
+    let sourceDependencySignal: string;
+    if (hasUserStatePredicate) {
+      sourceDependency = "prior_user_state";
+      sourceDependencySignal = "user-subject predicate with evolving/event temporal behavior above floor";
+    } else if (hasStoredStatePredicate) {
+      sourceDependency = "prior_user_state";
+      sourceDependencySignal = "project/task/environment-subject predicate above floor";
+    } else {
+      sourceDependency = "general_knowledge";
+      sourceDependencySignal = "no user-state predicate above floor";
+    }
+
+    const required = top >= 0.42 || sourceDependency === "prior_user_state";
+    const finalConfidence = required
+      ? Math.max(memoryConfidence, 0.5)
+      : memoryConfidence;
+
     return {
       predicateCandidates,
       subjectCandidates,
       temporalIntent: temporalIntent(query, predicateCandidates, this.#registry),
       retrievalMode: mode,
-      confidence: memoryConfidence,
-      memoryNeed: { required, confidence: memoryConfidence },
+      confidence: finalConfidence,
+      memoryNeed: { required, confidence: finalConfidence },
+      sourceDependency,
       diagnostics: {
         predicateMargin: top - second,
         predicateEntropy: entropy,
         plannerDegraded: false,
+        sourceDependencySignal,
       },
     };
   }

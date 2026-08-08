@@ -39,6 +39,10 @@ export interface ValueRelationSide {
   readonly normalizedValue: string | undefined;
   readonly setMemberKey: string | undefined;
   readonly cardinality: TemporalCardinality | undefined;
+  /** Semantic key — what attribute this fact is about. */
+  readonly semanticKey?: string;
+  /** Set membership state (present/absent). */
+  readonly membershipState?: "present" | "absent" | "unknown";
 }
 
 export interface ValueRelationInput {
@@ -216,17 +220,58 @@ const PREDICATE_LEXICONS: Readonly<Record<string, readonly string[]>> = {
 
 export function keyedValue(content: string, predicate: string | undefined): string | undefined {
   const lexicon = predicate === undefined ? undefined : PREDICATE_LEXICONS[predicate];
-  if (lexicon === undefined) return undefined;
-  const normalized = normalizeText(content).toLowerCase().replace(/\s+/g, " ");
-  const ordered = [...lexicon].sort((a, b) => b.length - a.length);
-  for (const token of ordered) {
-    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const matches =
-      /^[a-z0-9]+$/i.test(token)
-        ? new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, "i").test(normalized)
-        : normalized.includes(token);
-    if (matches) return token;
+  if (lexicon !== undefined) {
+    const normalized = normalizeText(content).toLowerCase().replace(/\s+/g, " ");
+    const ordered = [...lexicon].sort((a, b) => b.length - a.length);
+    for (const token of ordered) {
+      const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const matches =
+        /^[a-z0-9]+$/i.test(token)
+          ? new RegExp(`(?:^|[^a-z0-9])${escaped}(?:[^a-z0-9]|$)`, "i").test(normalized)
+          : normalized.includes(token);
+      if (matches) return token;
+    }
   }
+
+  // Generic numeric value extraction: for predicates that hold a scalar
+  // numeric value (ports, counts, timeouts, retry counts), extract the
+  // first standalone number. This is deterministic structural parsing,
+  // NOT a keyword/phrase matcher.
+  if (predicate === undefined || isScalarNumericPredicate(predicate)) {
+    const numericValue = extractNumericValue(content);
+    if (numericValue !== undefined) return numericValue;
+  }
+
+  return undefined;
+}
+
+/**
+ * Predicates that commonly hold a single numeric scalar value.
+ * Used to enable generic numeric value extraction without a lexicon.
+ */
+function isScalarNumericPredicate(predicate: string): boolean {
+  return predicate === "generic_setting" ||
+    predicate === "runtime_version" ||
+    predicate === "project_build_command" ||
+    predicate === "project_test_command" ||
+    predicate === "project_lint_command" ||
+    predicate === "project_typecheck_command" ||
+    predicate === "project_format_command";
+}
+
+/**
+ * Extract the first standalone numeric value from content.
+ * Handles integers, decimals, and port-like numbers.
+ * Returns the value as a string for exact comparison.
+ */
+function extractNumericValue(content: string): string | undefined {
+  const normalized = normalizeText(content).toLowerCase();
+  // Match standalone numbers (not part of identifiers like "v1.2.3")
+  const match = normalized.match(/(?<![a-z])(\d{2,6})(?![a-z.])/);
+  if (match !== null && match[1] !== undefined) return match[1];
+  // Also match single-digit numbers for retry counts, etc.
+  const singleMatch = normalized.match(/(?<![a-z])(\d)(?![a-z.])/);
+  if (singleMatch !== null && singleMatch[1] !== undefined) return singleMatch[1];
   return undefined;
 }
 
@@ -250,6 +295,83 @@ export function decideValueRelation(input: ValueRelationInput): ValueRelationDec
     incoming.polarity !== undefined &&
     existing.polarity !== undefined &&
     incoming.polarity !== existing.polarity;
+
+  // ── 0. Membership state comparison (HIGHEST PRIORITY for sets) ──
+  // For set/ordered predicates, membership state takes priority over
+  // embedding similarity. Even if "I like Kotlin" and "I don't like Kotlin"
+  // have cosine=0.95, present vs absent → contradictory (retraction).
+  if (
+    incoming.membershipState !== undefined &&
+    existing.membershipState !== undefined &&
+    (incoming.cardinality === "set" || incoming.cardinality === "ordered")
+  ) {
+    factors.push(`incoming-membership:${incoming.membershipState}`);
+    factors.push(`existing-membership:${existing.membershipState}`);
+    if (incoming.membershipState !== existing.membershipState) {
+      return {
+        relation: "contradictory",
+        confidence: 0.92,
+        embeddingSimilarity: similarity,
+        normalizedIncomingValue: structuredIncoming,
+        normalizedExistingValue: structuredExisting,
+        semanticIntent: incoming.semanticIntent,
+        signal: `membership state differs: ${existing.membershipState} → ${incoming.membershipState}`,
+        factors,
+      };
+    }
+    // Same membership state → equivalent (reinforce the assertion)
+    return {
+      relation: "equivalent",
+      confidence: 0.9,
+      embeddingSimilarity: similarity,
+      normalizedIncomingValue: structuredIncoming,
+      normalizedExistingValue: structuredExisting,
+      semanticIntent: incoming.semanticIntent,
+      signal: `membership state same: ${incoming.membershipState}`,
+      factors,
+    };
+  }
+
+  // ── 0b. Semantic key comparison (for scalar facts) ──
+  // If both sides have a semanticKey, compare them. Same semanticKey +
+  // different structured values → different (supersede), even when
+  // embedding similarity is very high.
+  if (
+    incoming.semanticKey !== undefined &&
+    existing.semanticKey !== undefined &&
+    incoming.cardinality !== "set" &&
+    incoming.cardinality !== "ordered"
+  ) {
+    factors.push(`semanticKey:${incoming.semanticKey}`);
+    const sameKey = incoming.semanticKey === existing.semanticKey;
+    if (sameKey && structuredIncoming !== undefined && structuredExisting !== undefined) {
+      factors.push(`structured:${structuredIncoming}`);
+      factors.push(`structured-existing:${structuredExisting}`);
+      if (structuredIncoming === structuredExisting) {
+        return {
+          relation: "equivalent",
+          confidence: 0.95,
+          embeddingSimilarity: similarity,
+          normalizedIncomingValue: structuredIncoming,
+          normalizedExistingValue: structuredExisting,
+          semanticIntent: incoming.semanticIntent,
+          signal: "same semantic key, same structured value",
+          factors,
+        };
+      }
+      // Same semantic key, DIFFERENT values → different (supersede)
+      return {
+        relation: "different",
+        confidence: 0.92,
+        embeddingSimilarity: similarity,
+        normalizedIncomingValue: structuredIncoming,
+        normalizedExistingValue: structuredExisting,
+        semanticIntent: incoming.semanticIntent,
+        signal: "same semantic key, different structured value",
+        factors,
+      };
+    }
+  }
 
   // 1. Structured value comparison (deterministic, wins over similarity).
   if (structuredIncoming !== undefined && structuredExisting !== undefined) {
@@ -349,7 +471,39 @@ export function decideValueRelation(input: ValueRelationInput): ValueRelationDec
   }
 
   const intent = incoming.semanticIntent;
+  // For replace/correct intent with high similarity, still check if the
+  // semantic intent says this is a replacement, not a reinforcement.
+  // This prevents "port 46321" and "port changed to 51842" from being
+  // seen as equivalent just because cosine is >0.85.
   if (similarity >= EQUIV_SIMILARITY) {
+    // If the intent is replace/correct, the high similarity is because
+    // the sentences share the same attribute frame — but the VALUE
+    // changed. With semanticKey, this is caught above. Without semanticKey,
+    // the replace intent should tip us toward "different" in the high
+    // similarity band when structured values aren't available.
+    if (intent === "replace" || intent === "correct") {
+      // Check if there are numeric values that differ
+      const incomingNums = extractAllNumbers(incoming.content);
+      const existingNums = extractAllNumbers(existing.content);
+      if (
+        incomingNums.length > 0 &&
+        existingNums.length > 0 &&
+        !arraysEqual(incomingNums, existingNums)
+      ) {
+        return {
+          relation: incoming.cardinality === "set" || incoming.cardinality === "ordered"
+            ? "additive"
+            : "different",
+          confidence: 0.88,
+          embeddingSimilarity: similarity,
+          normalizedIncomingValue: structuredIncoming,
+          normalizedExistingValue: structuredExisting,
+          semanticIntent: intent,
+          signal: "replace intent with different numeric values",
+          factors,
+        };
+      }
+    }
     return {
       relation: "equivalent",
       confidence: Math.min(0.95, 0.7 + (similarity - EQUIV_SIMILARITY) * 2),
@@ -411,4 +565,18 @@ export function decideValueRelation(input: ValueRelationInput): ValueRelationDec
     signal: "ambiguous similarity without supporting intent",
     factors,
   };
+}
+
+// ─── Numeric value extraction helpers ──────────────────────────────
+
+function extractAllNumbers(content: string): readonly string[] {
+  const matches = content.match(/(?<![a-z])\d+(?![a-z.])/gi);
+  return matches ?? [];
+}
+
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((v, i) => v === sortedB[i]);
 }

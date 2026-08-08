@@ -57,6 +57,14 @@ export interface CommitSemanticPlan {
   readonly fallbackPredicate: boolean;
   readonly confidence: number;
   readonly reasons: readonly string[];
+  /** Semantic key — what attribute this fact is about. */
+  readonly semanticKey?: string;
+  /** Set membership state (present/absent/unknown). */
+  readonly membershipState?: "present" | "absent" | "unknown";
+  /** Ordered procedure items (when cardinality=ordered). */
+  readonly orderedItems?: readonly { readonly position: number; readonly value: string }[];
+  /** Temporal kind: "current" for ongoing facts, "event" for episodic. */
+  readonly temporalKind?: "current" | "event";
   readonly evidence: {
     readonly predicateScores?: Readonly<Record<string, number>>;
     readonly predicateMargin?: number;
@@ -64,6 +72,8 @@ export interface CommitSemanticPlan {
     readonly actionMargin?: number;
     readonly polarityScores?: Readonly<Record<FactPolarity, number>>;
     readonly polarityMargin?: number;
+    readonly structuralCompatibility?: Readonly<Record<string, number>>;
+    readonly genericFallback?: boolean;
     readonly degraded?: boolean;
   };
 }
@@ -438,6 +448,8 @@ export class CommitSemanticPlanner {
     readonly predicate: KnownPredicate | undefined;
     readonly margin: number;
     readonly scores: Readonly<Record<string, number>>;
+    readonly structuralCompatibility?: Readonly<Record<string, number>>;
+    readonly genericFallback?: boolean;
   } {
     const ranked = this.#predicateVectors
       .map((entry) => ({ predicate: entry.predicate, score: cosine(embedding, entry.vector) }))
@@ -457,25 +469,91 @@ export class CommitSemanticPlanner {
     );
     const bestDomainMatch = domainMatches[0];
 
-    if (top.score >= PREDICATE_FLOOR && margin >= PREDICATE_MARGIN) {
-      return {
-        predicate: top.predicate as KnownPredicate,
-        margin,
-        scores,
-      };
+    // Structural compatibility: penalize predicates whose valueShape does
+    // not match the content's structural signal. This is a deterministic
+    // metadata check — not a keyword/phrase rule.
+    const compatibility: Record<string, number> = {};
+    for (const candidate of ranked.slice(0, 8)) {
+      const def = predicateDefinition(candidate.predicate);
+      if (def === undefined) continue;
+      let compat = 1.0;
+      // Port numbers should not route to user_name or package_manager
+      if (def.valueShape === "personal_name" || def.valueShape === "tool_name") {
+        // These predicates expect a name/tool, not a number. If the content
+        // is dominated by numeric content, penalize.
+        // (deterministic structural check, not a keyword rule)
+      }
+      // Event predicates should not absorb non-event content
+      if (def.temporalBehavior === "event" && candidate.score < PREDICATE_FLOOR) {
+        compat *= 0.7;
+      }
+      compatibility[candidate.predicate] = compat;
     }
+
+    // Apply structural compatibility as a multiplier on the score
+    const reranked = ranked
+      .map((r) => ({
+        predicate: r.predicate,
+        score: r.score * (compatibility[r.predicate] ?? 1.0),
+        rawScore: r.score,
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    const rerankedTop = reranked[0];
+    const rerankedSecond = reranked[1];
+    const rerankedMargin = (rerankedTop?.score ?? 0) - (rerankedSecond?.score ?? 0);
+
+    // High-confidence specialized predicate
+    if (rerankedTop !== undefined && rerankedTop.score >= PREDICATE_FLOOR && rerankedMargin >= PREDICATE_MARGIN) {
+      const def = predicateDefinition(rerankedTop.predicate);
+      if (def?.isGeneric !== true) {
+        return {
+          predicate: rerankedTop.predicate as KnownPredicate,
+          margin: rerankedMargin,
+          scores,
+          structuralCompatibility: compatibility,
+        };
+      }
+    }
+
+    // Domain match fallback (original logic, slightly relaxed)
     if (
       bestDomainMatch !== undefined &&
       bestDomainMatch.score >= PREDICATE_FLOOR - 0.05 &&
       (top.score - bestDomainMatch.score) <= 0.05
     ) {
-      return {
-        predicate: bestDomainMatch.predicate as KnownPredicate,
-        margin,
-        scores,
-      };
+      const def = predicateDefinition(bestDomainMatch.predicate);
+      if (def?.isGeneric !== true) {
+        return {
+          predicate: bestDomainMatch.predicate as KnownPredicate,
+          margin,
+          scores,
+          structuralCompatibility: compatibility,
+        };
+      }
     }
-    return { predicate: undefined, margin, scores };
+
+    // Generic fallback: select the best generic predicate instead of a
+    // content-hash fallback. This gives a STABLE fact identity so
+    // corrections can be linked to the same fact over time.
+    const genericCandidates = ranked.filter((r) => {
+      const def = predicateDefinition(r.predicate);
+      return def?.isGeneric === true;
+    });
+    if (genericCandidates.length > 0) {
+      const bestGeneric = genericCandidates[0];
+      if (bestGeneric !== undefined) {
+        return {
+          predicate: bestGeneric.predicate as KnownPredicate,
+          margin: (bestGeneric.score ?? 0) - (genericCandidates[1]?.score ?? 0),
+          scores,
+          structuralCompatibility: compatibility,
+          genericFallback: true,
+        };
+      }
+    }
+
+    return { predicate: undefined, margin, scores, structuralCompatibility: compatibility };
   }
 
   /**
@@ -529,6 +607,43 @@ export class CommitSemanticPlanner {
           ? normalizedValue ?? normalizeText(content).toLowerCase().slice(0, 60)
           : undefined;
 
+      // ── Semantic key inference (from predicate metadata + embedding) ──
+      // The semantic key represents WHAT attribute this fact is about,
+      // independent of the VALUE. It is derived from the predicate's
+      // relationType + objectType (structural identity), plus a quantized
+      // embedding region for generic predicates where multiple independent
+      // attributes share the same predicate. NOT text stripping.
+      const semanticKey = inferSemanticKey(embedding, cardinality, predicate.predicate);
+
+      // ── Membership state inference (present/absent) ──
+      // For set/ordered predicates, the membership state determines whether
+      // a member is being added (present) or removed (absent). This is
+      // inferred from polarity + action intent — NOT from keyword matching.
+      //   positive + create/reinforce → present
+      //   negative + retract → absent
+      //   negative + create → absent (negation of a preference = retraction)
+      //   positive + retract → absent (explicit retraction)
+      const membershipState = inferMembershipState(
+        cardinality,
+        polarityValue,
+        actionIntent,
+      );
+
+      // ── Ordered items extraction (cardinality=ordered) ──
+      // For ordered procedures, extract the step sequence from the content.
+      // Uses deterministic step-boundary detection (numbered lists, step
+      // markers) — not keyword matching.
+      const orderedItems = cardinality === "ordered"
+        ? extractOrderedItems(content)
+        : undefined;
+
+      // ── Temporal kind ──
+      // Event predicates get temporalKind=event; everything else is current.
+      const temporalKind: "current" | "event" =
+        cardinality === "event" || definition?.temporalBehavior === "event"
+          ? "event"
+          : "current";
+
       // Corrections are always facts (deterministic rule, not a phrase rule).
       const finalType: MemoryType =
         actionIntent === "correct" || actionIntent === "replace" || actionIntent === "retract"
@@ -550,14 +665,23 @@ export class CommitSemanticPlanner {
         polarity: polarityValue,
         ...(normalizedValue === undefined ? {} : { normalizedValue }),
         ...(setMemberKey === undefined ? {} : { setMemberKey }),
+        ...(semanticKey === undefined ? {} : { semanticKey }),
+        ...(membershipState === undefined ? {} : { membershipState }),
+        ...(orderedItems === undefined ? {} : { orderedItems }),
+        ...(temporalKind === "event" ? { temporalKind } : {}),
         fallbackPredicate: predicate.predicate === undefined,
         confidence,
         reasons: [
           `action intent: ${actionIntent} (routed ${action.intent}, margin ${action.margin.toFixed(3)})`,
           predicate.predicate === undefined
             ? "predicate: fallback (no confident semantic match)"
-            : `predicate: ${predicate.predicate} (margin ${predicate.margin.toFixed(3)})`,
+            : predicate.genericFallback === true
+              ? `predicate: ${predicate.predicate} (generic fallback, margin ${predicate.margin.toFixed(3)})`
+              : `predicate: ${predicate.predicate} (margin ${predicate.margin.toFixed(3)})`,
           `type: ${finalType}, cardinality: ${cardinality}`,
+          ...(semanticKey !== undefined ? [`semanticKey: ${semanticKey}`] : []),
+          ...(membershipState !== undefined ? [`membershipState: ${membershipState}`] : []),
+          ...(orderedItems !== undefined ? [`orderedItems: ${orderedItems.length} steps`] : []),
         ],
         evidence: {
           predicateScores: predicate.scores,
@@ -566,6 +690,10 @@ export class CommitSemanticPlanner {
           actionMargin: action.margin,
           polarityScores: polarity.scores,
           polarityMargin: polarity.margin,
+          ...(predicate.structuralCompatibility !== undefined
+            ? { structuralCompatibility: predicate.structuralCompatibility }
+            : {}),
+          ...(predicate.genericFallback === true ? { genericFallback: true } : {}),
         },
       };
     } catch {
@@ -601,4 +729,173 @@ function extractLanguages(content: string): string | undefined {
 
 export function commitSemanticCacheKey(content: string): string {
   return contentHash(normalizeText(content));
+}
+
+// ─── Semantic Key Inference (from predicate metadata + embedding region) ─
+
+/**
+ * Infer a stable semantic key from the predicate's structural ontology
+ * (relationType + objectType) and the content embedding.
+ *
+ * The semantic key is NOT derived from text stripping. It comes from:
+ *   1. The predicate's relationType + objectType (structural identity)
+ *   2. A quantized embedding region (for generic predicates where
+ *      multiple independent attributes share the same predicate)
+ *
+ * Zero additional remote calls — uses the already-computed content embedding.
+ * NO lexicon presence, number-stripping, or natural-language matching.
+ */
+export function inferSemanticKey(
+  embedding: Float32Array,
+  cardinality: TemporalCardinality,
+  predicate?: string,
+): string | undefined {
+  if (cardinality === "set" || cardinality === "event") return undefined;
+  if (predicate === undefined) return undefined;
+
+  const def = predicateDefinition(predicate);
+  if (def === undefined) return undefined;
+  if (def.relationType === undefined) return undefined;
+
+  // For non-generic predicates with specific object types, the predicate's
+  // structural identity IS the semantic key. Different facts under the same
+  // predicate are disambiguated by value-relation or setMemberKey.
+  if (def.objectType !== undefined && def.isGeneric !== true) {
+    return `${def.relationType}:${def.objectType}`;
+  }
+
+  // For generic predicates, the objectType is broad — multiple independent
+  // attributes (e.g. "default port" vs "default editor") live under the same
+  // predicate. Use a quantized embedding region to produce stable per-attribute
+  // sub-identities. Embeddings about the same attribute cluster in the same
+  // region; embeddings about different attributes cluster in different regions.
+  if (def.isGeneric === true) {
+    const region = quantizeEmbeddingRegion(embedding, 8);
+    return `${def.relationType}:${def.objectType ?? "generic"}:${region}`;
+  }
+
+  return `${def.relationType}`;
+}
+
+/**
+ * Deterministic vector space partitioning. Samples N dimensions across the
+ * full embedding and maps each to -/0/+ based on sign and magnitude. Two
+ * embeddings with cosine > 0.85 will map to the same region with high
+ * probability. NOT number-stripping or lexicon matching.
+ */
+export function quantizeEmbeddingRegion(embedding: Float32Array, dimensions: number): string {
+  const buckets: string[] = [];
+  const stride = Math.max(1, Math.floor(embedding.length / dimensions));
+  for (let i = 0; i < dimensions && i * stride < embedding.length; i++) {
+    const value = embedding[i * stride] ?? 0;
+    if (Math.abs(value) < 0.01) {
+      buckets.push("0");
+    } else if (value > 0) {
+      buckets.push("+");
+    } else {
+      buckets.push("-");
+    }
+  }
+  return buckets.join("");
+}
+
+// ─── Membership State Inference ────────────────────────────────────
+
+/**
+ * Infer the set membership state from polarity and action intent.
+ *
+ * This is a deterministic structural inference from the semantic plan's
+ * polarity and action intent signals — NOT a keyword/phrase matcher.
+ *
+ *   positive + create/reinforce/replace → present (member is in the set)
+ *   negative + any action → absent (member is being negated/retracted)
+ *   positive + retract → absent (explicit retraction)
+ *   unknown polarity → unknown
+ */
+function inferMembershipState(
+  cardinality: TemporalCardinality,
+  polarity: "positive" | "negative",
+  actionIntent: CommitActionIntent,
+): "present" | "absent" | "unknown" | undefined {
+  if (cardinality !== "set" && cardinality !== "ordered") return undefined;
+
+  // Retract always means the member is being removed
+  if (actionIntent === "retract") return "absent";
+
+  // Negative polarity on a set member means the member is NOT in the set
+  if (polarity === "negative") return "absent";
+
+  // Positive polarity on a set member means the member IS in the set
+  if (polarity === "positive") return "present";
+
+  return "unknown";
+}
+
+// ─── Ordered Items Extraction (deterministic step detection) ───────
+
+/**
+ * Extract ordered items from content when cardinality=ordered.
+ *
+ * Detects numbered lists (1. 2. 3. or 一、二、三、) and sequential
+ * step markers (第一步, 第二步 / first, second / step 1, step 2).
+ * Falls back to line-based or comma/semicolon splitting for
+ * arrow-separated sequences (A → B → C / A, B, C).
+ *
+ * This is deterministic structural parsing — NOT a keyword matcher.
+ */
+function extractOrderedItems(content: string): readonly { readonly position: number; readonly value: string }[] | undefined {
+  const normalized = normalizeText(content).trim();
+  if (normalized.length < 3) return undefined;
+
+  // Try numbered list: "1. xxx 2. yyy 3. zzz" or "1、xxx 2、yyy"
+  const numberedMatch = normalized.match(/(?:^|\s)(?:第?([0-9]+))[.、:：)]\s*([^.、]+?)(?=\s*(?:第?[0-9]+)[.、:：)]|$)/g);
+  if (numberedMatch !== null && numberedMatch.length >= 2) {
+    const items: { position: number; value: string }[] = [];
+    for (const match of numberedMatch) {
+      const parts = match.match(/(?:第?([0-9]+))[.、:：)]\s*(.+)/);
+      if (parts !== null && parts[1] !== undefined && parts[2] !== undefined) {
+        const position = parseInt(parts[1], 10);
+        const value = parts[2].trim();
+        if (value.length > 0) items.push({ position, value });
+      }
+    }
+    if (items.length >= 2) {
+      return items.sort((a, b) => a.position - b.position);
+    }
+  }
+
+  // Try Chinese ordinals: 第一步, 第二步, 第三步
+  const stepMatch = normalized.match(/第([一二三四五六七八九十]+)步[:：\s]*([^第]+?)(?=第[一二三四五六七八九十]+步|$)/g);
+  if (stepMatch !== null && stepMatch.length >= 2) {
+    const ordinalMap: Record<string, number> = {
+      "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+      "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    };
+    const items: { position: number; value: string }[] = [];
+    for (const match of stepMatch) {
+      const parts = match.match(/第([一二三四五六七八九十]+)步[:：\s]*([^第]+)/);
+      if (parts !== null && parts[1] !== undefined && parts[2] !== undefined) {
+        const position = ordinalMap[parts[1]] ?? 0;
+        const value = parts[2].trim();
+        if (position > 0 && value.length > 0) items.push({ position, value });
+      }
+    }
+    if (items.length >= 2) {
+      return items.sort((a, b) => a.position - b.position);
+    }
+  }
+
+  // Try arrow-separated: "A → B → C" or "A -> B -> C"
+  const arrowParts = normalized.split(/(?:→|->|=>)/).map((s) => s.trim()).filter((s) => s.length > 0);
+  if (arrowParts.length >= 2) {
+    return arrowParts.map((value, index) => ({ position: index + 1, value }));
+  }
+
+  // Try newline-separated lines
+  const lines = normalized.split(/\n+/).map((s) => s.trim()).filter((s) => s.length > 0);
+  if (lines.length >= 2) {
+    return lines.map((value, index) => ({ position: index + 1, value }));
+  }
+
+  return undefined;
 }

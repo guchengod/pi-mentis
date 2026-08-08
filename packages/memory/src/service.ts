@@ -786,6 +786,10 @@ export class DefaultMemoryService implements MemoryService {
               setMemberKey: command.setMemberKey,
               cardinality,
               semanticIntent: command.semanticIntent,
+              ...(command.semanticKey !== undefined ? { semanticKey: command.semanticKey } : {}),
+              ...(command.membershipState !== undefined
+                ? { membershipState: command.membershipState }
+                : {}),
             },
             existing: {
               content: payload.content,
@@ -794,6 +798,12 @@ export class DefaultMemoryService implements MemoryService {
               normalizedValue: payload["normalizedValue"] as string | undefined,
               setMemberKey: payload["setMemberKey"] as string | undefined,
               cardinality: payload["cardinality"] as MemoryRecord["cardinality"],
+              ...(payload["semanticKey"] !== undefined
+                ? { semanticKey: payload["semanticKey"] as string }
+                : {}),
+              ...(payload["membershipState"] !== undefined
+                ? { membershipState: payload["membershipState"] as "present" | "absent" | "unknown" }
+                : {}),
             },
             predicate: extractPredicate(factKey) ?? factKey,
           });
@@ -850,6 +860,45 @@ export class DefaultMemoryService implements MemoryService {
         finalStorageAction: finalAction,
         actionReason: comparedDecision?.signal,
       });
+    }
+
+    // ── Cross-fact-key correction recovery (section 8) ──
+    // When actionIntent=replace/correct and the same-factKey lookup didn't
+    // find an equivalent match, search for active records with the same
+    // predicate and compare structured values. If the values differ, treat
+    // the existing record as the correction target (supersede it).
+    // This uses NO keyword matching — pure structured value comparison +
+    // predicate metadata matching + embedding similarity.
+    if (
+      equivalentReinforce === undefined &&
+      unknownGuardExistingId === undefined &&
+      (command.semanticIntent === "replace" || command.semanticIntent === "correct") &&
+      !isEvent &&
+      !legacyMalformedSet
+    ) {
+      const incomingPredicate = extractPredicate(factKey);
+      const incomingValue = command.normalizedValue ?? keyedValue(command.content, incomingPredicate);
+      if (incomingValue !== undefined) {
+        for (const neighbor of neighbors) {
+          if (cosineSimilarity(neighbor.score) < 0.65) break;
+          const payload = decodeStoredPayload(neighbor);
+          const neighborFactKey = payload["factKey"] as string | undefined;
+          const neighborPredicate = extractPredicate(neighborFactKey);
+          // Same predicate (or same predicate group) is required
+          if (neighborPredicate !== incomingPredicate) continue;
+          // Skip self
+          if (neighbor.id === id) continue;
+          const neighborValue =
+            (payload["normalizedValue"] as string | undefined) ??
+            keyedValue(payload["content"] as string, neighborPredicate);
+          if (neighborValue === undefined) continue;
+          // Different values under the same predicate → correction target
+          if (neighborValue !== incomingValue) {
+            supersedesIds = [...new Set([...supersedesIds, neighbor.id])];
+            break; // Only supersede the first match
+          }
+        }
+      }
     }
 
     if (equivalentReinforce !== undefined) {
@@ -990,6 +1039,11 @@ export class DefaultMemoryService implements MemoryService {
       ...(legacyMalformedSet ? { legacyMalformed: true } : {}),
       ...(temporalPlan === undefined ? {} : { temporalState: temporalPlan.temporalState }),
       ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
+      ...(command.semanticKey !== undefined ? { semanticKey: command.semanticKey } : {}),
+      ...(command.membershipState !== undefined ? { membershipState: command.membershipState } : {}),
+      ...(command.orderedItems !== undefined ? { orderedItems: command.orderedItems } : {}),
+      ...(command.temporalKind !== undefined ? { temporalKind: command.temporalKind } : {}),
+      ...(command.occurredAt !== undefined ? { occurredAt: command.occurredAt } : {}),
       ...(command.branchClaimState === undefined
         ? {}
         : { branchClaimState: command.branchClaimState }),
@@ -1078,11 +1132,13 @@ export class DefaultMemoryService implements MemoryService {
         ? "conflict"
         : temporalPlan?.decision === "reject"
           ? "rejected"
-          : conflicts.length > 0
-            ? "conflict"
-            : supersedesIds.length > 0
-              ? "superseded"
-              : "created";
+          : temporalPlan?.decision === "retract"
+            ? "retracted"
+            : conflicts.length > 0
+              ? "conflict"
+              : supersedesIds.length > 0
+                ? "superseded"
+                : "created";
     const newPredicate = extractPredicate(factKey);
     return {
       outcome,
@@ -1098,6 +1154,8 @@ export class DefaultMemoryService implements MemoryService {
       cardinality,
       ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
       ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
+      ...(command.semanticKey !== undefined ? { semanticKey: command.semanticKey } : {}),
+      ...(command.membershipState !== undefined ? { membershipState: command.membershipState } : {}),
     };
   }
 

@@ -122,6 +122,8 @@ export interface SearchDiagnostics {
       readonly predicateMargin?: number;
       readonly predicateEntropy?: number;
       readonly plannerDegraded?: boolean;
+      readonly sourceDependency?: string;
+      readonly sourceDependencySignal?: string;
     }>;
   }>;
 }
