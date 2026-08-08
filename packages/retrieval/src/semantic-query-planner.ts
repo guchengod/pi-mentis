@@ -278,6 +278,8 @@ export class SemanticQueryPlanner {
   readonly #queryCacheEntries: number;
   readonly #queryCache = new Map<string, EmbeddingVector>();
   readonly #initialization: Promise<PredicateSemanticIndex>;
+  #currentIndex: PredicateSemanticIndex = emptyPredicateSemanticIndex();
+  #indexReady = false;
   #backgroundInit: Promise<PredicateSemanticIndex> | undefined;
 
   constructor(options: SemanticQueryPlannerOptions) {
@@ -299,15 +301,9 @@ export class SemanticQueryPlanner {
    * the background build.
    */
   async ready(): Promise<PredicateSemanticIndex> {
-    if (this.#backgroundInit !== undefined) {
-      try {
-        return await this.#backgroundInit;
-      } catch {
-        return emptyPredicateSemanticIndex();
-      }
-    }
     try {
-      return await this.#initialization;
+      await this.#initialization;
+      return this.#backgroundInit === undefined ? this.#currentIndex : await this.#backgroundInit;
     } catch {
       return emptyPredicateSemanticIndex();
     }
@@ -326,9 +322,9 @@ export class SemanticQueryPlanner {
    * Fast path: load the persisted cache and return a usable index.
    *
    * On a cache hit this resolves in milliseconds (disk read only). On a
-   * cache miss it delegates to the background build — the promise resolves
-   * once the remote embedding completes. The warmup() call at session
-   * startup means this is usually already done by the first search.
+   * cache miss it returns a degraded index immediately while the real index
+   * continues building. The warmup() call at session startup means the real
+   * index is usually already available to later searches.
    */
   async #loadIndex(): Promise<PredicateSemanticIndex> {
     const cached = await this.#cache?.load().catch(() => undefined);
@@ -351,21 +347,32 @@ export class SemanticQueryPlanner {
         (entry) => this.#registry.has(entry.predicate) && entry.vector.length === this.#dimensions,
       )
     ) {
-      return new InMemoryPredicateSemanticIndex(
+      const index = new InMemoryPredicateSemanticIndex(
         cached.entries.map((entry) => ({
           predicate: entry.predicate,
           vector: Float32Array.from(entry.vector),
         })),
       );
+      this.#currentIndex = index;
+      this.#indexReady = true;
+      return index;
     }
 
-    // Cache miss → build in the background and wait for it.
-    return this.#backgroundBuild();
+    // Cache miss → start the real build but keep the first interactive
+    // request off that cold remote batch. The completed build atomically
+    // replaces this degraded index for subsequent requests.
+    void this.#backgroundBuild();
+    return emptyPredicateSemanticIndex();
   }
 
   #backgroundBuild(): Promise<PredicateSemanticIndex> {
     if (this.#backgroundInit === undefined) {
       this.#backgroundInit = this.#buildIndex()
+        .then((index) => {
+          this.#currentIndex = index;
+          this.#indexReady = true;
+          return index;
+        })
         .catch(() => emptyPredicateSemanticIndex());
     }
     return this.#backgroundInit;
@@ -454,14 +461,15 @@ export class SemanticQueryPlanner {
     options: InferenceOperationOptions = {},
   ): Promise<PreparedSemanticQuery> {
     try {
-      const [index, queryEmbedding] = await Promise.all([
+      const [, queryEmbedding] = await Promise.all([
         this.#initialization,
         this.#embedQuery(query, { ...options, priority: "interactive" }),
       ]);
       if (queryEmbedding === undefined) return { plan: degradedPlan() };
+      if (!this.#indexReady) return { queryEmbedding, plan: degradedPlan() };
       return {
         queryEmbedding,
-        plan: this.planFromVector(query, queryEmbedding.values, index),
+        plan: this.planFromVector(query, queryEmbedding.values, this.#currentIndex),
       };
     } catch {
       return { plan: degradedPlan() };

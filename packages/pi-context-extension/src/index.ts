@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import {
   BackgroundScheduler,
+  DeferredIdleWork,
   MentisContextResolver,
   ProviderPriority,
   TaskPriority,
@@ -309,6 +310,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   }
   // Re-read config after try/catch so it's available to the rest of the factory.
   const scheduler = new BackgroundScheduler(config.performance.queue);
+  const startupIdleWork = new DeferredIdleWork();
   const telemetry = new InMemoryTelemetry();
   const runtime = getOrCreateRuntime();
   let knowledgeStore: SharedZvecStoreHandle | undefined;
@@ -794,47 +796,56 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       );
     }
 
-    const capabilityJob = scheduler.schedule({
-      id: "pi-capability-sync",
-      deduplicationKey: "pi-capability-sync",
-      priority: TaskPriority.BackgroundSync,
-      estimatedBytes: 1024,
-      run: async (signal) => {
-        const refresh = async () => {
-          const configuredPiHome = process.env["PI_CODING_AGENT_DIR"]?.trim();
-          const piHome =
-            configuredPiHome === undefined || configuredPiHome === ""
-              ? path.join(homedir(), ".pi", "agent")
-              : path.resolve(configuredPiHome);
-          const scan = await scanPiInstallation({
-            piPackageRoot,
-            resourceRoots: [path.join(context.cwd, ".pi"), piHome],
-          });
-          return {
-            fingerprint: scan.fingerprint,
-            value: { fingerprint: scan.fingerprint, records: scan.records },
+    const scheduleCapabilitySync = () => {
+      const capabilityJob = scheduler.schedule({
+        id: "pi-capability-sync",
+        deduplicationKey: "pi-capability-sync",
+        priority: TaskPriority.BackgroundSync,
+        estimatedBytes: 1024,
+        run: async (signal) => {
+          const refresh = async () => {
+            const configuredPiHome = process.env["PI_CODING_AGENT_DIR"]?.trim();
+            const piHome =
+              configuredPiHome === undefined || configuredPiHome === ""
+                ? path.join(homedir(), ".pi", "agent")
+                : path.resolve(configuredPiHome);
+            const scan = await scanPiInstallation({
+              piPackageRoot,
+              resourceRoots: [path.join(context.cwd, ".pi"), piHome],
+            });
+            return {
+              fingerprint: scan.fingerprint,
+              value: { fingerprint: scan.fingerprint, records: scan.records },
+            };
           };
-        };
-        const lifecycle = await contextState?.staleWhileRevalidate({
-          namespace: "local:local:pi:pi-mentis",
-          key: "pi-installation",
-          maxAgeMs: config.intelligence.context.capabilityMaxAgeMs,
-          refresh,
-        });
-        const refreshed = lifecycle === undefined ? await refresh() : await lifecycle.refresh;
-        const scan = refreshed.value;
-        const embedding = runtime.getEmbedding<EmbeddingProvider>();
-        if (embedding === undefined || knowledgeStore === undefined) return;
-        const indexer = new CapabilityIndexer({
-          store: knowledgeStore.store,
-          embedding,
-          embeddingSpace: embeddingSpace(config),
-          dimensions: config.inference.siliconflow.embedding.dimensions,
-        });
-        await indexer.sync(scan.fingerprint, scan.records, { signal });
-      },
+          const lifecycle = await contextState?.staleWhileRevalidate({
+            namespace: "local:local:pi:pi-mentis",
+            key: "pi-installation",
+            maxAgeMs: config.intelligence.context.capabilityMaxAgeMs,
+            refresh,
+          });
+          const refreshed = lifecycle === undefined ? await refresh() : await lifecycle.refresh;
+          const scan = refreshed.value;
+          const embedding = runtime.getEmbedding<EmbeddingProvider>();
+          if (embedding === undefined || knowledgeStore === undefined) return;
+          const indexer = new CapabilityIndexer({
+            store: knowledgeStore.store,
+            embedding,
+            embeddingSpace: embeddingSpace(config),
+            dimensions: config.inference.siliconflow.embedding.dimensions,
+          });
+          await indexer.sync(scan.fingerprint, scan.records, { signal });
+        },
+      });
+      void capabilityJob.promise.catch(() => undefined);
+    };
+
+    // The first full Pi capability sync traverses many files, creates a Zvec
+    // index, and issues large embedding batches. Keep it out of startup and
+    // the first send; run after an idle window.
+    startupIdleWork.set(() => {
+      scheduleCapabilitySync();
     });
-    void capabilityJob.promise.catch(() => undefined);
 
     // Pre-warm the semantic predicate index in the background so the first
     // search does not block the agent's first turn. On a cache hit this is
@@ -857,6 +868,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     };
   });
   pi.on("input", async (event) => {
+    startupIdleWork.activity();
     if (latestRetrievalTraceId !== undefined) {
       const confirmation = /^(?:对|是的|没错|就是这个|正确|yes|correct|exactly)\b/i.test(
         event.text.trim(),
@@ -949,6 +961,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
   pi.on("agent_settled", async () => {
     await captureSession?.finish().catch(() => undefined);
+    startupIdleWork.settled();
   });
   pi.on("before_agent_start", async (event, context) => {
     const trace = new PerformanceTrace();
@@ -1266,6 +1279,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     }
   });
   pi.on("session_shutdown", async (event) => {
+    startupIdleWork.cancel();
     // Pi reloads the extension for reload, new, resume, and fork — the
     // factory runs again so we must reset the global runtime. Only "quit"
     // keeps the same process; just dispose there.
