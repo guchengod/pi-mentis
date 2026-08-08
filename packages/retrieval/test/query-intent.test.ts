@@ -126,6 +126,27 @@ class SemanticEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+class ColdDocumentEmbeddingProvider extends SemanticEmbeddingProvider {
+  readonly #documentReady: Promise<void>;
+  #releaseDocument!: () => void;
+
+  constructor() {
+    super();
+    this.#documentReady = new Promise<void>((resolve) => {
+      this.#releaseDocument = resolve;
+    });
+  }
+
+  releaseDocumentBuild(): void {
+    this.#releaseDocument();
+  }
+
+  override async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
+    if (request.inputKind === "document") await this.#documentReady;
+    return super.embed(request);
+  }
+}
+
 function planner(provider: SemanticEmbeddingProvider, cache?: FilePredicateVectorCache) {
   return new SemanticQueryPlanner({
     embedding: provider,
@@ -134,6 +155,12 @@ function planner(provider: SemanticEmbeddingProvider, cache?: FilePredicateVecto
     registry: new PredicateRegistry("test:v1", definitions),
     ...(cache === undefined ? {} : { cache }),
   });
+}
+
+async function prepareWithReady(provider: SemanticEmbeddingProvider, query: string) {
+  const semanticPlanner = planner(provider);
+  await semanticPlanner.ready();
+  return semanticPlanner.prepare(query);
 }
 
 describe("Predicate semantic index", () => {
@@ -162,6 +189,20 @@ describe("Predicate semantic index", () => {
 });
 
 describe("Semantic Query Planner", () => {
+  it("does not make the first interactive query wait for a cold predicate index", async () => {
+    const provider = new ColdDocumentEmbeddingProvider();
+    const semanticPlanner = planner(provider);
+
+    const first = await semanticPlanner.prepare("我对代码设计有什么偏好？");
+    expect(first.plan.diagnostics?.plannerDegraded).toBe(true);
+    expect(provider.queryRequests).toBe(1);
+
+    provider.releaseDocumentBuild();
+    await semanticPlanner.ready();
+    const second = await semanticPlanner.prepare("我是不是比较反感过度工程化？");
+    expect(second.plan.predicateCandidates[0]?.predicate).toBe("code_style_preference");
+  });
+
   it.each([
     "我对代码设计有什么偏好？",
     "按照我平时的习惯，这个模块应该尽量怎么设计？",
@@ -169,13 +210,14 @@ describe("Semantic Query Planner", () => {
     "按我以前的编码习惯，这里是不是没必要再抽一层？",
     "这种场景按我的风格应该直接做还是先搭完整架构？",
   ])("routes open expression without query text rules: %s", async (query) => {
-    const result = await planner(new SemanticEmbeddingProvider()).prepare(query);
+    const result = await prepareWithReady(new SemanticEmbeddingProvider(), query);
     expect(result.plan.memoryNeed.required).toBe(true);
     expect(result.plan.predicateCandidates[0]?.predicate).toBe("code_style_preference");
   });
 
   it("keeps code style and package manager candidates for a combined query", async () => {
-    const result = await planner(new SemanticEmbeddingProvider()).prepare(
+    const result = await prepareWithReady(
+      new SemanticEmbeddingProvider(),
       "按照我的代码习惯，pnpm 这一层有必要再封装一个 Provider 接口吗？",
     );
     expect(result.plan.predicateCandidates.map((candidate) => candidate.predicate)).toEqual(
@@ -187,7 +229,10 @@ describe("Semantic Query Planner", () => {
   });
 
   it("infers broad mode from a distributed semantic ranking", async () => {
-    const result = await planner(new SemanticEmbeddingProvider()).prepare("总结一下我的技术偏好。");
+    const result = await prepareWithReady(
+      new SemanticEmbeddingProvider(),
+      "总结一下我的技术偏好。",
+    );
     expect(result.plan.retrievalMode).toBe("broad");
     expect(result.plan.predicateCandidates.length).toBeGreaterThan(2);
   });
@@ -195,14 +240,15 @@ describe("Semantic Query Planner", () => {
   it.each(["12 乘以 8 是多少？", "HTTP 304 是什么意思？"])(
     "emits no-memory-needed for an unrelated query: %s",
     async (query) => {
-      const result = await planner(new SemanticEmbeddingProvider()).prepare(query);
+      const result = await prepareWithReady(new SemanticEmbeddingProvider(), query);
       expect(result.plan.memoryNeed.required).toBe(false);
       expect(result.plan.predicateCandidates).toEqual([]);
     },
   );
 
   it("uses temporal language only as a structural feature", async () => {
-    const result = await planner(new SemanticEmbeddingProvider()).prepare(
+    const result = await prepareWithReady(
+      new SemanticEmbeddingProvider(),
       "按我以前的编码习惯，这里是不是没必要再抽一层？",
     );
     expect(result.plan.temporalIntent).toBe("historical");
@@ -221,12 +267,16 @@ describe("Semantic Query Planner", () => {
     const root = await mkdtemp(path.join(tmpdir(), "predicate-cache-"));
     const cache = new FilePredicateVectorCache(path.join(root, "index.json"));
     const first = new SemanticEmbeddingProvider();
-    await planner(first, cache).prepare("我对代码设计有什么偏好？");
+    const firstPlanner = planner(first, cache);
+    await firstPlanner.ready();
+    await firstPlanner.prepare("我对代码设计有什么偏好？");
     expect(first.documentRequests).toBe(1);
     expect(first.queryRequests).toBe(1);
 
     const second = new SemanticEmbeddingProvider();
-    await planner(second, cache).prepare("我是不是比较反感过度工程化？");
+    const secondPlanner = planner(second, cache);
+    await secondPlanner.ready();
+    await secondPlanner.prepare("我是不是比较反感过度工程化？");
     expect(second.documentRequests).toBe(0);
     expect(second.queryRequests).toBe(1);
   });
@@ -410,12 +460,14 @@ describe("Recall semantic pipeline", () => {
         };
       },
     } as Pick<MemoryService, "search"> as MemoryService;
+    const semanticPlanner = planner(embedding);
+    await semanticPlanner.ready();
     const retrieval = createRetrievalService({
       memory,
       reranker,
       rerankModel: reranker.id,
       rerankContextTokens: 8192,
-      semanticPlanner: planner(embedding),
+      semanticPlanner,
     });
     const coordinator = new DefaultRecallCoordinator({
       getMemory: () => memory,

@@ -12,6 +12,63 @@ export const TaskPriority = {
   GarbageCollection: 10,
 } as const;
 
+export interface DeferredIdleWorkOptions {
+  /** Quiet period after the agent settles before cold/background work may start. */
+  readonly delayMs?: number;
+  readonly onError?: (error: unknown) => void;
+}
+
+/**
+ * Holds one-shot startup work until Pi has completed an interactive turn and
+ * the terminal has stayed quiet for a short period. New input cancels the
+ * timer; the next `settled()` call arms it again.
+ */
+export class DeferredIdleWork {
+  readonly #delayMs: number;
+  readonly #onError: (error: unknown) => void;
+  #work: (() => void | Promise<void>) | undefined;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+
+  constructor(options: DeferredIdleWorkOptions = {}) {
+    this.#delayMs = Math.max(0, options.delayMs ?? 750);
+    this.#onError = options.onError ?? (() => undefined);
+  }
+
+  set(work: () => void | Promise<void>): void {
+    this.cancelTimer();
+    this.#work = work;
+  }
+
+  activity(): void {
+    this.cancelTimer();
+  }
+
+  settled(): void {
+    if (this.#work === undefined || this.#timer !== undefined) return;
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      const work = this.#work;
+      this.#work = undefined;
+      if (work !== undefined) void Promise.resolve().then(work).catch(this.#onError);
+    }, this.#delayMs);
+    this.#timer.unref?.();
+  }
+
+  cancel(): void {
+    this.cancelTimer();
+    this.#work = undefined;
+  }
+
+  get pending(): boolean {
+    return this.#work !== undefined;
+  }
+
+  private cancelTimer(): void {
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+}
+
 export type TaskPriority = (typeof TaskPriority)[keyof typeof TaskPriority];
 
 export interface QueueLimits {

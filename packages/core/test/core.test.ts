@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BackgroundScheduler,
   CpuWorkerPool,
+  DeferredIdleWork,
   MentisContextResolver,
   PriorityHeap,
   ProviderPriority,
@@ -239,6 +240,32 @@ describe("Pi compatibility and tool surface", () => {
 });
 
 describe("priority scheduling and arbitration", () => {
+  it("defers cold startup work until an interactive turn settles and the TUI stays quiet", async () => {
+    vi.useFakeTimers();
+    try {
+      const run = vi.fn(async () => undefined);
+      const idleWork = new DeferredIdleWork({ delayMs: 100 });
+      idleWork.set(run);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(run).not.toHaveBeenCalled();
+
+      idleWork.settled();
+      await vi.advanceTimersByTimeAsync(50);
+      idleWork.activity();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(run).not.toHaveBeenCalled();
+      expect(idleWork.pending).toBe(true);
+
+      idleWork.settled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(run).toHaveBeenCalledOnce();
+      expect(idleWork.pending).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("orders a binary heap by priority and FIFO sequence", () => {
     const heap = new PriorityHeap<number>((left, right) => left - right);
     for (const value of [2, 9, 1, 7, 4]) heap.push(value);
