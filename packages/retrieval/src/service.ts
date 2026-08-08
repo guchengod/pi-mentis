@@ -31,8 +31,11 @@ import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
   authorityAndFreshness,
   maximalMarginalRelevance,
+  maximalMarginalRelevanceWithTrace,
   reciprocalRankFusion,
   selectContext,
+  structuralDedupe,
+  type DiversityTraceEntry,
 } from "./algorithms.js";
 import { gateSearchHit, type GateRuntimeContext } from "./gates.js";
 import { EffectivenessService, type TaskOutcomeObservation } from "./effectiveness.js";
@@ -112,7 +115,11 @@ function predicatePrior(hit: SearchHit, plan: MemoryQueryPlan): number {
   if (hit.kind !== "memory") return 0;
   const factKey = hit.metadata?.["factKey"];
   if (typeof factKey !== "string") return 0;
-  const predicate = factKey.split("/").pop();
+  // Group keys are `domain:subject/predicate`; member keys add a member
+  // segment (`domain:subject/predicate/member`). The predicate is always
+  // the segment right after the subject.
+  const segments = factKey.split("/");
+  const predicate = segments.length >= 2 ? segments[1] : undefined;
   if (predicate === undefined) return 0;
   return (
     plan.predicateCandidates.find((candidate) => candidate.predicate === predicate)?.confidence ?? 0
@@ -487,14 +494,23 @@ export class DefaultRetrievalService implements RetrievalService {
         }
         stages["rerank"] = performance.now() - rerankStarted;
       }
-      const cutoff = adaptiveCutoff({ hits: ranked, mode: queryPlan.retrievalMode });
-      const diversified = maximalMarginalRelevance(
+      // Structural fact identity is decided BEFORE diversity: collapse
+      // duplicate/version candidates per member identity, then run the
+      // set-aware diversity selection. Set siblings (same predicate group,
+      // different setMemberKey) are distinct facts and are never suppressed
+      // for content similarity — MMR only optimizes representational
+      // diversity among otherwise-unrelated candidates.
+      const deduped = structuralDedupe(ranked);
+      const cutoff = adaptiveCutoff({ hits: deduped, mode: queryPlan.retrievalMode });
+      const diversityTrace: DiversityTraceEntry[] = [];
+      const diversified = maximalMarginalRelevanceWithTrace(
         cutoff,
         Math.min(
           query.limit ?? activePolicy?.parameters.topK ?? 20,
           activePolicy?.parameters.topK ?? query.limit ?? 20,
         ),
         activePolicy?.parameters.diversityLambda ?? 0.75,
+        { onTrace: (entry) => diversityTrace.push(entry) },
       );
       const rerankRanking = ranked.map((hit) => hit.id);
       const mmrRanking = diversified.map((hit) => hit.id);
@@ -594,8 +610,9 @@ export class DefaultRetrievalService implements RetrievalService {
             "authority-freshness",
             "predicate-soft-prior",
             ...(stages["rerank"] === undefined ? [] : ["rerank"]),
+            "structural-dedup",
             "adaptive-cutoff",
-            "mmr",
+            "set-aware-mmr",
             "context-budget",
           ],
           rankings: {
@@ -603,6 +620,7 @@ export class DefaultRetrievalService implements RetrievalService {
             rerank: rerankRanking,
             mmr: mmrRanking,
           },
+          diversity: diversityTrace,
           traceId,
           semanticQueryPlan: queryPlan,
         },

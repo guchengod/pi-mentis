@@ -90,6 +90,20 @@ export interface SearchDiagnostics {
     readonly rerank: readonly string[];
     readonly mmr: readonly string[];
   }>;
+  /** Per-candidate diversity-selection trace (MMR/set-completeness). */
+  readonly diversity?: readonly Readonly<{
+    readonly candidateId: string;
+    readonly predicate?: string;
+    readonly cardinality?: string;
+    readonly setMemberKey?: string;
+    readonly memberFactKey?: string;
+    readonly pairwiseSimilarity: number;
+    readonly structuralRelation: "same_member" | "set_sibling" | "unrelated";
+    readonly mmrPenalty: number;
+    readonly preservedBySetCompleteness: boolean;
+    readonly selected: boolean;
+    readonly dropReason?: string;
+  }>[];
   readonly traceId?: string;
   readonly semanticQueryPlan?: Readonly<{
     readonly predicateCandidates: readonly Readonly<{
