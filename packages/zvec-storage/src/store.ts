@@ -169,6 +169,9 @@ export class ZvecStore {
   readonly #config: StorageConfig;
   readonly #collections = new Map<string, ZVecCollection>();
   readonly #openingCollections = new Map<string, Promise<ZVecCollection>>();
+  /** Bumped every time collections are closed so in-flight opens can detect
+   *  that their handle belongs to a closed era and must not be cached. */
+  #collectionEra = 0;
   #manifest?: ActiveIndexManifest;
   #lockTarget = "";
   #inWriteGuard = false;
@@ -593,12 +596,18 @@ export class ZvecStore {
         },
       });
       try {
+        // Mark the write section BEFORE closing/refreshing: any concurrent
+        // collection open that resolves from this point on must open in
+        // read-write mode, or it will be discarded by the era check in
+        // #openCollectionOnce. (The window between closeAllCollections and
+        // the async manifest refresh used to allow read-only handles to be
+        // cached while the guard was active.)
+        this.#inWriteGuard = true;
         this.#closeAllCollections();
         const existing = await readActiveManifest(this.#config.rootDir);
         if (existing !== undefined) {
           this.#manifest = existing;
         }
-        this.#inWriteGuard = true;
         return await fn();
       } finally {
         this.#inWriteGuard = false;
@@ -618,6 +627,7 @@ export class ZvecStore {
     for (const collection of this.#collections.values()) collection.closeSync();
     this.#collections.clear();
     this.#openingCollections.clear();
+    this.#collectionEra++;
   }
 
   async #scalarCollection(name: ScalarCollectionName): Promise<ZVecCollection> {
@@ -666,19 +676,40 @@ export class ZvecStore {
   async #openCollectionOnce(
     name: string,
     schema: () => ReturnType<typeof scalarCollectionSchema>,
+    retries = 0,
   ): Promise<ZVecCollection> {
+    const existing = this.#collections.get(name);
+    if (existing !== undefined) return existing;
     const pending = this.#openingCollections.get(name);
     if (pending !== undefined) return pending;
     const target = path.join(this.#config.rootDir, name);
-    const opening = this.#openCollection(target, schema).then((collection) => {
-      this.#collections.set(name, collection);
-      return collection;
+    const eraAtOpen = this.#collectionEra;
+    const writableAtOpen = this.#inWriteGuard;
+    const opening = this.#openCollection(target, schema).then(async (collection) => {
+      if (this.#collectionEra === eraAtOpen && this.#inWriteGuard === writableAtOpen) {
+        this.#collections.set(name, collection);
+        return collection;
+      }
+      // A write-guard boundary closed all collections while this open was
+      // in flight, or the read-only/read-write mode changed. The handle
+      // belongs to a stale era: close it and open a fresh one against the
+      // CURRENT mode.
+      collection.closeSync();
+      if (retries >= 5) {
+        throw new StorageCorruptionError(
+          `Unable to open Zvec collection ${target}: collection era kept changing`,
+          { operation: "zvec-open", retryable: true },
+        );
+      }
+      return this.#openCollectionOnce(name, schema, retries + 1);
     });
     this.#openingCollections.set(name, opening);
     try {
       return await opening;
     } finally {
-      this.#openingCollections.delete(name);
+      if (this.#openingCollections.get(name) === opening) {
+        this.#openingCollections.delete(name);
+      }
     }
   }
 

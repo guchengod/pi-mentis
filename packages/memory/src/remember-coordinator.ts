@@ -59,6 +59,14 @@ export interface PublicRememberResult {
   readonly cardinality?: TemporalCardinality;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  /**
+   * True only when the memory is immediately available to normal recall
+   * (`remembered`/`updated`/`reinforced`). `pending_review` and friends are
+   * persisted but NOT recallable until a resolution path activates them.
+   */
+  readonly recallable: boolean;
+  /** Machine-readable reason accompanying non-recallable outcomes. */
+  readonly reason?: string;
 }
 
 // ─── Request / Context ────────────────────────────────────────────
@@ -212,14 +220,18 @@ function toPublicResult(
       outcome: "unavailable",
       summary: "Pi Mentis is temporarily unavailable.",
       readable: false,
+      recallable: false,
+      reason: "service_unavailable",
     };
   }
 
   if (!consistency.exactReadable) {
     return {
       outcome: "pending_review",
-      summary: record?.content?.slice(0, 120) ?? "Memory saved, verification pending.",
+      summary: "记忆已保存，但读回校验未通过，暂未进入正常召回（请稍后重试查询）。",
       readable: false,
+      recallable: false,
+      reason: "read_back_unverified",
     };
   }
 
@@ -233,17 +245,29 @@ function toPublicResult(
     conflict: "pending_review",
   };
 
-  const finalOutcome = outcomeMap[outcome] ?? "remembered";
+  const finalOutcome =
+    record?.status === "tombstoned" && record.temporalState === "retracted"
+      ? "retracted"
+      : (outcomeMap[outcome] ?? "remembered");
 
   return {
     outcome: finalOutcome,
     ...(record?.id !== undefined ? { id: record.id } : {}),
-    summary: record?.content
-      ? record.content.length > 120
-        ? record.content.slice(0, 120) + "..."
-        : record.content
-      : "Memory committed.",
+    summary:
+      finalOutcome === "pending_review"
+        ? `已保存为待审核候选（conflicted），尚未进入正常召回。原因：${record?.content?.slice(0, 80) ?? "与既有记忆冲突"}`
+        : record?.content
+          ? record.content.length > 120
+            ? record.content.slice(0, 120) + "..."
+            : record.content
+          : "Memory committed.",
     readable: true,
+    recallable:
+      finalOutcome === "remembered" ||
+      finalOutcome === "updated" ||
+      finalOutcome === "reinforced",
+    ...(finalOutcome === "pending_review" ? { reason: "conflict_with_existing_fact" } : {}),
+    ...(finalOutcome === "retracted" ? { reason: "retracted" } : {}),
     ...(predicate !== undefined ? { predicate } : {}),
     ...(cardinality !== undefined ? { cardinality } : {}),
     ...(normalizedValue !== undefined ? { normalizedValue } : {}),
@@ -281,6 +305,8 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
         outcome: "rejected_sensitive",
         summary: "原始凭据不会保存到语义记忆，可以保存安全引用。",
         readable: false,
+        recallable: false,
+        reason: "rejected_sensitive",
       };
     }
 
@@ -380,6 +406,9 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
       ...(factKeyResult.setMemberKey !== undefined
         ? { setMemberKey: factKeyResult.setMemberKey }
         : {}),
+      ...(factKeyResult.memberFactKey !== undefined
+        ? { memberFactKey: factKeyResult.memberFactKey }
+        : {}),
     };
 
     try {
@@ -408,12 +437,16 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
           outcome: "unavailable",
           summary: "Operation cancelled.",
           readable: false,
+          recallable: false,
+          reason: "cancelled",
         };
       }
       return {
         outcome: "failed",
         summary: err instanceof Error ? err.message : "Memory commit failed.",
         readable: false,
+        recallable: false,
+        reason: "commit_failed",
       };
     }
   }

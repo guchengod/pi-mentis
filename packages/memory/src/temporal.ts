@@ -142,6 +142,53 @@ export class TemporalTruthEngine {
     return state?.value;
   }
 
+  /**
+   * Remove one claim from a temporal head (used by legacy set migration to
+   * detach a claim from the group-level head). Never removes the last claim
+   * of an already-empty head. Returns false when the claim is not present.
+   */
+  async dropClaim(input: {
+    readonly factKey: string;
+    readonly scope: MemoryScope;
+    readonly scopeContext?: PiScopeContext;
+    readonly memoryId: string;
+  }): Promise<boolean> {
+    const namespace = temporalNamespace(input.scope, input.scopeContext);
+    const headId = this.#headId(namespace, input.factKey);
+    const state = await this.#state.get<TemporalHead>(headId);
+    const head = state?.value;
+    if (head === undefined) return false;
+    if (!head.currentClaims.some((item) => item.memoryId === input.memoryId)) return false;
+    const nextHead: TemporalHead = {
+      ...head,
+      currentClaims: head.currentClaims.filter((item) => item.memoryId !== input.memoryId),
+      revision: head.revision + 1,
+      updatedAt: this.#clock.now(),
+    };
+    try {
+      await this.#state.put(
+        {
+          id: headId,
+          kind: "temporal-head",
+          namespace,
+          value: nextHead as unknown as Readonly<Record<string, unknown>>,
+        },
+        {
+          expectedRevision: state?.revision ?? 0,
+          now: this.#clock.now(),
+        },
+      );
+    } catch (error: unknown) {
+      if (!(error instanceof StateRevisionConflictError)) throw error;
+      const refreshed = await this.#state.get<TemporalHead>(headId);
+      const stillPresent =
+        refreshed?.value.currentClaims.some((item) => item.memoryId === input.memoryId) === true;
+      if (!stillPresent) return false;
+      throw error;
+    }
+    return true;
+  }
+
   async prepare(input: {
     readonly factKey: string;
     readonly cardinality: TemporalCardinality;

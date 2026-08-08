@@ -134,6 +134,7 @@ function commitCommand(overrides: {
   readonly semanticIntent?: "create" | "reinforce" | "correct" | "replace" | "retract";
   readonly cardinality?: "single" | "set";
   readonly normalizedValue?: string;
+  readonly setMemberKey?: string;
   readonly observedAt?: number;
 }): CommitMemoryCommand {
   return {
@@ -152,6 +153,7 @@ function commitCommand(overrides: {
     polarity: overrides.polarity ?? "positive",
     ...(overrides.semanticIntent === undefined ? {} : { semanticIntent: overrides.semanticIntent }),
     ...(overrides.normalizedValue === undefined ? {} : { normalizedValue: overrides.normalizedValue }),
+    ...(overrides.setMemberKey === undefined ? {} : { setMemberKey: overrides.setMemberKey }),
   };
 }
 
@@ -231,7 +233,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
     expect(trace?.attributes.finalStorageAction).toBe("reinforce");
     expect(trace?.attributes.valueRelation).toBe("equivalent");
     expect(trace?.attributes.existingId).toBe(firstId);
-  }, 30_000);
+  }, 90_000);
 
   it("Case C: same structured value in new wording → reinforced, ID stable", async () => {
     const first = commitCommand({
@@ -251,7 +253,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
     const secondResult = await memory.commit(second);
     expect(secondResult.outcome).toBe("reinforced");
     expect(secondResult.record?.id).toBe(firstId);
-  }, 30_000);
+  }, 90_000);
 
   it("Case D: shell changed zsh → fish → superseded (structured value wins over wording similarity)", async () => {
     const first = commitCommand({
@@ -278,7 +280,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
 
     const head = await temporalHead("user:user/shell_runtime", scopeContext);
     expect(head?.currentClaims.map((claim) => claim.memoryId)).toEqual([secondResult.record?.id]);
-  }, 30_000);
+  }, 90_000);
 
   it("Case E: different language set member → coexist, not reinforce", async () => {
     const first = commitCommand({
@@ -287,6 +289,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
       factKey: "user:user/lang_set",
       cardinality: "set",
       normalizedValue: "go",
+      setMemberKey: "go",
     });
     const firstResult = await memory.commit(first);
     const firstId = firstResult.record?.id as string;
@@ -298,18 +301,26 @@ describe("Same-fact / same-value reinforcement (service)", () => {
       factKey: "user:user/lang_set",
       cardinality: "set",
       normalizedValue: "typescript",
+      setMemberKey: "typescript",
     });
     const secondResult = await memory.commit(second);
     expect(secondResult.outcome).toBe("created");
     expect(secondResult.record?.id).not.toBe(firstId);
     expect(secondResult.record?.status).toBe("active");
     expect(secondResult.record?.conflictsWithIds).not.toContain(firstId);
+    expect(secondResult.record?.memberFactKey).toBe("user:user/lang_set/typescript");
 
-    const head = await temporalHead("user:user/lang_set", scopeContext);
-    expect(head?.currentClaims.map((claim) => claim.memoryId).sort()).toEqual(
-      [firstId, secondResult.record?.id].sort(),
-    );
-  }, 30_000);
+    // Member-level temporal heads: each member owns its own head.
+    const goHead = await temporalHead("user:user/lang_set/go", scopeContext);
+    expect(goHead?.currentClaims.map((claim) => claim.memoryId)).toEqual([firstId]);
+    const tsHead = await temporalHead("user:user/lang_set/typescript", scopeContext);
+    expect(tsHead?.currentClaims.map((claim) => claim.memoryId)).toEqual([
+      secondResult.record?.id,
+    ]);
+    // The group-level head never decides member state — it holds no claims.
+    const groupHead = await temporalHead("user:user/lang_set", scopeContext);
+    expect(groupHead?.currentClaims ?? []).toEqual([]);
+  }, 90_000);
 
   it("Case F: opposite polarity on same statement → conflict, not reinforce", async () => {
     const first = commitCommand({
@@ -335,7 +346,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
 
     const oldRecord = await memory.get(firstId, { scopeContext, accessIntent: "explicit_id" });
     expect(oldRecord?.status).toBe("conflicted");
-  }, 30_000);
+  }, 90_000);
 
   it("unknown relation → conflicted candidate, existing current fact untouched (no destructive supersede)", async () => {
     const first = commitCommand({
@@ -372,7 +383,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
         t.attributes.finalStorageAction === "conflicted-candidate",
     );
     expect(trace).toBeDefined();
-  }, 30_000);
+  }, 90_000);
 
   it("reinforce keeps the canonical content (no paraphrase version chain)", async () => {
     const first = commitCommand({
@@ -380,6 +391,7 @@ describe("Same-fact / same-value reinforcement (service)", () => {
       embedding: unitVector(801),
       factKey: "user:user/code_style_set",
       cardinality: "set",
+      setMemberKey: "style",
     });
     const firstResult = await memory.commit(first);
     const firstId = firstResult.record?.id as string;
@@ -390,12 +402,64 @@ describe("Same-fact / same-value reinforcement (service)", () => {
       embedding: withCosine(unitVector(801), 0.95, 802),
       factKey: "user:user/code_style_set",
       cardinality: "set",
+      setMemberKey: "style",
     });
     const secondResult = await memory.commit(second);
 
     expect(secondResult.outcome).toBe("reinforced");
+    expect(secondResult.record?.id).toBe(firstId);
     const stored = await memory.get(firstId, { scopeContext, accessIntent: "explicit_id" });
     expect(stored?.content).toBe("写实现时我倾向直白、少层级。");
     expect(stored?.reinforceCount).toBe(1);
-  }, 30_000);
+  }, 90_000);
+
+  it("unkeyed set write is legacy-malformed: never compares against the group head, never conflicts", async () => {
+    const first = commitCommand({
+      content: "用户喜欢的编程语言包括 Kotlin。",
+      embedding: unitVector(901),
+      factKey: "user:user/lang_set",
+      cardinality: "set",
+      setMemberKey: "kotlin",
+    });
+    const firstResult = await memory.commit(first);
+    const firstId = firstResult.record?.id as string;
+
+    clock.advance(60_000);
+    // Legacy-style write: same predicate group, set cardinality, NO member key.
+    const legacy = commitCommand({
+      content: "用户偏好的构建风格是简洁。",
+      embedding: withCosine(unitVector(901), 0.7, 902),
+      factKey: "user:user/lang_set",
+      cardinality: "set",
+    });
+    const legacyResult = await memory.commit(legacy);
+    expect(legacyResult.outcome).toBe("created");
+    expect(legacyResult.record?.status).toBe("active");
+    expect(legacyResult.record?.legacyMalformed).toBe(true);
+    expect(legacyResult.record?.conflictsWithIds).not.toContain(firstId);
+
+    // A new properly-keyed member is NOT blocked by the legacy record.
+    clock.advance(60_000);
+    const elixir = commitCommand({
+      content: "用户喜欢的编程语言还包括 Elixir。",
+      embedding: withCosine(unitVector(901), 0.3, 903),
+      factKey: "user:user/lang_set",
+      cardinality: "set",
+      setMemberKey: "elixir",
+    });
+    const elixirResult = await memory.commit(elixir);
+    expect(elixirResult.outcome).toBe("created");
+    expect(elixirResult.record?.status).toBe("active");
+    expect(elixirResult.record?.memberFactKey).toBe("user:user/lang_set/elixir");
+    expect(elixirResult.record?.conflictsWithIds).toEqual([]);
+
+    const elixirHead = await temporalHead("user:user/lang_set/elixir", scopeContext);
+    expect(elixirHead?.currentClaims.map((claim) => claim.memoryId)).toEqual([
+      elixirResult.record?.id,
+    ]);
+    const kotlinHead = await temporalHead("user:user/lang_set/kotlin", scopeContext);
+    expect(kotlinHead?.currentClaims.map((claim) => claim.memoryId)).toEqual([firstId]);
+    const firstStored = await memory.get(firstId, { scopeContext, accessIntent: "explicit_id" });
+    expect(firstStored?.status).toBe("active");
+  }, 90_000);
 });

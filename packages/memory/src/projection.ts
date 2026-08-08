@@ -126,7 +126,11 @@ export function projectMemoryForPublicUse(
   record: Omit<MemoryRecord, "embedding">,
   context: ProjectionContext,
 ): PublicMemoryResult {
-  const predicate = record.factKey?.split("/").pop();
+  // Group keys are `domain:subject/predicate`; member keys add a member
+  // segment (`domain:subject/predicate/member`). Expose the predicate, not
+  // the member, in the public projection.
+  const segments = record.factKey?.split("/") ?? [];
+  const predicate = segments.length >= 2 ? segments[1] : undefined;
   const scopeLabel = safeScopeLabel(record.relevance, context);
 
   // Secret: never expose original content in public projection

@@ -644,6 +644,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           await memory.repairTemporal?.({ signal });
         }
         await memory.repairViews?.();
+        // Set-member identity migration + conflicted-candidate resolver:
+        // legitimate set members must never be stuck in a dead conflicted state.
+        await memory.migrateLegacySetRecords?.({ signal });
+        await memory.resolveConflictedCandidates?.({ signal });
       },
     });
     void repair.promise.catch(() => undefined);

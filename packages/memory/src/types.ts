@@ -156,6 +156,14 @@ export interface MemoryRecord {
   readonly lastReinforcedAt?: number;
   readonly revision: number;
   readonly factKey?: string;
+  /**
+   * Member-level fact identity for set/ordered cardinality:
+   * `${factKey}/${setMemberKey}` (e.g. `user:local/programming_language_preference/kotlin`).
+   * Temporal heads, value-relation comparison, dedup, reinforcement, correction
+   * and retraction all operate on this identity. Undefined for single facts and
+   * for legacy set records whose member identity could not be established.
+   */
+  readonly memberFactKey?: string;
   readonly cardinality?: TemporalCardinality;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
@@ -168,6 +176,18 @@ export interface MemoryRecord {
   readonly evidenceIntegrity?: "valid" | "missing" | "invalid";
   /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
   readonly polarity?: "positive" | "negative";
+  /**
+   * Set/ordered record written without a usable member identity. Such records
+   * must never block (or be blocked by) properly keyed set members.
+   */
+  readonly legacyMalformed?: boolean;
+  /** Flagged by legacy-set migration for a future review/repair pass. */
+  readonly needsRepair?: boolean;
+  /** Last automatic resolution outcome for a conflicted candidate. */
+  readonly conflictResolution?: Readonly<{
+    readonly at: number;
+    readonly action: "activated" | "remains";
+  }>;
 }
 
 export interface CommitMemoryCommand {
@@ -192,6 +212,11 @@ export interface CommitMemoryCommand {
   readonly contentOrigin?: MemoryContentOrigin;
   readonly normalizedValue?: string;
   readonly setMemberKey?: string;
+  /**
+   * Member-level fact identity for set/ordered cardinality. When present it
+   * overrides `${factKey}/${setMemberKey}` derivation.
+   */
+  readonly memberFactKey?: string;
   /** Precomputed content embedding (reused from scope planning — avoids a second remote call). */
   readonly embedding?: EmbeddingVector;
   /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
@@ -324,6 +349,31 @@ export interface MemoryService {
       }
     | undefined
   >;
+  /**
+   * Legacy set migration: scan set/ordered records lacking member identity,
+   * re-derive a member key from content, migrate high-confidence records to
+   * member-level identity, flag the rest `legacyMalformed` and move their
+   * temporal claims off the group head so they can never block new members.
+   */
+  migrateLegacySetRecords?(options?: OperationOptions): Promise<{
+    readonly inspected: number;
+    readonly migrated: number;
+    readonly flagged: number;
+    readonly reheaded: number;
+    readonly errors: readonly string[];
+  }>;
+  /**
+   * Conflict lifecycle resolver: automatically resolve conflicted candidates
+   * that no longer have a competing claim on their own member identity head
+   * (activate them as `active`). Genuine ambiguity with a live competing
+   * claim remains conflicted. Never auto-rejects.
+   */
+  resolveConflictedCandidates?(options?: OperationOptions): Promise<{
+    readonly inspected: number;
+    readonly activated: number;
+    readonly remains: number;
+    readonly errors: readonly string[];
+  }>;
 }
 
 export interface TemporalClaimPointer {

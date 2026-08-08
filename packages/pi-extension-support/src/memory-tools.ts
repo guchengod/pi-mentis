@@ -89,6 +89,14 @@ export interface PublicRememberResult {
   readonly id?: string;
   readonly summary: string;
   readonly readable: boolean;
+  /**
+   * True only when the memory is immediately available to normal recall.
+   * `pending_review` records are persisted but NOT recallable until the
+   * conflict lifecycle resolves them.
+   */
+  readonly recallable?: boolean;
+  /** Machine-readable reason for non-recallable outcomes. */
+  readonly reason?: string;
 }
 
 /** A single recall hit in search_memory results. */
@@ -175,6 +183,7 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       "Do not persist guesses, transient task details, routine outputs, temporary paths, or timestamps unless explicitly requested.",
       "Never submit raw passwords, tokens, API keys, cookies, private keys, or other secrets.",
       'The system automatically detects corrections ("刚才说错了", "改成", "正确是", "不是X是Y") and handles temporal state transitions — do not manually retract old entries.',
+      'An outcome of "remembered" / "reinforced" / "updated" means the information is a normal, recallable memory. An outcome of "pending_review" means the information was SAVED as a review candidate (conflicted) but is NOT yet available to normal recall — do not tell the user it has been remembered as usable memory; report it as pending review.',
     ],
     async execute(_toolCallId, toolParams, abortSignal) {
       if (typeof toolParams.content !== "string") {

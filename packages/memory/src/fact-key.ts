@@ -17,6 +17,12 @@ import { predicateDefinition, type KnownPredicate } from "./predicate-registry.j
 
 export interface FactKeyResult {
   readonly factKey: string;
+  /**
+   * Member-level identity for set/ordered predicates: `${factKey}/${setMemberKey}`.
+   * Temporal heads, value-relation comparison and dedup operate on this key.
+   * Undefined for single facts and when no member key can be derived.
+   */
+  readonly memberFactKey?: string;
   readonly subjectKey: string;
   readonly predicateKey: KnownPredicate | undefined;
   readonly confidence: number;
@@ -87,6 +93,7 @@ function extractNormalizedValue(
  * the predicate chosen by CommitSemanticPlanner.
  *
  * FactKey format: `<domain>:<subjectKey>/<predicateKey>`
+ * Member identity (set/ordered): memberFactKey = `<factKey>/<setMemberKey>`
  *
  * If no predicate was confidently selected, returns a deterministic
  * content-hash fallback (stable identity, never a phrase rule).
@@ -106,8 +113,14 @@ export function deriveFactKey(
 
   if (predicate !== undefined) {
     reasons.push(`predicate "${predicate}" selected semantically`);
+    const groupFactKey = `${domain}:${subjKey}/${predicate}`;
+    const memberFactKey =
+      (cardinality === "set" || cardinality === "ordered") && setMemberKey !== undefined
+        ? `${groupFactKey}/${setMemberKey.replaceAll("/", "_")}`
+        : undefined;
     return {
-      factKey: `${domain}:${subjKey}/${predicate}`,
+      factKey: groupFactKey,
+      ...(memberFactKey === undefined ? {} : { memberFactKey }),
       subjectKey: subjKey,
       predicateKey: predicate,
       confidence: 0.7,

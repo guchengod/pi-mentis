@@ -37,7 +37,7 @@ import {
   type ScopeOwnershipDecision,
 } from "./scope-semantics.js";
 import type { CommitSemanticPlanner } from "./commit-semantics.js";
-import { decideValueRelation, type ValueRelationDecision } from "./value-relation.js";
+import { decideValueRelation, keyedValue, type ValueRelationDecision } from "./value-relation.js";
 
 import type {
   CommitMemoryCommand,
@@ -49,6 +49,7 @@ import type {
   MemorySearchOptions,
   MemoryService,
   MemoryDomain,
+  TemporalCardinality,
   PiScopeContext,
 } from "./types.js";
 
@@ -121,10 +122,36 @@ function recordPolarity(
   return incoming ?? polarity(incomingText);
 }
 
+/**
+ * Extract the predicate from a fact identity.
+ *
+ * Group keys: `domain:subject/predicate`            → predicate
+ * Member keys: `domain:subject/predicate/member`    → predicate (segment 1, NOT the member)
+ */
 function extractPredicate(factKey: string | undefined): string | undefined {
   if (factKey === undefined) return undefined;
-  const idx = factKey.lastIndexOf("/");
-  return idx >= 0 ? factKey.slice(idx + 1) : undefined;
+  const segments = factKey.split("/");
+  return segments.length >= 2 ? segments[1] : undefined;
+}
+
+/**
+ * Member-level identity for set/ordered cardinality: `${factKey}/${setMemberKey}`.
+ * Undefined for single facts and for set records without a usable member key.
+ */
+function memberFactKeyFor(
+  factKey: string | undefined,
+  cardinality: TemporalCardinality | undefined,
+  setMemberKey: string | undefined,
+): string | undefined {
+  if (
+    factKey === undefined ||
+    (cardinality !== "set" && cardinality !== "ordered") ||
+    setMemberKey === undefined ||
+    setMemberKey.length === 0
+  ) {
+    return undefined;
+  }
+  return `${factKey}/${setMemberKey.replaceAll("/", "_")}`;
 }
 
 function cosineSimilarity(score: number): number {
@@ -423,8 +450,16 @@ export class DefaultMemoryService implements MemoryService {
       const factKey = command.factKey ?? deriveFactKey(command);
       const cardinality =
         command.cardinality ?? existing.cardinality ?? defaultCardinality(command.type);
+      const existingMemberFactKey = (existing as Record<string, unknown>)["memberFactKey"] as
+        | string
+        | undefined;
+      const identityFactKey =
+        command.memberFactKey ??
+        existingMemberFactKey ??
+        memberFactKeyFor(factKey, cardinality, command.setMemberKey) ??
+        factKey;
       const temporalPlan = await this.#temporal.prepare({
-        factKey,
+        factKey: identityFactKey,
         cardinality,
         scope: command.scope,
         ...(command.scopeContext === undefined ? {} : { scopeContext: command.scopeContext }),
@@ -453,6 +488,7 @@ export class DefaultMemoryService implements MemoryService {
         revision: existing.revision + 1,
         status: statusForTemporalState(temporalPlan.temporalState),
         factKey,
+        ...(identityFactKey === factKey ? {} : { memberFactKey: identityFactKey }),
         cardinality,
         ...(exNextNormalizedValue !== undefined ? { normalizedValue: exNextNormalizedValue } : {}),
         ...(exNextSetMemberKey !== undefined ? { setMemberKey: exNextSetMemberKey } : {}),
@@ -589,8 +625,16 @@ export class DefaultMemoryService implements MemoryService {
         const factKey = command.factKey ?? existing.factKey ?? deriveFactKey(command);
         const cardinality =
           command.cardinality ?? existing.cardinality ?? defaultCardinality(command.type);
+        const existingMemberFactKey = (existing as Record<string, unknown>)["memberFactKey"] as
+          | string
+          | undefined;
+        const identityFactKey =
+          command.memberFactKey ??
+          existingMemberFactKey ??
+          memberFactKeyFor(factKey, cardinality, command.setMemberKey) ??
+          factKey;
         const temporalPlan = await this.#temporal.prepare({
-          factKey,
+          factKey: identityFactKey,
           cardinality,
           scope: command.scope,
           ...(command.scopeContext === undefined ? {} : { scopeContext: command.scopeContext }),
@@ -618,6 +662,7 @@ export class DefaultMemoryService implements MemoryService {
           revision: existing.revision + 1,
           status: statusForTemporalState(temporalPlan.temporalState),
           factKey,
+          ...(identityFactKey === factKey ? {} : { memberFactKey: identityFactKey }),
           cardinality,
           ...(nextNormalizedValue !== undefined ? { normalizedValue: nextNormalizedValue } : {}),
           ...(nextSetMemberKey !== undefined ? { setMemberKey: nextSetMemberKey } : {}),
@@ -681,12 +726,27 @@ export class DefaultMemoryService implements MemoryService {
     const factKey = command.factKey ?? deriveFactKey(command);
     const cardinality = command.cardinality ?? defaultCardinality(command.type);
 
-    // ── Same-fact value relation routing ──
-    // Find the existing current claim(s) for the same factKey and decide the
-    // relation between the incoming value and the stored value. Same fact +
-    // equivalent value (paraphrase) → reinforce the existing record IN PLACE
-    // (logical ID stays stable, no temporal version chain). Unknown → create
-    // a conflicted review candidate instead of a destructive supersede.
+    // ── Set Member Identity (decided BEFORE value relation) ──
+    // A set/ordered record with a usable member key gets a member-level fact
+    // identity. All same-fact decisions (value relation, temporal head,
+    // dedup, reinforce, retract) then operate on the MEMBER identity, so a
+    // different member (or a legacy group record without a member key) can
+    // never enter the same-value comparison and never blocks a new member.
+    const effectiveSetMemberKey = command.setMemberKey ?? command.normalizedValue;
+    const memberFactKey =
+      command.memberFactKey ?? memberFactKeyFor(factKey, cardinality, effectiveSetMemberKey);
+    const legacyMalformedSet =
+      (cardinality === "set" || cardinality === "ordered") && memberFactKey === undefined;
+    const identityFactKey = memberFactKey ?? factKey;
+
+    // ── Same-member value relation routing ──
+    // Find the existing current claim(s) for the SAME member identity and
+    // decide the relation between the incoming value and the stored value.
+    // Same member + equivalent value (paraphrase) → reinforce the existing
+    // record IN PLACE (logical ID stays stable, no temporal version chain).
+    // Unknown (same member, ambiguous) → conflicted review candidate instead
+    // of a destructive supersede. Different member → never compared here;
+    // member heads make coexistence the only option.
     let equivalentReinforce:
       | {
           readonly decision: ValueRelationDecision;
@@ -702,9 +762,12 @@ export class DefaultMemoryService implements MemoryService {
       !isEvent &&
       command.retractsFact !== true &&
       (command.supersedesIds?.length ?? 0) === 0 &&
-      command.branchClaimState !== "hypothesis"
+      command.branchClaimState !== "hypothesis" &&
+      // Unkeyed set writes have no member identity to compare against; the
+      // group head may hold unrelated members/legacy records.
+      !legacyMalformedSet
     ) {
-      const head = await this.#temporal.head(factKey, command.scope, command.scopeContext);
+      const head = await this.#temporal.head(identityFactKey, command.scope, command.scopeContext);
       const claimIds = head?.currentClaims.map((claim) => claim.memoryId) ?? [];
       if (claimIds.length > 0) {
         const stored = await this.#store.fetchVectors("memory", claimIds);
@@ -773,6 +836,7 @@ export class DefaultMemoryService implements MemoryService {
           comparedExistingId ??
           "none-found",
         incomingFactKey: factKey,
+        incomingMemberFactKey: memberFactKey ?? "none",
         existingFactKey:
           equivalentReinforce?.existing.factKey ??
           comparedExistingFactKey ??
@@ -835,10 +899,24 @@ export class DefaultMemoryService implements MemoryService {
     }
     const unknownGuard = unknownGuardExistingId !== undefined;
 
+    // Retract captures the claims it deactivates: the retract tombstone alone
+    // must not leave the old member/fact claim active and recallable.
+    let retractedTargetIds: readonly string[] = [];
+    if (command.retractsFact === true) {
+      const preRetractHead = await this.#temporal.head(
+        memberFactKey ?? factKey,
+        command.scope,
+        command.scopeContext,
+      );
+      retractedTargetIds = preRetractHead?.currentClaims.map((claim) => claim.memoryId) ?? [];
+    }
+
     const temporalPlan: TemporalPlan | undefined = unknownGuard
       ? undefined
       : await this.#temporal.prepare({
-      factKey,
+      // Set members use their MEMBER identity for the temporal head; single
+      // facts and unkeyed legacy set writes keep the group-level head.
+      factKey: memberFactKey ?? factKey,
       cardinality,
       scope: command.scope,
       ...(command.scopeContext === undefined ? {} : { scopeContext: command.scopeContext }),
@@ -905,9 +983,11 @@ export class DefaultMemoryService implements MemoryService {
       reinforceCount: 0,
       revision: 1,
       factKey,
+      ...(memberFactKey === undefined ? {} : { memberFactKey }),
       cardinality,
       ...(command.normalizedValue !== undefined ? { normalizedValue: command.normalizedValue } : {}),
       ...(command.setMemberKey !== undefined ? { setMemberKey: command.setMemberKey } : {}),
+      ...(legacyMalformedSet ? { legacyMalformed: true } : {}),
       ...(temporalPlan === undefined ? {} : { temporalState: temporalPlan.temporalState }),
       ...(command.polarity === undefined ? {} : { polarity: command.polarity }),
       ...(command.branchClaimState === undefined
@@ -921,6 +1001,30 @@ export class DefaultMemoryService implements MemoryService {
     };
     await this.#store.upsertVectors("memory", [this.#record(record)]);
     if (temporalPlan !== undefined) await this.#temporal.claimWritten(temporalPlan);
+    // Deactivate the claims this retract removed from the identity head.
+    if (retractedTargetIds.length > 0) {
+      const previous = await this.#store.fetchVectors("memory", retractedTargetIds);
+      const updates: StoredVectorRecord[] = [];
+      for (const [previousId, stored] of previous) {
+        const payload = decodeStoredPayload(stored) as unknown as Omit<MemoryRecord, "embedding">;
+        const vector = stored.vectors["embedding"];
+        if (!(vector instanceof Float32Array) && !Array.isArray(vector)) continue;
+        if (previousId === record.id) continue;
+        updates.push(
+          this.#record({
+            ...payload,
+            id: previousId,
+            embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+            status: "tombstoned",
+            temporalState: "retracted",
+            validUntil: now,
+            updatedAt: now,
+            revision: payload.revision + 1,
+          }),
+        );
+      }
+      if (updates.length > 0) await this.#store.upsertVectors("memory", updates);
+    }
     if (supersedesIds.length > 0) {
       const previous = await this.#store.fetchVectors("memory", supersedesIds);
       const updates: StoredVectorRecord[] = [];
@@ -1103,6 +1207,209 @@ export class DefaultMemoryService implements MemoryService {
       await this.#store.upsertVectors("memory", updates);
       return true;
     }, options);
+  }
+
+  /**
+   * Legacy set migration.
+   *
+   * Scans set/ordered records without member identity and:
+   *   1. derives a member key from structured content (lexicon, predicate-gated)
+   *      → migrates to member-level identity and moves its temporal claim off
+   *      the group head onto the member head;
+   *   2. otherwise flags the record `legacyMalformed`/`needsRepair` and moves
+   *      its claim onto a stable fallback member identity so it can NEVER
+   *      block (or be blocked by) properly keyed set members.
+   *
+   * Never deletes data.
+   */
+  async migrateLegacySetRecords(options: OperationOptions = {}): Promise<{
+    readonly inspected: number;
+    readonly migrated: number;
+    readonly flagged: number;
+    readonly reheaded: number;
+    readonly errors: readonly string[];
+  }> {
+    const documents = await this.#store.filterVectors("memory", 'status = "active"', 10_000);
+    const errors: string[] = [];
+    let migrated = 0;
+    let flagged = 0;
+    let reheaded = 0;
+    const now = this.#clock.now();
+    for (const document of documents) {
+      if (options.signal?.aborted === true) throw options.signal.reason;
+      let payload: Omit<MemoryRecord, "embedding">;
+      try {
+        payload = decodeStoredPayload(document) as unknown as Omit<MemoryRecord, "embedding">;
+      } catch {
+        errors.push(`decode ${document.id}`);
+        continue;
+      }
+      const cardinality = payload.cardinality;
+      if (cardinality !== "set" && cardinality !== "ordered") continue;
+      if (payload.factKey === undefined) continue;
+      const storedMemberKey = payload.setMemberKey;
+      const storedMemberFactKey = payload.memberFactKey;
+      const existingMemberKey = storedMemberFactKey?.includes("/")
+        ? storedMemberFactKey.slice(storedMemberFactKey.lastIndexOf("/") + 1)
+        : undefined;
+      // Fallback `legacy:*` identities never count as a real member key.
+      const memberKey =
+        storedMemberKey ??
+        (existingMemberKey !== undefined && !existingMemberKey.startsWith("legacy:")
+          ? existingMemberKey
+          : keyedValue(payload.content, extractPredicate(payload.factKey) ?? payload.factKey));
+      const full = (await this.#store.fetchVectors("memory", [document.id])).get(document.id);
+      const vector = full?.vectors["embedding"];
+      if (full === undefined || (!(vector instanceof Float32Array) && !Array.isArray(vector))) {
+        errors.push(`no-vector ${document.id}`);
+        continue;
+      }
+      const embedding = vector instanceof Float32Array ? vector : Float32Array.from(vector);
+      const memberFactKey =
+        storedMemberFactKey ??
+        (memberKey === undefined
+          ? `${payload.factKey}/legacy:${payload.contentHash.slice(0, 8)}`
+          : memberFactKeyFor(payload.factKey, cardinality, memberKey));
+      if (memberFactKey === undefined) continue;
+      const hadIdentity = storedMemberFactKey !== undefined;
+      const claimMoved = await this.#temporal.dropClaim({
+        factKey: payload.factKey,
+        scope: payload.scope,
+        ...(payload.scopeContext === undefined ? {} : { scopeContext: payload.scopeContext }),
+        memoryId: payload.id,
+      });
+      if (claimMoved) reheaded++;
+      const isLegacyMalformed =
+        memberKey === undefined || memberKey.startsWith("legacy:");
+      const updates: StoredVectorRecord[] = [
+        this.#record({
+          ...payload,
+          embedding,
+          memberFactKey,
+          ...(isLegacyMalformed
+            ? { legacyMalformed: true, needsRepair: true }
+            : { legacyMalformed: false }),
+          updatedAt: now,
+          revision: payload.revision + 1,
+        }),
+      ];
+      if (!hadIdentity) {
+        // Adopt the claim on the member-level head (real member key or
+        // stable fallback identity for legacy malformed records).
+        const adoption = await this.#temporal.prepare({
+          factKey: memberFactKey,
+          cardinality,
+          scope: payload.scope,
+          ...(payload.scopeContext === undefined ? {} : { scopeContext: payload.scopeContext }),
+          memoryId: payload.id,
+          contentHash: payload.contentHash,
+          authority: payload.authority,
+          observedAt: payload.observedAt,
+        });
+        await this.#temporal.claimWritten(adoption);
+        await this.#temporal.apply(adoption);
+      }
+      await this.#store.upsertVectors("memory", updates);
+      if (isLegacyMalformed) flagged++;
+      else if (!hadIdentity) migrated++;
+    }
+    return { inspected: documents.length, migrated, flagged, reheaded, errors };
+  }
+
+  /**
+   * Conflict lifecycle resolver.
+   *
+   * For every conflicted candidate:
+   *   - no current claim on its own member identity head → orphaned candidate
+   *     → ACTIVATE (status=active, member claim adopted, stale conflicts
+   *     cleared). This is the exit path for candidates whose conflict target
+   *     was itself legacy/moved, e.g. set members wrongly blocked by a
+   *     missing-member-key group record.
+   *   - a live competing claim on the same identity → genuine ambiguity
+   *     → REMAINS conflicted (never auto-rejected, never auto-decided).
+   */
+  async resolveConflictedCandidates(options: OperationOptions = {}): Promise<{
+    readonly inspected: number;
+    readonly activated: number;
+    readonly remains: number;
+    readonly errors: readonly string[];
+  }> {
+    const documents = await this.#store.filterVectors("memory", 'status = "conflicted"', 10_000);
+    const errors: string[] = [];
+    let activated = 0;
+    let remains = 0;
+    const now = this.#clock.now();
+    for (const document of documents) {
+      if (options.signal?.aborted === true) throw options.signal.reason;
+      let payload: Omit<MemoryRecord, "embedding">;
+      try {
+        payload = decodeStoredPayload(document) as unknown as Omit<MemoryRecord, "embedding">;
+      } catch {
+        errors.push(`decode ${document.id}`);
+        remains++;
+        continue;
+      }
+      const factKey = payload.factKey;
+      const cardinality = payload.cardinality;
+      if (factKey === undefined) {
+        remains++;
+        continue;
+      }
+      const memberFactKey =
+        payload.memberFactKey ??
+        memberFactKeyFor(factKey, cardinality, payload.setMemberKey);
+      const identityFactKey = memberFactKey ?? factKey;
+      const full = (await this.#store.fetchVectors("memory", [document.id])).get(document.id);
+      const vector = full?.vectors["embedding"];
+      if (full === undefined || (!(vector instanceof Float32Array) && !Array.isArray(vector))) {
+        errors.push(`no-vector ${document.id}`);
+        remains++;
+        continue;
+      }
+      const head = await this.#temporal.head(
+        identityFactKey,
+        payload.scope,
+        payload.scopeContext,
+      );
+      const claimed = head?.currentClaims.some((claim) => claim.memoryId === payload.id) ?? false;
+      const competing = (head?.currentClaims ?? []).filter(
+        (claim) => claim.memoryId !== payload.id,
+      );
+      if (claimed || competing.length > 0) {
+        // Genuine ambiguity with a live claim on the same identity — remains.
+        remains++;
+        continue;
+      }
+      const adoption = await this.#temporal.prepare({
+        factKey: identityFactKey,
+        cardinality: cardinality ?? "single",
+        scope: payload.scope,
+        ...(payload.scopeContext === undefined ? {} : { scopeContext: payload.scopeContext }),
+        memoryId: payload.id,
+        contentHash: payload.contentHash,
+        authority: payload.authority,
+        observedAt: payload.observedAt,
+      });
+      await this.#temporal.claimWritten(adoption);
+      await this.#temporal.apply(adoption);
+      await this.#store.upsertVectors("memory", [
+        this.#record({
+          ...payload,
+          embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+          status: "active",
+          temporalState: "current",
+          conflictsWithIds: [],
+          ...(payload.memberFactKey === undefined
+            ? { memberFactKey: identityFactKey }
+            : {}),
+          conflictResolution: { at: now, action: "activated" },
+          updatedAt: now,
+          revision: payload.revision + 1,
+        }),
+      ]);
+      activated++;
+    }
+    return { inspected: documents.length, activated, remains, errors };
   }
 
   async getView(kind: ViewKind, scopeId: string, scopeContext?: MemoryRecord["scopeContext"]) {

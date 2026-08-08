@@ -38,6 +38,19 @@ function axis(a: number): Float32Array {
   v[a] = 1;
   return v;
 }
+function unitVector(seed: number): Float32Array {
+  const v = new Float32Array(DIM);
+  let state = seed * 2654435761;
+  for (let index = 0; index < DIM; index++) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    v[index] = ((state / 0xffffffff) * 2 - 1) as number;
+  }
+  let squared = 0;
+  for (const value of v) squared += value * value;
+  const norm = Math.sqrt(squared);
+  for (let index = 0; index < DIM; index++) v[index] = (v[index] ?? 0) / norm;
+  return v;
+}
 function contentVector(action: number, polarity: number, predicate: number, scopeUser: boolean): Float32Array {
   const v = new Float32Array(DIM);
   v[action] = 1;
@@ -187,6 +200,8 @@ describe("DefaultRememberCoordinator with semantic planners", () => {
       { scopeContext: ctx, evidenceRef: await evidenceRefFor(ctx) },
     );
     expect(result.outcome).toBe("remembered");
+    expect(result.recallable).toBe(true);
+    expect(result.reason).toBeUndefined();
     expect(result.predicate).toBe("project_build_command");
 
     const record = await memory.get(result.id as string, { scopeContext: ctx });
@@ -205,9 +220,12 @@ describe("DefaultRememberCoordinator with semantic planners", () => {
       { scopeContext: ctx, evidenceRef: await evidenceRefFor(ctx) },
     );
     // A retract with no matching head is still acknowledged (nothing to delete)
-    expect(result.outcome).toBe("remembered");
+    expect(result.outcome).toBe("retracted");
+    expect(result.recallable).toBe(false);
+    expect(result.reason).toBe("retracted");
     const record = await memory.get(result.id as string, { scopeContext: ctx });
     expect(record?.temporalState).toBe("retracted");
+    expect(record?.status).toBe("tombstoned");
   }, 30_000);
 
   it("reinforce intent is preserved", async () => {
@@ -232,5 +250,69 @@ describe("DefaultRememberCoordinator with semantic planners", () => {
     expect(result.outcome).toBe("remembered");
     const record = await memory.get(result.id as string, { scopeContext: ctx });
     expect(record?.polarity).toBe("negative");
+  }, 30_000);
+
+  it("tool contract: a true conflict reports pending_review with recallable=false", async () => {
+    // Same single fact identity (project_test_command), ambiguous value
+    // relation (cos 0.7) with create intent → conflicted candidate.
+    const first = "测试命令是 make test";
+    const second = "测试命令是 npm run check";
+    const rawBase = contentVector(AX.create, AX.pos, AX.test, true);
+    let baseNorm = 0;
+    for (const value of rawBase) baseNorm += value * value;
+    const base = new Float32Array(DIM);
+    for (let index = 0; index < DIM; index++) {
+      base[index] = (rawBase[index] ?? 0) / Math.sqrt(baseNorm);
+    }
+    const perpendicular = unitVector(42_007);
+    let dot = 0;
+    for (let index = 0; index < DIM; index++) {
+      dot += (base[index] ?? 0) * (perpendicular[index] ?? 0);
+    }
+    const component = new Float32Array(DIM);
+    for (let index = 0; index < DIM; index++) {
+      component[index] = (perpendicular[index] ?? 0) - dot * (base[index] ?? 0);
+    }
+    let squared = 0;
+    for (const value of component) squared += value * value;
+    const norm = Math.sqrt(squared) || 1;
+    const ambiguous = new Float32Array(DIM);
+    for (let index = 0; index < DIM; index++) {
+      ambiguous[index] = 0.7 * (base[index] ?? 0) + 0.714 * ((component[index] ?? 0) / norm);
+    }
+    provider.register(first, base);
+    provider.register(second, ambiguous);
+
+    const firstResult = await coordinator.remember(
+      { content: first },
+      { scopeContext: ctx, evidenceRef: await evidenceRefFor(ctx) },
+    );
+    expect(firstResult.outcome).toBe("remembered");
+
+    const secondResult = await coordinator.remember(
+      { content: second },
+      { scopeContext: ctx, evidenceRef: await evidenceRefFor(ctx) },
+    );
+    expect(secondResult.outcome).toBe("pending_review");
+    expect(secondResult.recallable).toBe(false);
+    expect(secondResult.reason).toBe("conflict_with_existing_fact");
+    expect(secondResult.summary).toContain("待审核");
+    expect(secondResult.readable).toBe(true);
+  }, 30_000);
+
+  it("tool contract: set-member commits expose memberFactKey identity", async () => {
+    const text = "用户喜欢的编程语言包括 Kotlin。";
+    provider.register(text, contentVector(AX.create, AX.pos, AX.language, true));
+    const result = await coordinator.remember(
+      { content: text },
+      { scopeContext: ctx, evidenceRef: await evidenceRefFor(ctx) },
+    );
+    expect(result.outcome).toBe("remembered");
+    expect(result.recallable).toBe(true);
+    expect(result.cardinality).toBe("set");
+    expect(result.setMemberKey).toBeDefined();
+    const record = await memory.get(result.id as string, { scopeContext: ctx });
+    expect(record?.status).toBe("active");
+    expect(record?.memberFactKey).toContain("/kotlin");
   }, 30_000);
 });

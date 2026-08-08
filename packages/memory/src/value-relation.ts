@@ -214,7 +214,7 @@ const PREDICATE_LEXICONS: Readonly<Record<string, readonly string[]>> = {
   shell: RUN_TIMES,
 };
 
-function keyedValue(content: string, predicate: string | undefined): string | undefined {
+export function keyedValue(content: string, predicate: string | undefined): string | undefined {
   const lexicon = predicate === undefined ? undefined : PREDICATE_LEXICONS[predicate];
   if (lexicon === undefined) return undefined;
   const normalized = normalizeText(content).toLowerCase().replace(/\s+/g, " ");
