@@ -24,7 +24,7 @@ Create `.pi-mentis/config.json`; omitted fields inherit safe defaults:
   },
   "intelligence": {
     "context": { "persistSnapshots": true, "capabilityMaxAgeMs": 60000 },
-    "temporal": { "enabled": true, "repairOnStartup": true },
+    "temporal": { "enabled": true },
     "views": { "enabled": true, "ttlMs": 300000 },
     "effectiveness": { "enabled": true, "flushIntervalMs": 250, "maxBatch": 64 },
     "adaptivePolicy": { "enabled": true, "cooldownMs": 1800000 }
@@ -34,7 +34,7 @@ Create `.pi-mentis/config.json`; omitted fields inherit safe defaults:
 ```
 
 Set the credential in the environment, never the JSON file. Validation enforces Pi
-0.83.0, HTTPS (except localhost tests), 768–4096 dimensions, 8K–32K Rerank context,
+0.84.0 or newer, HTTPS (except localhost tests), 768–4096 dimensions, 8K–32K Rerank context,
 bounded queues/resources, and coherent context budgets.
 
 `performance.queue.maxQueuedTaskAgeMs` applies to background and maintenance work, not
@@ -51,5 +51,5 @@ the last valid state readable.
 
 Tool results up to `inlineMaxBytes` remain unchanged. Results through `truncateMaxBytes` return a
 preview plus an Artifact reference; larger results return only a structured symbolic result and the
-reference. Classification is local and rule-driven. The original text is stored below the private
+reference. This byte-size policy is structural and does not classify memory semantics. The original text is stored below the private
 storage root in all offloaded cases.

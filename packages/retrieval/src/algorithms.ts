@@ -3,7 +3,8 @@ import { systemClock, type SearchHit } from "@pi-mentis/pi-mentis-core";
 export interface RankedList {
   readonly weight: number;
   readonly hits: readonly SearchHit[];
-}export function reciprocalRankFusion(
+}
+export function reciprocalRankFusion(
   lists: readonly RankedList[],
   rankConstant = 60,
 ): readonly SearchHit[] {
@@ -65,126 +66,76 @@ export function maximalMarginalRelevance(
   return selected;
 }
 
-// ─── Structural Fact Identity (Set Recall Completeness) ───────────
+// ─── Classless Record Identity ───────────────────────────────────
 
-/**
- * Structural memory identity extracted from candidate metadata — never from
- * natural language. The write path already records predicate / cardinality /
- * factKey / memberFactKey / setMemberKey on every memory payload.
- */
 export interface MemoryStructuralIdentity {
-  readonly predicate?: string;
-  readonly cardinality?: string;
-  readonly factKey?: string;
-  readonly memberFactKey?: string;
-  readonly setMemberKey?: string;
+  readonly recordId?: string;
+  readonly contentHash?: string;
+  readonly namespace?: string;
 }
 
 export function memoryStructuralIdentity(hit: SearchHit): MemoryStructuralIdentity {
-  const metadata = hit.metadata ?? {};
-  const factKey =
-    typeof metadata["factKey"] === "string" ? metadata["factKey"] : undefined;
-  const memberFactKey =
-    typeof metadata["memberFactKey"] === "string" ? metadata["memberFactKey"] : undefined;
-  const cardinality =
-    typeof metadata["cardinality"] === "string" ? metadata["cardinality"] : undefined;
-  const setMemberKey =
-    typeof metadata["setMemberKey"] === "string" ? metadata["setMemberKey"] : undefined;
-  let predicate = typeof metadata["predicate"] === "string" ? metadata["predicate"] : undefined;
-  if (predicate === undefined && factKey !== undefined) {
-    const segments = factKey.split("/");
-    predicate = segments.length >= 2 ? segments[1] : undefined;
-  }
   return {
-    ...(predicate === undefined ? {} : { predicate }),
-    ...(cardinality === undefined ? {} : { cardinality }),
-    ...(factKey === undefined ? {} : { factKey }),
-    ...(memberFactKey === undefined ? {} : { memberFactKey }),
-    ...(setMemberKey === undefined ? {} : { setMemberKey }),
+    recordId: hit.id,
+    contentHash: hit.contentHash,
+    namespace: hit.namespace,
   };
 }
 
-export type StructuralRelation = "same_member" | "set_sibling" | "unrelated";
+export type StructuralRelation = "same_record" | "same_content" | "unrelated";
 
 /**
  * Structural relation between two candidates.
  *
- *   same_member  — same member identity (memberFactKey, or factKey for
- *                  single facts / legacy unkeyed set records): duplicates
- *                  or temporal versions of the SAME fact.
- *   set_sibling  — same set group (same predicate factKey, cardinality
- *                  set/ordered) but DIFFERENT setMemberKey: distinct facts
- *                  that must NOT be suppressed as semantic duplicates.
+ *   same_record  — the same persisted record.
+ *   same_content — identical content inside one security namespace.
  *   unrelated    — everything else.
- *
- * Structural fact identity always wins over embedding/text similarity.
  */
 export function structuralRelation(
   left: MemoryStructuralIdentity,
   right: MemoryStructuralIdentity,
 ): StructuralRelation {
-  const leftIdentity = left.memberFactKey ?? left.factKey;
-  const rightIdentity = right.memberFactKey ?? right.factKey;
-  if (leftIdentity !== undefined && leftIdentity === rightIdentity) return "same_member";
-  const leftSet = left.cardinality === "set" || left.cardinality === "ordered";
-  const rightSet = right.cardinality === "set" || right.cardinality === "ordered";
+  if (left.recordId !== undefined && left.recordId === right.recordId) return "same_record";
   if (
-    leftSet &&
-    rightSet &&
-    left.factKey !== undefined &&
-    left.factKey === right.factKey &&
-    left.memberFactKey !== right.memberFactKey
-  ) {
-    return "set_sibling";
-  }
+    left.contentHash !== undefined &&
+    left.contentHash === right.contentHash &&
+    left.namespace === right.namespace
+  )
+    return "same_content";
   return "unrelated";
 }
 
 /**
- * Structural deduplication BEFORE diversity selection: keep only the
- * best-scoring candidate per member identity. Set members (different
- * setMemberKey) are distinct identities and are never collapsed.
+ * Structural deduplication before diversity selection. Similar text alone is
+ * never an identity signal.
  */
 export function structuralDedupe<T extends SearchHit>(hits: readonly T[]): readonly T[] {
   const bestByIdentity = new Map<string, T>();
-  const unidentifiable: T[] = [];
   for (const hit of hits) {
     const identity = memoryStructuralIdentity(hit);
-    const key = identity.memberFactKey ?? identity.factKey;
-    if (key === undefined) {
-      unidentifiable.push(hit);
-      continue;
-    }
+    const key = `${identity.namespace ?? ""}:${identity.contentHash ?? identity.recordId ?? hit.id}`;
     const existing = bestByIdentity.get(key);
     if (existing === undefined || hit.score > existing.score) bestByIdentity.set(key, hit);
   }
-  return [...bestByIdentity.values(), ...unidentifiable].sort(
-    (left, right) => right.score - left.score,
-  );
+  return [...bestByIdentity.values()].sort((left, right) => right.score - left.score);
 }
 
 export interface DiversityTraceEntry {
   readonly candidateId: string;
-  readonly predicate?: string;
-  readonly cardinality?: string;
-  readonly setMemberKey?: string;
-  readonly memberFactKey?: string;
   readonly pairwiseSimilarity: number;
   readonly structuralRelation: StructuralRelation;
   readonly mmrPenalty: number;
-  readonly preservedBySetCompleteness: boolean;
+  readonly preservedByIndependentIdentity: boolean;
   readonly selected: boolean;
   readonly dropReason?: string;
 }
 
 export interface DiversityOptions {
   /**
-   * Redundancy penalty applied between SET SIBLINGS (same set predicate,
-   * different setMemberKey). Default 0: siblings are distinct facts and must
-   * not be suppressed for content similarity. Applies only between siblings;
-   * ordinary candidates keep the normal similarity penalty.
+   * Optional penalty for independently identified records. The default keeps
+   * ordinary MMR behaviour while record identity prevents false dedupe.
    */
-  readonly setSiblingPenalty?: number;
+  readonly independentRecordPenalty?: number;
   readonly onTrace?: (entry: DiversityTraceEntry) => void;
 }
 
@@ -194,13 +145,11 @@ export function maximalMarginalRelevanceWithTrace(
   lambda = 0.75,
   options: DiversityOptions = {},
 ): readonly SearchHit[] {
-  const siblingPenalty = options.setSiblingPenalty ?? 0;
+  const independentPenalty = options.independentRecordPenalty;
   const remaining = [...hits];
   const selected: SearchHit[] = [];
   const tokenSets = new Map(remaining.map((hit) => [hit.id, terms(hit.text)]));
-  const identities = new Map(
-    hits.map((hit) => [hit.id, memoryStructuralIdentity(hit)] as const),
-  );
+  const identities = new Map(hits.map((hit) => [hit.id, memoryStructuralIdentity(hit)] as const));
 
   const traceEntry = (
     hit: SearchHit,
@@ -208,22 +157,12 @@ export function maximalMarginalRelevanceWithTrace(
     selectedFlag: boolean,
     dropReason?: string,
   ): DiversityTraceEntry => {
-    const identity = identities.get(hit.id) ?? {};
     return {
       candidateId: hit.id,
-      ...(identity.predicate === undefined ? {} : { predicate: identity.predicate }),
-      ...(identity.cardinality === undefined ? {} : { cardinality: identity.cardinality }),
-      ...(identity.setMemberKey === undefined
-        ? {}
-        : { setMemberKey: identity.setMemberKey }),
-      ...(identity.memberFactKey === undefined
-        ? {}
-        : { memberFactKey: identity.memberFactKey }),
       pairwiseSimilarity: pairwise.similarity,
       structuralRelation: pairwise.relation,
       mmrPenalty: pairwise.penalty,
-      preservedBySetCompleteness:
-        pairwise.relation === "set_sibling" && pairwise.penalty === 0,
+      preservedByIndependentIdentity: pairwise.relation === "unrelated",
       selected: selectedFlag,
       ...(dropReason === undefined ? {} : { dropReason }),
     };
@@ -242,10 +181,7 @@ export function maximalMarginalRelevanceWithTrace(
       let maxSimilarity = 0;
       let maxRelation: StructuralRelation = "unrelated";
       for (const chosen of selected) {
-        const similarity = jaccard(
-          candidateTerms,
-          tokenSets.get(chosen.id) ?? new Set<string>(),
-        );
+        const similarity = jaccard(candidateTerms, tokenSets.get(chosen.id) ?? new Set<string>());
         if (similarity > maxSimilarity) {
           maxSimilarity = similarity;
           maxRelation = structuralRelation(
@@ -254,8 +190,10 @@ export function maximalMarginalRelevanceWithTrace(
           );
         }
       }
-      const isSibling = maxRelation === "set_sibling";
-      const penalty = isSibling ? siblingPenalty : (1 - lambda) * maxSimilarity;
+      const penalty =
+        maxRelation === "unrelated" && independentPenalty !== undefined
+          ? independentPenalty * maxSimilarity
+          : (1 - lambda) * maxSimilarity;
       const utility = lambda * candidate.score - penalty;
       if (utility > bestUtility) {
         bestUtility = utility;
@@ -289,7 +227,10 @@ export function maximalMarginalRelevanceWithTrace(
         {
           similarity: maxSimilarity,
           relation: maxRelation,
-          penalty: maxRelation === "set_sibling" ? siblingPenalty : (1 - lambda) * maxSimilarity,
+          penalty:
+            maxRelation === "unrelated" && independentPenalty !== undefined
+              ? independentPenalty * maxSimilarity
+              : (1 - lambda) * maxSimilarity,
         },
         false,
         "diversity_limit",

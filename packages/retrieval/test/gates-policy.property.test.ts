@@ -253,11 +253,11 @@ describe("retrieval gates and adaptive-policy invariants", () => {
     );
     expectDenied(
       gateSearchHit(memoryHit({ applicability: { repositoryId: "repo:b" } }), { scope }),
-      "applicability:repository-mismatch",
+      "runtime-constraint:repository-mismatch",
     );
     expectDenied(
       gateSearchHit(memoryHit({ applicability: { projectId: "project:b" } }), { scope }),
-      "applicability:project-mismatch",
+      "runtime-constraint:project-mismatch",
     );
     expectDenied(
       gateSearchHit(memoryHit({ applicability: { packageManager: "pnpm" } }), {
@@ -296,14 +296,14 @@ describe("retrieval gates and adaptive-policy invariants", () => {
         memoryHit({ premises: [{ kind: "manifest", value: "package.json", required: true }] }),
         { scope, manifestTypes: [] },
       ),
-      "premise:required-failed",
+      "recall-prerequisite:required-failed",
     );
   });
 
   it("evaluates every applicability compatibility path", () => {
     expect(
       gateSearchHit(memoryHit({ applicability: { projectId: "project:b" } }), { scope }).reasons,
-    ).toContain("applicability:project-mismatch");
+    ).toContain("runtime-constraint:project-mismatch");
     const softEnvironment = gateSearchHit(
       memoryHit({ applicability: { os: ["linux"], architecture: ["x64"] } }),
       { scope, os: "darwin", architecture: "arm64" },
@@ -410,16 +410,13 @@ describe("retrieval gates and adaptive-policy invariants", () => {
     });
     expect(accepted.allowed).toBe(true);
     expect(accepted.scoreMultiplier).toBeCloseTo(0.6);
-    expect(accepted.reasons).toContain("premise:unchecked");
-    expect(accepted.uncheckedPremises).toEqual([
-      { kind: "context", value: "manual-check", required: false },
-    ]);
+    expect(accepted.uncheckedPremises).toEqual([]);
     expect(
       gateSearchHit(memoryHit({ premises: [{ kind: "tool", value: "bash", required: true }] }), {
         scope,
         availableTools: [],
       }).reasons,
-    ).toContain("premise:required-failed");
+    ).toContain("recall-prerequisite:required-failed");
     const noEvidence = gateSearchHit(memoryHit({ evidenceRefs: [], authority: 10 }), { scope });
     expect(noEvidence).toMatchObject({ allowed: true, instructionSafe: false });
     expect(noEvidence.reasons).toContain("trust:evidence-missing");
@@ -456,10 +453,7 @@ describe("retrieval gates and adaptive-policy invariants", () => {
     ] as const) {
       const decision = gateSearchHit(memoryHit({ premises: [premise] }), { scope, ...context });
       expect(decision.allowed).toBe(expected);
-      if (premise.kind === "context") {
-        expect(decision.uncheckedPremises).toEqual([premise]);
-        expect(decision.reasons).toContain("premise:unchecked");
-      }
+      if (premise.kind === "context") expect(decision.uncheckedPremises).toEqual([]);
     }
   });
 

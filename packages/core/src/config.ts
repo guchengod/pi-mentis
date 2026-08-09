@@ -152,7 +152,6 @@ export interface IntelligenceConfig {
   };
   readonly temporal: {
     readonly enabled: true;
-    readonly repairOnStartup: boolean;
   };
   readonly views: {
     readonly enabled: boolean;
@@ -308,7 +307,7 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
     },
     intelligence: {
       context: { persistSnapshots: true, capabilityMaxAgeMs: 60_000 },
-      temporal: { enabled: true, repairOnStartup: true },
+      temporal: { enabled: true },
       views: { enabled: true, ttlMs: 5 * 60_000 },
       effectiveness: { enabled: true, flushIntervalMs: 250, maxBatch: 64 },
       adaptivePolicy: { enabled: true, cooldownMs: 30 * 60_000 },

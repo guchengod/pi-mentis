@@ -143,7 +143,9 @@ export async function resolvePiProjectIdentity(
         ? gitDirectory
         : nodePath.resolve(gitDirectory, commonDirectoryPointer);
   const head =
-    gitDirectory === undefined ? undefined : await optionalText(nodePath.join(gitDirectory, "HEAD"));
+    gitDirectory === undefined
+      ? undefined
+      : await optionalText(nodePath.join(gitDirectory, "HEAD"));
   const headRef = head?.match(/^ref:\s*(.+)$/)?.[1]?.trim();
   const branchName = headRef?.replace(/^refs\/heads\//, "");
   const looseCommitId =

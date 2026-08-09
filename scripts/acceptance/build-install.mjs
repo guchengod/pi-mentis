@@ -16,7 +16,7 @@ export async function buildAndPack({ logs, state }) {
     ["lint", ["lint"]],
     ["typecheck", ["typecheck"]],
     ["unit", ["test"]],
-    ["integration", ["test:integration"]],
+    ["e2e", ["test:e2e"]],
     ["build", ["build"]],
     ["pack", ["pack:extensions"]],
   ];
@@ -24,7 +24,7 @@ export async function buildAndPack({ logs, state }) {
   for (const [label, args] of commands) {
     const result = await runCommand("pnpm", args, {
       cwd: repositoryRoot,
-      timeoutMs: label === "integration" ? 30 * 60_000 : 15 * 60_000,
+      timeoutMs: label === "e2e" ? 30 * 60_000 : 15 * 60_000,
       logFile: path.join(logs, `build-${label}.log`),
     });
     commandResults.push({ label, durationMs: result.durationMs, exitCode: result.exitCode });

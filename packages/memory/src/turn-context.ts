@@ -74,9 +74,19 @@ export class TurnContextManager {
     this.#activeTopic = { topicId, confidence, lastUpdatedTurn: this.#turnCount, updatedAt: now };
   }
 
-  updateTask(taskId: string | undefined, status: ActiveTaskState["status"], confidence: number): void {
+  updateTask(
+    taskId: string | undefined,
+    status: ActiveTaskState["status"],
+    confidence: number,
+  ): void {
     const now = this.#clock.now();
-    this.#activeTask = { taskId, status, confidence, lastUpdatedTurn: this.#turnCount, updatedAt: now };
+    this.#activeTask = {
+      taskId,
+      status,
+      confidence,
+      lastUpdatedTurn: this.#turnCount,
+      updatedAt: now,
+    };
   }
 
   shouldRefreshTopic(maxStaleTurns: number = 3): boolean {

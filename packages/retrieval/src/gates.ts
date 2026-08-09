@@ -5,12 +5,64 @@ import {
   type SearchHit,
 } from "@pi-mentis/pi-mentis-core";
 import type {
-  MemoryApplicability,
-  MemoryContentOrigin,
-  MemoryPremise,
   MemoryRecord,
   PiScopeContext,
+  RecallPrerequisite,
+  RuntimeConstraints,
 } from "@pi-mentis/pi-mentis-memory-core";
+
+export interface RecallDecision {
+  readonly shouldRecall: boolean;
+  readonly sources: readonly ("knowledge" | "memory")[];
+  readonly budgetTokens: number;
+  readonly allowRemoteEmbedding: boolean;
+  readonly allowRerank: boolean;
+  readonly reason: string;
+}
+
+export interface RecallSignals {
+  readonly prompt: string;
+  readonly queryCacheHit: boolean;
+  readonly embeddingCacheHit: boolean;
+  readonly remainingContextTokens: number;
+  readonly isCommand: boolean;
+}
+
+/**
+ * Structural fast-recall gate. It deliberately does not classify the prompt:
+ * every non-command, non-trivial input gets the same memory lane and budget.
+ */
+export function decideRecall(signals: RecallSignals): RecallDecision {
+  const prompt = signals.prompt.trim();
+  if (signals.isCommand) {
+    return {
+      shouldRecall: false,
+      sources: [],
+      budgetTokens: 0,
+      allowRemoteEmbedding: false,
+      allowRerank: false,
+      reason: "command-input",
+    };
+  }
+  if (prompt.length < 2) {
+    return {
+      shouldRecall: false,
+      sources: [],
+      budgetTokens: 0,
+      allowRemoteEmbedding: false,
+      allowRerank: false,
+      reason: "insufficient-query-signal",
+    };
+  }
+  return {
+    shouldRecall: true,
+    sources: ["memory"],
+    budgetTokens: Math.max(0, Math.min(1_600, signals.remainingContextTokens)),
+    allowRemoteEmbedding: signals.remainingContextTokens >= 500,
+    allowRerank: false,
+    reason: "classless-fast-recall",
+  };
+}
 
 export interface GateRuntimeContext {
   readonly scope: PiScopeContext;
@@ -29,7 +81,7 @@ export interface GateDecision {
   readonly allowed: boolean;
   readonly scoreMultiplier: number;
   readonly reasons: readonly string[];
-  readonly uncheckedPremises: readonly MemoryPremise[];
+  readonly uncheckedPremises: readonly RecallPrerequisite[];
   readonly instructionSafe: boolean;
 }
 
@@ -49,91 +101,91 @@ function compareVersion(left: string, right: string): number | undefined {
   return 0;
 }
 
-function applicationDecision(
-  applicability: MemoryApplicability | undefined,
+function runtimeConstraintDecision(
+  constraints: RuntimeConstraints | undefined,
   context: GateRuntimeContext,
   reasons: string[],
 ): { readonly allowed: boolean; readonly multiplier: number } {
-  if (applicability === undefined) return { allowed: true, multiplier: 0.9 };
+  if (constraints === undefined) return { allowed: true, multiplier: 0.9 };
   if (
-    applicability.repositoryId !== undefined &&
+    constraints.repositoryId !== undefined &&
     context.scope.repositoryId !== undefined &&
-    applicability.repositoryId !== context.scope.repositoryId
+    constraints.repositoryId !== context.scope.repositoryId
   ) {
-    reasons.push("applicability:repository-mismatch");
+    reasons.push("runtime-constraint:repository-mismatch");
     return { allowed: false, multiplier: 0 };
   }
   if (
-    applicability.projectId !== undefined &&
+    constraints.projectId !== undefined &&
     context.scope.projectId !== undefined &&
-    applicability.projectId !== context.scope.projectId
+    constraints.projectId !== context.scope.projectId
   ) {
-    reasons.push("applicability:project-mismatch");
+    reasons.push("runtime-constraint:project-mismatch");
     return { allowed: false, multiplier: 0 };
   }
   let compatibilityMultiplier = 1;
   if (
-    applicability.os !== undefined &&
+    constraints.os !== undefined &&
     context.os !== undefined &&
-    !applicability.os.includes(context.os)
+    !constraints.os.includes(context.os)
   ) {
     reasons.push("environment:os-mismatch");
-    if (applicability.strictOs === true) return { allowed: false, multiplier: 0 };
+    if (constraints.strictOs === true) return { allowed: false, multiplier: 0 };
     compatibilityMultiplier *= 0.5;
   }
   if (
-    applicability.architecture !== undefined &&
+    constraints.architecture !== undefined &&
     context.architecture !== undefined &&
-    !applicability.architecture.includes(context.architecture)
+    !constraints.architecture.includes(context.architecture)
   ) {
     reasons.push("environment:architecture-mismatch");
-    if (applicability.strictArchitecture === true) return { allowed: false, multiplier: 0 };
+    if (constraints.strictArchitecture === true) return { allowed: false, multiplier: 0 };
     compatibilityMultiplier *= 0.5;
   }
   if (
-    applicability.packageManager !== undefined &&
+    constraints.packageManager !== undefined &&
     context.packageManager !== undefined &&
-    applicability.packageManager !== context.packageManager
+    constraints.packageManager !== context.packageManager
   ) {
     reasons.push("environment:package-manager-mismatch");
     return { allowed: false, multiplier: 0 };
   }
   if (
-    applicability.runtime !== undefined &&
+    constraints.runtime !== undefined &&
     context.runtime !== undefined &&
-    applicability.runtime !== context.runtime
+    constraints.runtime !== context.runtime
   ) {
     reasons.push("environment:runtime-mismatch");
     return { allowed: false, multiplier: 0 };
   }
   if (context.runtimeVersion !== undefined) {
     const below =
-      applicability.runtimeVersionMin === undefined
+      constraints.runtimeVersionMin === undefined
         ? false
-        : (compareVersion(context.runtimeVersion, applicability.runtimeVersionMin) ?? 0) < 0;
+        : (compareVersion(context.runtimeVersion, constraints.runtimeVersionMin) ?? 0) < 0;
     const above =
-      applicability.runtimeVersionMax === undefined
+      constraints.runtimeVersionMax === undefined
         ? false
-        : (compareVersion(context.runtimeVersion, applicability.runtimeVersionMax) ?? 0) > 0;
+        : (compareVersion(context.runtimeVersion, constraints.runtimeVersionMax) ?? 0) > 0;
     if (below || above) {
       reasons.push("environment:runtime-version-mismatch");
       return { allowed: false, multiplier: 0 };
     }
   }
   const unknown =
-    (applicability.os !== undefined && context.os === undefined) ||
-    (applicability.packageManager !== undefined && context.packageManager === undefined) ||
-    (applicability.runtime !== undefined && context.runtime === undefined);
+    (constraints.os !== undefined && context.os === undefined) ||
+    (constraints.packageManager !== undefined && context.packageManager === undefined) ||
+    (constraints.runtime !== undefined && context.runtime === undefined);
   reasons.push(unknown ? "environment:unknown" : "environment:compatible");
   return { allowed: true, multiplier: compatibilityMultiplier * (unknown ? 0.65 : 1) };
 }
 
-function premiseDecision(
-  premises: readonly MemoryPremise[],
+function prerequisiteDecision(
+  prerequisites: readonly RecallPrerequisite[],
   context: GateRuntimeContext,
-): { readonly allowed: boolean; readonly unchecked: readonly MemoryPremise[] } {
-  const unchecked: MemoryPremise[] = [];
-  for (const premise of premises) {
+): { readonly allowed: boolean; readonly unchecked: readonly RecallPrerequisite[] } {
+  const unchecked: RecallPrerequisite[] = [];
+  for (const premise of prerequisites) {
     const known =
       premise.kind === "manifest"
         ? context.manifestTypes?.includes(premise.value)
@@ -148,7 +200,10 @@ function premiseDecision(
   return { allowed: true, unchecked };
 }
 
-function safeAsInstruction(origin: MemoryContentOrigin | undefined, authority: number): boolean {
+function safeAsInstruction(
+  origin: MemoryRecord["provenance"]["origin"],
+  authority: number,
+): boolean {
   if (origin === "external" || origin === "knowledge" || origin === "model") return false;
   return authority >= EvidenceAuthority.VerifiedToolObservation;
 }
@@ -295,7 +350,21 @@ export function gateSearchHit(hit: SearchHit, context: GateRuntimeContext): Gate
       instructionSafe: false,
     };
   }
-  if (record.branchClaimState === "hypothesis" || record.branchClaimState === "abandoned") {
+  const legacyRecord = record as unknown as Readonly<Record<string, unknown>>;
+  const provenance =
+    record.provenance ??
+    ({
+      origin:
+        typeof legacyRecord["contentOrigin"] === "string"
+          ? (legacyRecord["contentOrigin"] as MemoryRecord["provenance"]["origin"])
+          : "external",
+      epistemicState: legacyRecord["branchClaimState"] === "hypothesis" ? "hypothesis" : "asserted",
+      ...(record.scopeContext?.branchId === undefined
+        ? {}
+        : { branchId: record.scopeContext.branchId }),
+      ...(legacyRecord["branchClaimState"] === "hypothesis" ? { branchLocal: true } : {}),
+    } satisfies MemoryRecord["provenance"]);
+  if (provenance.epistemicState === "hypothesis" && provenance.branchLocal === true) {
     if (record.scopeContext?.branchId !== context.scope.branchId) {
       return {
         allowed: false,
@@ -311,7 +380,6 @@ export function gateSearchHit(hit: SearchHit, context: GateRuntimeContext): Gate
     const affinity = contextAffinity(
       {
         ...candidateScope,
-        domain: record.domain,
         ...(candidateScope.repositoryId === undefined
           ? {}
           : { repositoryId: candidateScope.repositoryId }),
@@ -340,7 +408,12 @@ export function gateSearchHit(hit: SearchHit, context: GateRuntimeContext): Gate
     affinityMultiplier = 0.5 + 0.5 * affinity.score;
     reasons.push(...affinity.reasons);
   }
-  const applicable = applicationDecision(record.applicability, effectiveContext, reasons);
+  const legacyConstraints = legacyRecord["applicability"] as RuntimeConstraints | undefined;
+  const applicable = runtimeConstraintDecision(
+    record.runtimeConstraints ?? legacyConstraints,
+    effectiveContext,
+    reasons,
+  );
   if (!applicable.allowed) {
     return {
       allowed: false,
@@ -350,12 +423,20 @@ export function gateSearchHit(hit: SearchHit, context: GateRuntimeContext): Gate
       instructionSafe: false,
     };
   }
-  const premise = premiseDecision(record.premises ?? [], effectiveContext);
+  const legacyPrerequisites = Array.isArray(legacyRecord["premises"])
+    ? (legacyRecord["premises"] as readonly RecallPrerequisite[]).filter(
+        (item) => item.kind !== ("context" as RecallPrerequisite["kind"]),
+      )
+    : [];
+  const premise = prerequisiteDecision(
+    record.recallPrerequisites ?? legacyPrerequisites,
+    effectiveContext,
+  );
   if (!premise.allowed) {
     return {
       allowed: false,
       scoreMultiplier: 0,
-      reasons: [...reasons, "premise:required-failed"],
+      reasons: [...reasons, "recall-prerequisite:required-failed"],
       uncheckedPremises: premise.unchecked,
       instructionSafe: false,
     };
@@ -363,13 +444,13 @@ export function gateSearchHit(hit: SearchHit, context: GateRuntimeContext): Gate
   const authorityMultiplier = Math.max(0.1, record.authority / 100);
   const evidenceMultiplier = record.evidenceRefs.length === 0 ? 0.6 : 1;
   if (record.evidenceRefs.length === 0) reasons.push("trust:evidence-missing");
-  if (premise.unchecked.length > 0) reasons.push("premise:unchecked");
+  if (premise.unchecked.length > 0) reasons.push("recall-prerequisite:unchecked");
   return {
     allowed: true,
     scoreMultiplier:
       affinityMultiplier * applicable.multiplier * authorityMultiplier * evidenceMultiplier,
     reasons,
     uncheckedPremises: premise.unchecked,
-    instructionSafe: safeAsInstruction(record.contentOrigin, record.authority),
+    instructionSafe: safeAsInstruction(provenance.origin, record.authority),
   };
 }

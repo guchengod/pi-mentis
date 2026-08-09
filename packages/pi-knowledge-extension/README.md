@@ -57,18 +57,18 @@ API Key 只放环境变量。Embedding 模型或维度变化时需先备份并�
 
 ## `/kb` 命令
 
-| 命令                        | 用途                  |
-| --------------------------- | --------------------- |
-| `/kb add <path-or-url>`     | 添加来源              |
-| `/kb sync <path-or-url>`    | 增量同步              |
-| `/kb rebuild <path-or-url>` | 重新构建              |
-| `/kb jobs <job-id>`         | 查看任务              |
-| `/kb cancel <job-id>`       | 取消任务              |
-| `/kb inspect <document-id>` | 查看文档 chunks       |
-| `/kb remove <source-id>`    | 删除来源              |
-| `/kb status`                | 查看 Provider 状态    |
-| `/kb migrate-embedding <d>` | 迁移 embedding 维度   |
-| `/kb rollback-embedding <g>`| 回滚旧 generation     |
+| 命令                         | 用途                |
+| ---------------------------- | ------------------- |
+| `/kb add <path-or-url>`      | 添加来源            |
+| `/kb sync <path-or-url>`     | 增量同步            |
+| `/kb rebuild <path-or-url>`  | 重新构建            |
+| `/kb jobs <job-id>`          | 查看任务            |
+| `/kb cancel <job-id>`        | 取消任务            |
+| `/kb inspect <document-id>`  | 查看文档 chunks     |
+| `/kb remove <source-id>`     | 删除来源            |
+| `/kb status`                 | 查看 Provider 状态  |
+| `/kb migrate-embedding <d>`  | 迁移 embedding 维度 |
+| `/kb rollback-embedding <g>` | 回滚旧 generation   |
 
 ## 存储与安全
 

@@ -5,7 +5,6 @@ import type {
   SearchResult,
 } from "@pi-mentis/pi-mentis-core";
 import type { EmbeddingVector } from "@pi-mentis/pi-mentis-inference";
-import type { CommitActionIntent } from "./commit-semantics.js";
 import type { MaterializedView, ViewKind } from "./views.js";
 
 // ─── Ownership & Relevance Split ─────────────────────────────────
@@ -111,24 +110,121 @@ export interface PiScopeContext {
   readonly capabilitySnapshotId?: string;
 }
 
-export type MemoryDomain =
-  "user" | "project" | "environment" | "procedure" | "capability" | "task" | "topic" | "episodic";
+/** V2 records are assertions, not members of a semantic class hierarchy. */
+export type MemorySchemaVersion = 2;
+export type EpistemicState = "asserted" | "verified" | "hypothesis";
+export type MemoryRelationship =
+  "reinforce" | "supersede" | "retract" | "conflict" | "coexist" | "unrelated" | "uncertain";
 
-export type MemoryType =
-  "preference" | "requirement" | "fact" | "decision" | "procedural" | "episodic" | "task";
+/** Optional, non-authoritative structure extracted while comparing two memories. */
+export interface MemorySemanticHints {
+  readonly subjectHint?: string;
+  readonly relationHint?: string;
+  readonly valueHint?: string;
+}
 
-export type TemporalCardinality = "single" | "set" | "ordered" | "event";
-export type TemporalState =
-  "current" | "historical" | "conflicted" | "retracted" | "pending" | "rejected";
-export type BranchClaimState = "global" | "hypothesis" | "verified" | "merged" | "abandoned";
+/**
+ * Positive pairwise signals. They describe a relationship between two concrete
+ * records; they are not a class assigned to either memory.
+ */
+export interface PairwiseRelationshipSignals {
+  readonly sameReferent: boolean;
+  readonly sameAttribute: boolean;
+  readonly explicitNewAssertion: boolean;
+  readonly explicitRetraction: boolean;
+  /** A concrete new value is installed in place of the older value. */
+  readonly replacementValuePresent: boolean;
+  readonly compatibleValue: boolean;
+  readonly incompatibleValue: boolean;
+}
+
+export interface MemoryRelationshipEvidence {
+  readonly relation: Exclude<MemoryRelationship, "coexist" | "unrelated" | "uncertain">;
+  readonly targetIds: readonly string[];
+  readonly confidence: number;
+  readonly reasonCodes: readonly string[];
+  readonly source?: "explicit_internal" | "same_turn_recall" | "background_consolidation";
+  readonly signals?: PairwiseRelationshipSignals;
+  readonly incomingHints?: MemorySemanticHints;
+  readonly targetHints?: Readonly<Record<string, MemorySemanticHints>>;
+}
+
+export interface MemoryProvenance {
+  readonly origin: "user" | "workspace" | "tool" | "knowledge" | "external" | "model";
+  readonly epistemicState: EpistemicState;
+  readonly branchId?: string;
+  /** Only true for a speculative assertion whose lifetime is the branch. */
+  readonly branchLocal?: boolean;
+}
+
+export interface MemoryRelationships {
+  readonly reinforcesIds: readonly string[];
+  readonly supersedesIds: readonly string[];
+  readonly retractsIds: readonly string[];
+  readonly conflictsWithIds: readonly string[];
+  readonly coexistsWithIds: readonly string[];
+}
+
+export interface OrderedMemoryItem {
+  readonly position: number;
+  readonly value: string;
+}
+
+/** Deterministic runtime constraints only; unknown values fail open at recall. */
+export interface RuntimeConstraints {
+  readonly os?: readonly string[];
+  readonly strictOs?: boolean;
+  readonly architecture?: readonly string[];
+  readonly strictArchitecture?: boolean;
+  readonly runtime?: string;
+  readonly runtimeVersionMin?: string;
+  readonly runtimeVersionMax?: string;
+  readonly packageManager?: string;
+  readonly repositoryId?: string;
+  readonly projectId?: string;
+}
+
+export interface RecallPrerequisite {
+  readonly kind: "manifest" | "tool" | "package-manager";
+  readonly value: string;
+  readonly required: boolean;
+}
+
+export interface MemoryDecisionTrace {
+  readonly id: string;
+  readonly incomingId: string;
+  readonly candidateIds: readonly string[];
+  readonly relationDecision: MemoryRelationship;
+  readonly confidence: number;
+  readonly reasonCodes: readonly string[];
+  readonly signals?: PairwiseRelationshipSignals;
+  readonly incomingHints?: MemorySemanticHints;
+  readonly targetHints?: Readonly<Record<string, MemorySemanticHints>>;
+  readonly temporalAction: string;
+  readonly timestamp: number;
+}
+
+/** Old metadata is quarantined here for read compatibility and diagnosis only. */
+export interface LegacyMemoryMetadata {
+  readonly predicate?: string;
+  readonly type?: string;
+  readonly domain?: string;
+  readonly cardinality?: string;
+  readonly factKey?: string;
+  readonly semanticKey?: string;
+  readonly memberFactKey?: string;
+  readonly setMemberKey?: string;
+  readonly branchClaimState?: string;
+  readonly temporalState?: string;
+  readonly raw: Readonly<Record<string, unknown>>;
+}
 
 export interface MemoryRecord {
+  readonly schemaVersion: MemorySchemaVersion;
   readonly id: string;
   readonly content: string;
   readonly normalizedContent: string;
   readonly contentHash: string;
-  readonly type: MemoryType;
-  readonly domain: MemoryDomain;
   readonly scope: MemoryScope;
   readonly scopeContext?: PiScopeContext;
   readonly ownership?: ResourceOwnership;
@@ -138,8 +234,7 @@ export interface MemoryRecord {
   readonly importance: number;
   readonly authority: EvidenceAuthority;
   readonly evidenceRefs: readonly EvidenceRef[];
-  readonly supersedesIds: readonly string[];
-  readonly conflictsWithIds: readonly string[];
+  readonly relationships: MemoryRelationships;
   readonly status:
     "pending" | "active" | "superseded" | "conflicted" | "expired" | "tombstoned" | "rejected";
   readonly embeddingSpaceId: string;
@@ -152,51 +247,17 @@ export interface MemoryRecord {
   readonly supersededById?: string;
   readonly lastAccessedAt: number;
   readonly reinforceCount: number;
-  /** Last time the record was reinforced with semantically equivalent content. */
+  /** Last time the exact assertion was reinforced. */
   readonly lastReinforcedAt?: number;
   readonly revision: number;
-  readonly factKey?: string;
-  /**
-   * Member-level fact identity for set/ordered cardinality:
-   * `${factKey}/${setMemberKey}` (e.g. `user:local/programming_language_preference/kotlin`).
-   * Temporal heads, value-relation comparison, dedup, reinforcement, correction
-   * and retraction all operate on this identity. Undefined for single facts and
-   * for legacy set records whose member identity could not be established.
-   */
-  readonly memberFactKey?: string;
-  readonly cardinality?: TemporalCardinality;
-  readonly normalizedValue?: string;
-  readonly setMemberKey?: string;
-  readonly temporalState?: TemporalState;
-  readonly branchClaimState?: BranchClaimState;
   readonly idempotencyKey?: string;
-  readonly applicability?: MemoryApplicability;
-  readonly premises?: readonly MemoryPremise[];
-  readonly contentOrigin?: MemoryContentOrigin;
+  readonly runtimeConstraints?: RuntimeConstraints;
+  readonly recallPrerequisites?: readonly RecallPrerequisite[];
+  readonly provenance: MemoryProvenance;
   readonly evidenceIntegrity?: "valid" | "missing" | "invalid";
-  /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
-  readonly polarity?: "positive" | "negative";
-  /**
-   * Semantic key — what attribute this fact is about (e.g.
-   * "local temporary service default port"). Distinct from the fact content
-   * sentence; used for fact identity and value-relation comparison.
-   */
-  readonly semanticKey?: string;
-  /**
-   * Set membership assertion state. For set/ordered predicates:
-   *   present  → the member is currently in the set
-   *   absent   → the member has been retracted from the set
-   *   unknown  → state could not be determined
-   */
-  readonly membershipState?: "present" | "absent" | "unknown";
-  /**
-   * Ordered procedure items with stable positions. Only present when
-   * cardinality=ordered. Each item has a 1-indexed position and a value.
-   */
-  readonly orderedItems?: readonly {
-    readonly position: number;
-    readonly value: string;
-  }[];
+  readonly orderedItems?: readonly OrderedMemoryItem[];
+  /** Best-effort pairwise structure. It never controls whether this record is saved. */
+  readonly semanticHints?: MemorySemanticHints;
   /**
    * Temporal kind: "current" for ongoing facts, "event" for episodic
    * occurrences that happened at a specific point in time.
@@ -211,9 +272,8 @@ export interface MemoryRecord {
    * Set/ordered record written without a usable member identity. Such records
    * must never block (or be blocked by) properly keyed set members.
    */
-  readonly legacyMalformed?: boolean;
-  /** Flagged by legacy-set migration for a future review/repair pass. */
-  readonly needsRepair?: boolean;
+  readonly decisionTraceId?: string;
+  readonly legacy?: LegacyMemoryMetadata;
   /** Last automatic resolution outcome for a conflicted candidate. */
   readonly conflictResolution?: Readonly<{
     readonly at: number;
@@ -223,58 +283,34 @@ export interface MemoryRecord {
 
 export interface CommitMemoryCommand {
   readonly content: string;
-  readonly type: MemoryType;
-  readonly domain?: MemoryDomain;
   readonly scope: MemoryScope;
   readonly scopeContext?: PiScopeContext;
   readonly confidence?: number;
   readonly importance?: number;
   readonly authority: EvidenceAuthority;
   readonly evidenceRefs?: readonly EvidenceRef[];
-  readonly supersedesIds?: readonly string[];
-  readonly factKey?: string;
-  readonly cardinality?: TemporalCardinality;
   readonly observedAt?: number;
-  readonly retractsFact?: boolean;
-  readonly branchClaimState?: BranchClaimState;
   readonly idempotencyKey?: string;
-  readonly applicability?: MemoryApplicability;
-  readonly premises?: readonly MemoryPremise[];
-  readonly contentOrigin?: MemoryContentOrigin;
-  readonly normalizedValue?: string;
-  readonly setMemberKey?: string;
-  /**
-   * Member-level fact identity for set/ordered cardinality. When present it
-   * overrides `${factKey}/${setMemberKey}` derivation.
-   */
-  readonly memberFactKey?: string;
+  readonly runtimeConstraints?: RuntimeConstraints;
+  readonly recallPrerequisites?: readonly RecallPrerequisite[];
+  readonly provenance?: MemoryProvenance;
   /** Precomputed content embedding (reused from scope planning — avoids a second remote call). */
   readonly embedding?: EmbeddingVector;
-  /** Semantic polarity from CommitSemanticPlanner (positive/negative). */
-  readonly polarity?: "positive" | "negative";
-  /**
-   * Action intent from CommitSemanticPlanner (create/reinforce/correct/
-   * replace/retract). Used by the value-relation router as a tiebreak only.
-   */
-  readonly semanticIntent?: CommitActionIntent;
-  /** Semantic key — what attribute this fact is about. */
-  readonly semanticKey?: string;
-  /** Set membership assertion state (present/absent/unknown). */
-  readonly membershipState?: "present" | "absent" | "unknown";
-  /** Ordered procedure items with stable positions (cardinality=ordered). */
-  readonly orderedItems?: readonly {
-    readonly position: number;
-    readonly value: string;
-  }[];
+  readonly orderedItems?: readonly OrderedMemoryItem[];
   /** Temporal kind: "current" or "event". */
   readonly temporalKind?: "current" | "event";
   /** When an episodic event occurred. */
   readonly occurredAt?: number;
+  /** Internal, source-backed evidence. This is deliberately not part of the public tool schema. */
+  readonly relationshipEvidence?: MemoryRelationshipEvidence;
+  /** Optional structure produced together with relationship evidence. */
+  readonly semanticHints?: MemorySemanticHints;
 }
 
 export type MemoryContentOrigin =
   "user" | "workspace" | "tool" | "knowledge" | "external" | "model";
 
+/** @deprecated Legacy read shape. New records use RuntimeConstraints. */
 export interface MemoryApplicability {
   readonly os?: readonly string[];
   readonly strictOs?: boolean;
@@ -288,6 +324,7 @@ export interface MemoryApplicability {
   readonly projectId?: string;
 }
 
+/** @deprecated Legacy read shape. New records use RecallPrerequisite. */
 export interface MemoryPremise {
   readonly kind: "manifest" | "tool" | "package-manager" | "context";
   readonly value: string;
@@ -306,12 +343,17 @@ export interface CommitMemoryResult {
     | "retracted";
   readonly record?: Omit<MemoryRecord, "embedding">;
   readonly relatedIds: readonly string[];
-  readonly predicate?: string;
-  readonly cardinality?: TemporalCardinality;
-  readonly normalizedValue?: string;
-  readonly setMemberKey?: string;
-  readonly semanticKey?: string;
-  readonly membershipState?: "present" | "absent" | "unknown";
+  readonly relationDecision: MemoryRelationship;
+  readonly traceId?: string;
+}
+
+export interface RelationshipConsolidationResult {
+  readonly action: "applied" | "skipped";
+  readonly incomingId: string;
+  readonly targetIds: readonly string[];
+  readonly relationDecision: MemoryRelationship;
+  readonly reason: string;
+  readonly traceId?: string;
 }
 
 export interface MemoryQuery {
@@ -350,12 +392,12 @@ export interface MemoryService {
     options: MemoryMutationOptions,
   ): Promise<Omit<MemoryRecord, "embedding"> | undefined>;
   tombstone(id: string, options: MemoryMutationOptions): Promise<boolean>;
-  temporalHead?(
-    factKey: string,
-    scope: MemoryScope,
-    scopeContext?: PiScopeContext,
-  ): Promise<TemporalHead | undefined>;
-  repairTemporal?(options?: OperationOptions): Promise<TemporalRepairResult>;
+  /** Applies reviewed pairwise evidence to an already persisted raw memory. */
+  consolidateRelationship?(
+    incomingId: string,
+    evidence: MemoryRelationshipEvidence,
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipConsolidationResult>;
   getView?(
     kind: ViewKind,
     scopeId: string,
@@ -368,6 +410,22 @@ export interface MemoryService {
   }>;
   flushBackground?(): Promise<void>;
   abandonBranch?(branchId: string, scopeContext: PiScopeContext): Promise<number>;
+  diagnoseLegacyMemory?(
+    id: string,
+    options?: OperationOptions,
+  ): Promise<
+    | {
+        readonly id: string;
+        readonly legacy: boolean;
+        readonly rawContent: string;
+        readonly currentStatus: string;
+        readonly legacyMetadata?: LegacyMemoryMetadata;
+        readonly candidateRelationshipToV2: MemoryRelationship;
+        readonly migrationConfidence: number;
+        readonly migrationSafe: boolean;
+      }
+    | undefined
+  >;
   /** Internal debug/migration: diagnose the ownership scope of a stored memory. */
   diagnoseMemoryScope?(
     id: string,
@@ -396,56 +454,6 @@ export interface MemoryService {
       }
     | undefined
   >;
-  /**
-   * Legacy set migration: scan set/ordered records lacking member identity,
-   * re-derive a member key from content, migrate high-confidence records to
-   * member-level identity, flag the rest `legacyMalformed` and move their
-   * temporal claims off the group head so they can never block new members.
-   */
-  migrateLegacySetRecords?(options?: OperationOptions): Promise<{
-    readonly inspected: number;
-    readonly migrated: number;
-    readonly flagged: number;
-    readonly reheaded: number;
-    readonly errors: readonly string[];
-  }>;
-  /**
-   * Conflict lifecycle resolver: automatically resolve conflicted candidates
-   * that no longer have a competing claim on their own member identity head
-   * (activate them as `active`). Genuine ambiguity with a live competing
-   * claim remains conflicted. Never auto-rejects.
-   */
-  resolveConflictedCandidates?(options?: OperationOptions): Promise<{
-    readonly inspected: number;
-    readonly activated: number;
-    readonly remains: number;
-    readonly errors: readonly string[];
-  }>;
-}
-
-export interface TemporalClaimPointer {
-  readonly memoryId: string;
-  readonly contentHash: string;
-  readonly authority: EvidenceAuthority;
-  readonly observedAt: number;
-  readonly branchId?: string;
-}
-
-export interface TemporalHead {
-  readonly id: string;
-  readonly factKey: string;
-  readonly namespace: string;
-  readonly cardinality: TemporalCardinality;
-  readonly state: "resolved" | "conflicted" | "retracted";
-  readonly currentClaims: readonly TemporalClaimPointer[];
-  readonly revision: number;
-  readonly updatedAt: number;
-}
-
-export interface TemporalRepairResult {
-  readonly inspected: number;
-  readonly repaired: number;
-  readonly failed: number;
 }
 
 export interface CapturedToolEvent {
@@ -764,7 +772,6 @@ export interface ExperienceCandidate {
   readonly id: string;
   readonly goal: string;
   readonly scopeContext?: PiScopeContext;
-  readonly branchClaimState?: BranchClaimState;
   readonly environment: Readonly<Record<string, string>>;
   readonly prerequisites: readonly string[];
   readonly steps: readonly string[];

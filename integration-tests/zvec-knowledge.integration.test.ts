@@ -260,7 +260,6 @@ describe("real Zvec production loop", () => {
     });
     const committed = await memory.commit({
       content: "Always verify canary health before promotion.",
-      type: "procedural",
       scope: { kind: "user", id: "default" },
       scopeContext: {
         tenantId: "tenant",
@@ -269,8 +268,9 @@ describe("real Zvec production loop", () => {
         agentId: "agent",
       },
       authority: EvidenceAuthority.VerifiedToolObservation,
+      provenance: { origin: "tool", epistemicState: "verified" },
     });
-    expect(committed.record.domain).toBe("procedure");
+    expect(committed.record).not.toHaveProperty("domain");
     expect(
       await memory.get(committed.record.id, {
         scopeContext: {

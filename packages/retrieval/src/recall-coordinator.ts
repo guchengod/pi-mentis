@@ -220,10 +220,10 @@ async function exactMemoryRead(
       content: trimContent(sanitizedContent),
       kind: projectScopeKind(record.scope),
       status:
-        record.temporalState === "historical"
-          ? "historical"
-          : record.temporalState === "conflicted"
-            ? "conflicted"
+        record.status === "conflicted"
+          ? "conflicted"
+          : ["superseded", "expired", "tombstoned", "rejected"].includes(record.status)
+            ? "historical"
             : "current",
       match: "exact",
       resourceType: "memory",
@@ -273,10 +273,10 @@ async function memoryEvolutionChain(
       content: trimContent(currentSanitized),
       kind: projectScopeKind(record.scope),
       status:
-        record.temporalState === "historical"
-          ? "historical"
-          : record.temporalState === "conflicted"
-            ? "conflicted"
+        record.status === "conflicted"
+          ? "conflicted"
+          : ["superseded", "expired", "tombstoned", "rejected"].includes(record.status)
+            ? "historical"
             : "current",
       match: "exact",
       resourceType: "memory",
@@ -301,7 +301,7 @@ async function memoryEvolutionChain(
     }
 
     // Superseded records
-    for (const supersededId of record.supersedesIds.slice(0, 3)) {
+    for (const supersededId of record.relationships.supersedesIds.slice(0, 3)) {
       if (hits.length >= MAX_HITS) break;
       const old = await memory.get(supersededId).catch(() => undefined);
       if (old !== undefined) {
@@ -319,7 +319,7 @@ async function memoryEvolutionChain(
     }
 
     // Conflicts
-    for (const conflictId of record.conflictsWithIds.slice(0, 3)) {
+    for (const conflictId of record.relationships.conflictsWithIds.slice(0, 3)) {
       if (hits.length >= MAX_HITS) break;
       const conflict = await memory.get(conflictId).catch(() => undefined);
       if (conflict !== undefined) {
@@ -722,9 +722,10 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                 ? []
                 : [{ kind: "task" as const, id: scopeContext.taskId }]),
               { kind: "user" as const, id: scopeContext.userId },
-              ...(scopeContext.topicIds ?? []).map(
-                (topicId) => ({ kind: "topic" as const, id: topicId }),
-              ),
+              ...(scopeContext.topicIds ?? []).map((topicId) => ({
+                kind: "topic" as const,
+                id: topicId,
+              })),
             ],
             memoryScopeContext: scopeContext,
             ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),

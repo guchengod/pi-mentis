@@ -168,8 +168,13 @@ export async function traceRecallTarget(
     },
     searchOpts,
   );
-  stages.push(stage("fts_candidates", findInResult(ftsResult, targetId),
-    "Target not found in raw FTS/lexical search — check FTS index, tokenization, searchable_text field"));
+  stages.push(
+    stage(
+      "fts_candidates",
+      findInResult(ftsResult, targetId),
+      "Target not found in raw FTS/lexical search — check FTS index, tokenization, searchable_text field",
+    ),
+  );
 
   // ── Stage 3: Dense / vector candidate generation ──
   const recordKind = record.scope.kind;
@@ -183,8 +188,13 @@ export async function traceRecallTarget(
     },
     searchOpts,
   );
-  stages.push(stage("dense_candidates", findInResult(scopedResult, targetId),
-    "Target not found in scope-targeted search — check embedding presence, dimension match, namespace"));
+  stages.push(
+    stage(
+      "dense_candidates",
+      findInResult(scopedResult, targetId),
+      "Target not found in scope-targeted search — check embedding presence, dimension match, namespace",
+    ),
+  );
 
   // ── Stage 4: Memory-level hybrid fusion (scoped) ──
   const memoResult = await memory.search(
@@ -196,8 +206,13 @@ export async function traceRecallTarget(
     },
     searchOpts,
   );
-  stages.push(stage("memory_hybrid_fusion", findInResult(memoResult, targetId),
-    "Target lost in memory-level RRF fusion — FTS and Dense both missing or scores too low"));
+  stages.push(
+    stage(
+      "memory_hybrid_fusion",
+      findInResult(memoResult, targetId),
+      "Target lost in memory-level RRF fusion — FTS and Dense both missing or scores too low",
+    ),
+  );
 
   // ── Stage 5: Full retrieval pipeline (if available) ──
   if (retrieval !== undefined) {
@@ -218,8 +233,13 @@ export async function traceRecallTarget(
     );
 
     const retrievalFound = findInResult(retrievalResult, targetId);
-    stages.push(stage("retrieval_full", retrievalFound,
-      "Target lost in full retrieval pipeline (gate, rerank, cutoff, MMR, context budget)"));
+    stages.push(
+      stage(
+        "retrieval_full",
+        retrievalFound,
+        "Target lost in full retrieval pipeline (gate, rerank, cutoff, MMR, context budget)",
+      ),
+    );
 
     const rankings = retrievalResult.diagnostics.rankings;
     if (rankings !== undefined) {
@@ -237,7 +257,9 @@ export async function traceRecallTarget(
       stages.push({
         stage: "rerank_ranking",
         present: rerankRank >= 0,
-        ...(rerankRank >= 0 ? { rank: rerankRank + 1, reason: `Rerank rank ${rerankRank + 1}` } : {}),
+        ...(rerankRank >= 0
+          ? { rank: rerankRank + 1, reason: `Rerank rank ${rerankRank + 1}` }
+          : {}),
         ...(rerankRank < 0
           ? { reason: "Target not in reranker output — reranker downgraded target" }
           : {}),
@@ -288,5 +310,14 @@ export async function traceRecallTarget(
     });
   }
 
-  return { targetId, query, stages, scopeEligible, ...(scopeRejectReason === undefined ? {} : { scopeRejectReason }), ...(memoryOwner === undefined ? {} : { memoryOwner }), currentContext: `repository=${ctx.repositoryId ?? "-"} project=${ctx.projectId ?? "-"} task=${ctx.taskId ?? "-"} topic=[${(ctx.topicIds ?? []).join(", ")}]`, ...(requiredScope === undefined ? {} : { requiredScope }) };
+  return {
+    targetId,
+    query,
+    stages,
+    scopeEligible,
+    ...(scopeRejectReason === undefined ? {} : { scopeRejectReason }),
+    ...(memoryOwner === undefined ? {} : { memoryOwner }),
+    currentContext: `repository=${ctx.repositoryId ?? "-"} project=${ctx.projectId ?? "-"} task=${ctx.taskId ?? "-"} topic=[${(ctx.topicIds ?? []).join(", ")}]`,
+    ...(requiredScope === undefined ? {} : { requiredScope }),
+  };
 }

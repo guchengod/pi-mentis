@@ -27,13 +27,13 @@ global procedure.
 
 P8 resolves an immutable faceted context snapshot before capture and recall. Workspace and code
 facets are optional; Situation topics, tasks, goals, and interaction mode carry non-code sessions.
-Episode/Event/Artifact data is ground truth. User, project, environment, procedure, capability,
-task, topic, and episodic memories are atomic derived claims and must retain evidence references.
-P9 stores temporal heads and Saga state in revisioned Zvec scalar state. P10 gates every candidate
-before Rerank/model exposure. P11 views are derived, CAS-updated projections whose fields retain
-atomic memory IDs. P12 writes bounded in-memory traces through deferred batches. P13 reads an O(1)
-active policy pointer while replay, Shadow, Canary, EWMA evaluation, and rollback stay off the answer
-path. None of these layers duplicates the Artifact/Task/Experience pipeline.
+Episode/Event/Artifact data is ground truth. P9 stores classless atomic assertions: content,
+ownership scope, time, provenance, evidence, embedding, lifecycle status, relationship edges, and
+decision traces. It does not assign predicate, memory type, semantic domain, or cardinality. P10
+gates every candidate before Rerank/model exposure. P11 views are derived, CAS-updated projections
+whose fields retain atomic record IDs. P12 writes bounded in-memory traces through deferred batches.
+P13 reads an O(1) active policy pointer while replay, Shadow, Canary, EWMA evaluation, and rollback
+stay off the answer path. None of these layers duplicates the Artifact/Task/Experience pipeline.
 
 Durable knowledge and migration jobs use queued/leased/running/succeeded/failed/dead states,
 bounded retries, lease takeover, and deterministic effects. The scheduler reserves queue and worker
@@ -44,9 +44,35 @@ manifest switch, retains the previous generation for rollback, and garbage-colle
 `storage.generationRetentionMs`.
 
 Shutdown is dependency ordered (retrieval → memory → knowledge → inference), background work gets a
-grace period and abort signal, and provider disposal is bounded to five seconds. View jobs and
-temporal Sagas are durable and repaired after restart; effectiveness traces are best-effort and use
-a bounded buffer. Artifact, temporal, View, and durable Job repair run during startup maintenance.
+grace period and abort signal, and provider disposal is bounded to five seconds. View and durable
+knowledge jobs recover after restart; effectiveness traces are best-effort and use a bounded buffer.
+Memory relationship transitions are serialized per security namespace, retain both source records,
+and persist structured decision traces alongside their relationship edges.
 
-The exact supported host is `@earendil-works/pi-coding-agent@0.83.0`, source tag
-`v0.83.0`, commit `845d6ff`. The guard runs before tools, Zvec, workers, or models.
+Relationship learning follows **Write Fast, Consolidate Slow**. `search_memory` records only the
+current turn's scope-checked Memory hits. `commit_memory` persists the raw assertion without waiting
+for another model call, then a bounded background job compares the new record with at most three
+concrete candidates using the current Pi model. Current-turn recalled records have priority; when
+there are none, the strongest vector candidate discovered by Core may enter pairwise review. That
+similarity signal only selects a candidate and never supplies a relationship. The Pairwise
+Reasoner's output is an untrusted semantic proposal, just like both Memory inputs are untrusted
+data. A single deterministic dispatch applies relationship-specific gates: reinforcement requires
+same referent, same attribute, compatible values, no contradiction, and its threshold, but does not
+require `explicitNewAssertion`; supersession and retraction additionally require explicit current
+replacement or withdrawal evidence. Supersession requires `replacementValuePresent`; retraction
+requires that signal to be false. Conflict has the strictest threshold and rejects both newer
+assertion and withdrawal signals. Destructive transitions therefore require convergent independent
+signals, and missing or contradictory evidence safely coexists. Similarity alone never changes
+lifecycle state. Optional `subjectHint` / `relationHint` / `valueHint` fields are
+stored only when produced with accepted pairwise evidence; missing structure never blocks a write.
+Paraphrase reinforcement folds the duplicate out of current recall while retaining it as a linked
+historical source. Every consolidation remains source-linked and traceable.
+
+While consolidation is pending, a bounded session-local Recent Assertion Overlay provides
+read-your-writes semantics. It marks the latest explicit assertion as `provisional_latest`, keeps
+the older persistent record visible as `shadowed_by_pending`, and prefers the provisional assertion
+only in the recall projection. It never writes a lifecycle status. Acceptance makes the transition
+persistent; rejection, failure, expiry, or completion removes the overlay and exposes storage truth.
+
+The minimum supported host is `@earendil-works/pi-coding-agent@0.84.0`. The compatibility guard runs
+before tools, Zvec, workers, or models.

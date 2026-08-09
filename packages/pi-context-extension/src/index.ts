@@ -32,6 +32,8 @@ import { createKnowledgeService, type KnowledgeService } from "@pi-mentis/pi-men
 import {
   ContextStateService,
   DefaultRememberCoordinator,
+  CurrentTurnMemoryEvidence,
+  RelationshipConsolidationCoordinator,
   PiCaptureSession,
   createExperienceLearningService,
   createPiEvidenceStore,
@@ -41,9 +43,6 @@ import {
   referencedMemoryIds,
   taskIdentityId,
   ScopeSemanticPlanner,
-  FileScopePrototypeCache,
-  CommitSemanticPlanner,
-  FileCommitSemanticCache,
   type MemoryService,
   type MemoryScope,
   type PiEvidenceStore,
@@ -60,6 +59,8 @@ import {
   normalizePiPathArgument,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
+  createPiPairwiseRelationshipReasoner,
+  RecentAssertionOverlay,
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 import { CapabilityIndexer, scanPiInstallation } from "@pi-mentis/pi-mentis-pi-capabilities";
 import {
@@ -129,17 +130,19 @@ function registerIntegratedTools(
   getEvidenceRef: () => EvidenceRef | undefined,
   _onTrace: (traceId: string) => void,
   getScopePlanner: () => ScopeSemanticPlanner | undefined,
-  getCommitPlanner: () => CommitSemanticPlanner | undefined,
+  relationshipTurn: CurrentTurnMemoryEvidence,
+  recentAssertions: RecentAssertionOverlay,
+  backgroundQueue: MentisBackgroundQueue,
 ): void {
   const memory = services.getMemory();
   const rememberCoord =
-    memory !== undefined
-      ? new DefaultRememberCoordinator(memory, getScopePlanner(), getCommitPlanner())
-      : undefined;
+    memory !== undefined ? new DefaultRememberCoordinator(memory, getScopePlanner()) : undefined;
   const recallCoord = new DefaultRecallCoordinator(services);
+  const consolidationCoord =
+    memory === undefined ? undefined : new RelationshipConsolidationCoordinator({ memory });
 
   registerMemoryToolPair(pi, {
-    async remember(content, signal) {
+    async remember(content, signal, toolContext) {
       if (rememberCoord === undefined) {
         return {
           outcome: "unavailable" as const,
@@ -149,23 +152,93 @@ function registerIntegratedTools(
       }
       const ctxSnapshot = getContextSnapshot();
       const evRef = getEvidenceRef();
-      return rememberCoord.remember(
+      const recalled = relationshipTurn
+        .snapshot()
+        .map((candidate) => ({ ...candidate, evidenceSource: "same_turn_recall" as const }));
+      let discoveredCandidateIds: readonly string[] = [];
+      const result = await rememberCoord.remember(
         { content },
         {
           scopeContext: getScopeContext(),
           ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
           ...(evRef !== undefined ? { evidenceRef: evRef } : {}),
+          onCommitted: (committed) => {
+            discoveredCandidateIds = committed.relatedIds;
+          },
           ...(signal !== undefined ? { signal } : {}),
         },
       );
+      const recalledIds = new Set(recalled.map((candidate) => candidate.id));
+      const relationshipCandidates = [
+        ...recalled,
+        ...discoveredCandidateIds
+          .filter((id) => !recalledIds.has(id))
+          .map((id) => ({
+            id,
+            content: "",
+            status: "current" as const,
+            match: "semantic" as const,
+            evidenceSource: "semantic_candidate" as const,
+          })),
+      ];
+      const reasoner =
+        toolContext === undefined ? undefined : createPiPairwiseRelationshipReasoner(toolContext);
+      if (
+        result.id !== undefined &&
+        result.outcome === "remembered" &&
+        relationshipCandidates.length > 0 &&
+        reasoner !== undefined &&
+        consolidationCoord !== undefined
+      ) {
+        const incomingId = result.id;
+        const relationshipScope = getScopeContext();
+        recentAssertions.record({
+          memoryId: incomingId,
+          content,
+          observedAt: Date.now(),
+          authority: "explicit_user",
+          candidateIds: relationshipCandidates.map((candidate) => candidate.id),
+        });
+        backgroundQueue.enqueue({
+          kind: "memory.consolidate",
+          coalesceKey: `memory.consolidate:${incomingId}`,
+          execute: async () => {
+            try {
+              await consolidationCoord.consolidate(
+                incomingId,
+                relationshipCandidates,
+                reasoner,
+                relationshipScope,
+              );
+            } finally {
+              recentAssertions.resolve(incomingId);
+            }
+          },
+        });
+        return { ...result, relationshipLearning: "scheduled" as const };
+      }
+      return result;
     },
     async recall(request, signal) {
       const ctxSnapshot = getContextSnapshot();
-      return recallCoord.recall(request, {
+      const result = await recallCoord.recall(request, {
         scopeContext: getScopeContext(),
         ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
         ...(signal !== undefined ? { signal } : {}),
       });
+      const projected = recentAssertions.project(request, result);
+      relationshipTurn.recordRecall(
+        projected.hits
+          .filter((hit) => hit.resourceType === "memory")
+          .map((hit) => ({
+            id: hit.id,
+            content: hit.content,
+            status: hit.status,
+            match: hit.match,
+            evidenceSource: "same_turn_recall",
+          })),
+      );
+      return projected;
     },
   });
 }
@@ -334,14 +407,13 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let latestRetrievalTraceId: string | undefined;
   const projectIdentityCache = new ProjectIdentityCache({ ttlMs: 30_000 });
   const turnContext = new TurnContextManager();
+  const relationshipTurn = new CurrentTurnMemoryEvidence();
+  const recentAssertions = new RecentAssertionOverlay();
   const backgroundQueue = new MentisBackgroundQueue({
     maxConcurrency: 2,
     maxQueueLength: 64,
   });
   let scopePlanner: ScopeSemanticPlanner | undefined;
-  let scopePrototypeCache: FileScopePrototypeCache | undefined;
-  let commitPlanner: CommitSemanticPlanner | undefined;
-  let commitSemanticCache: FileCommitSemanticCache | undefined;
 
   runtime.registerEmbedding({
     id: "siliconflow-integrated",
@@ -390,21 +462,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       if (embedding === undefined) throw new Error("Embedding provider is unavailable");
       memoryStore = await acquireSharedZvecStore(config.storage, generationSpaces(config));
       contextState ??= new ContextStateService(memoryStore.store);
-      scopePrototypeCache ??= new FileScopePrototypeCache(
-        path.join(config.storage.rootDir, "scope-semantic-index.json"),
-      );
       scopePlanner ??= new ScopeSemanticPlanner({
         embedding,
         dimensions: config.inference.siliconflow.embedding.dimensions,
-        cache: scopePrototypeCache,
-      });
-      commitSemanticCache ??= new FileCommitSemanticCache(
-        path.join(config.storage.rootDir, "commit-semantic-index.json"),
-      );
-      commitPlanner ??= new CommitSemanticPlanner({
-        embedding,
-        dimensions: config.inference.siliconflow.embedding.dimensions,
-        cache: commitSemanticCache,
       });
       return createMemoryService({
         store: memoryStore.store,
@@ -415,7 +475,6 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         viewsEnabled: config.intelligence.views.enabled,
         viewTtlMs: config.intelligence.views.ttlMs,
         scopePlanner,
-        commitPlanner,
       });
     },
     dispose: async (memory) => {
@@ -454,7 +513,6 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ...(embedding === undefined ? {} : { embedding }),
         embeddingModel: config.inference.siliconflow.embedding.model,
         embeddingDimensions: config.inference.siliconflow.embedding.dimensions,
-        predicateCacheFile: path.join(config.storage.rootDir, "predicate-semantic-index.json"),
         rerankModel: config.inference.siliconflow.rerank.model,
         rerankContextTokens: config.inference.siliconflow.rerank.maxInputTokens,
         rerankCandidateLimit: config.inference.rerank.candidateLimit,
@@ -539,7 +597,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           latestRetrievalTraceId = traceId;
         },
         () => scopePlanner,
-        () => commitPlanner,
+        relationshipTurn,
+        recentAssertions,
+        backgroundQueue,
       );
       registered = true;
     }
@@ -602,7 +662,6 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
                   },
             temporal: {
               enabled: true,
-              repairOnStartup: config.intelligence.temporal.repairOnStartup,
             },
             views: views.filter((view) => view !== undefined),
             policy: policy?.status(),
@@ -615,10 +674,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         () => scopeContext,
       );
     }
-    const { identity: project } = await projectIdentityCache.getOrResolve(context.cwd).catch(async () => {
-      const fallback = fallbackProjectIdentity(context.cwd);
-      return { identity: fallback, cacheHit: false };
-    });
+    const { identity: project } = await projectIdentityCache
+      .getOrResolve(context.cwd)
+      .catch(async () => {
+        const fallback = fallbackProjectIdentity(context.cwd);
+        return { identity: fallback, cacheHit: false };
+      });
     scopeContext = {
       tenantId: "local",
       userId: "local",
@@ -633,8 +694,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     evidenceStore ??= createPiEvidenceStore(memoryStore.store);
     contextState ??= new ContextStateService(memoryStore.store);
     const repair = scheduler.schedule({
-      id: `temporal-repair:${scopeContext.userId}`,
-      deduplicationKey: `temporal-repair:${scopeContext.userId}`,
+      id: `memory-maintenance:${scopeContext.userId}`,
+      deduplicationKey: `memory-maintenance:${scopeContext.userId}`,
       priority: TaskPriority.SessionMaintenance,
       estimatedBytes: 1024,
       run: async (signal) => {
@@ -642,14 +703,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         await evidenceStore?.collectExpiredArtifacts(undefined, { signal });
         await memoryStore?.store.collectSupersededGenerations(config.storage.generationRetentionMs);
         await knowledge.recoverJobs({ signal });
-        if (config.intelligence.temporal.repairOnStartup) {
-          await memory.repairTemporal?.({ signal });
-        }
         await memory.repairViews?.();
-        // Set-member identity migration + conflicted-candidate resolver:
-        // legitimate set members must never be stuck in a dead conflicted state.
-        await memory.migrateLegacySetRecords?.({ signal });
-        await memory.resolveConflictedCandidates?.({ signal });
       },
     });
     void repair.promise.catch(() => undefined);
@@ -847,11 +901,6 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       scheduleCapabilitySync();
     });
 
-    // Pre-warm the semantic predicate index in the background so the first
-    // search does not block the agent's first turn. On a cache hit this is
-    // a no-op; on a cache miss the remote embedding runs off the hot path.
-    const retrievalService = runtime.getRetrieval<RetrievalService>();
-    retrievalService?.warmup?.();
     telemetry.record("startup_duration_ms", performance.now() - startup);
   });
 
@@ -869,6 +918,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
   pi.on("input", async (event) => {
     startupIdleWork.activity();
+    relationshipTurn.beginTurn();
     if (latestRetrievalTraceId !== undefined) {
       const confirmation = /^(?:对|是的|没错|就是这个|正确|yes|correct|exactly)\b/i.test(
         event.text.trim(),
@@ -1072,7 +1122,11 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     let taskReused = false;
     const activeTask = turnContext.activeTask;
     const shouldRefreshTask = turnContext.shouldRefreshTask();
-    if (!shouldRefreshTask && activeTask.taskId !== undefined && activeTask.status !== "completed") {
+    if (
+      !shouldRefreshTask &&
+      activeTask.taskId !== undefined &&
+      activeTask.status !== "completed"
+    ) {
       resolvedTask = { taskId: activeTask.taskId };
       taskReused = true;
     } else {
@@ -1187,9 +1241,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         kind: "capture.persist",
         coalesceKey: "capture.persist",
         execute: async () => {
-          await session
-            .start({ goal: event.prompt, scope: scopeContext })
-            .catch(() => undefined);
+          await session.start({ goal: event.prompt, scope: scopeContext }).catch(() => undefined);
         },
       });
     }
@@ -1280,6 +1332,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
   pi.on("session_shutdown", async (event) => {
     startupIdleWork.cancel();
+    await backgroundQueue.drain();
     // Pi reloads the extension for reload, new, resume, and fork — the
     // factory runs again so we must reset the global runtime. Only "quit"
     // keeps the same process; just dispose there.

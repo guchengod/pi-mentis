@@ -21,8 +21,6 @@ export interface PublicMemoryResult {
   readonly content: string;
   readonly sensitivity: Sensitivity;
   readonly sanitized: boolean;
-  readonly memoryType: string | undefined;
-  readonly predicate: string | undefined;
   readonly temporalState: string | undefined;
   readonly crossScope: boolean;
   readonly sourceScopeKind: RelevanceScope["kind"] | undefined;
@@ -63,6 +61,14 @@ export interface ProjectionContext {
   readonly sourceScopeLabel?: string;
 }
 
+function publicTemporalState(
+  status: MemoryRecord["status"],
+): "current" | "historical" | "conflicted" {
+  if (status === "conflicted") return "conflicted";
+  if (["superseded", "expired", "tombstoned", "rejected"].includes(status)) return "historical";
+  return "current";
+}
+
 // ─── Secret metadata extraction ────────────────────────────────────
 
 function extractSecretMetadata(
@@ -71,7 +77,7 @@ function extractSecretMetadata(
   if (record.sensitivity !== "secret") return undefined;
 
   let category: string | undefined;
-  if (record.factKey?.includes("api_key") || record.content.includes("API")) {
+  if (record.content.includes("API")) {
     category = "api_key";
   } else if (record.content.includes("token") || record.content.includes("Token")) {
     category = "access_token";
@@ -126,11 +132,6 @@ export function projectMemoryForPublicUse(
   record: Omit<MemoryRecord, "embedding">,
   context: ProjectionContext,
 ): PublicMemoryResult {
-  // Group keys are `domain:subject/predicate`; member keys add a member
-  // segment (`domain:subject/predicate/member`). Expose the predicate, not
-  // the member, in the public projection.
-  const segments = record.factKey?.split("/") ?? [];
-  const predicate = segments.length >= 2 ? segments[1] : undefined;
   const scopeLabel = safeScopeLabel(record.relevance, context);
 
   // Secret: never expose original content in public projection
@@ -141,9 +142,7 @@ export function projectMemoryForPublicUse(
       content: `已保存一个${secretMeta?.service ? ` ${secretMeta?.service}` : ""}${secretMeta?.category ? ` ${describeCategory(secretMeta.category)}` : "凭据"}。`,
       sensitivity: "secret",
       sanitized: true,
-      memoryType: record.type,
-      predicate,
-      temporalState: record.temporalState,
+      temporalState: publicTemporalState(record.status),
       crossScope: context.crossScope,
       sourceScopeKind: context.sourceScopeKind,
       sourceScopeLabel: scopeLabel,
@@ -164,9 +163,7 @@ export function projectMemoryForPublicUse(
     content: content.length > 500 ? content.slice(0, 497) + "..." : content,
     sensitivity: record.sensitivity ?? "public",
     sanitized,
-    memoryType: record.type,
-    predicate,
-    temporalState: record.temporalState,
+    temporalState: publicTemporalState(record.status),
     crossScope: context.crossScope,
     sourceScopeKind: context.sourceScopeKind,
     sourceScopeLabel: scopeLabel,

@@ -31,36 +31,17 @@ export default defineConfig({
         test: {
           name: "unit",
           include: ["packages/*/test/**/*.test.ts"],
-          exclude: ["**/*.integration.test.ts", "**/*.live.test.ts"],
           environment: "node",
         },
       },
       {
         resolve: { alias },
         test: {
-          name: "integration",
+          name: "e2e",
           include: ["integration-tests/**/*.integration.test.ts"],
           environment: "node",
           testTimeout: 60_000,
           hookTimeout: 60_000,
-        },
-      },
-      {
-        resolve: { alias },
-        test: {
-          name: "live",
-          include: ["integration-tests/**/*.live.test.ts"],
-          environment: "node",
-          testTimeout: 60_000,
-        },
-      },
-      {
-        resolve: { alias },
-        test: {
-          name: "benchmark",
-          include: ["benchmarks/**/*.bench.test.ts"],
-          environment: "node",
-          testTimeout: 60_000,
         },
       },
     ],

@@ -14,22 +14,23 @@ consume those outputs and do not reimplement them.
 | Phase | Responsibility                     | Foreground rule                                          |
 | ----- | ---------------------------------- | -------------------------------------------------------- |
 | P8    | Context & Identity Fabric          | Resolve the immutable minimum snapshot synchronously     |
-| P9    | Temporal Truth Engine              | Fetch heads and apply deterministic rules synchronously  |
+| P9    | Classless Memory & Temporal State  | Persist assertions and explicit relationship transitions |
 | P10   | Applicability, Trust & Safety Gate | Filter and score candidates locally                      |
 | P11   | Hierarchical State Views           | Read views synchronously; build and patch asynchronously |
 | P12   | Memory Effectiveness Evaluation    | Append lightweight traces; aggregate asynchronously      |
 | P13   | Safe Adaptive Policy               | O(1) policy lookup; evaluation and optimization offline  |
 
-Only the Pi adapter imports Pi runtime event types. It converts Pi v0.83.0 events to Mentis domain
+Only the Pi adapter imports Pi runtime event types. It converts Pi v0.84.0 events to Mentis domain
 events and derives branch provenance from the current Pi leaf and its native `parentId`. Pi Mentis
 does not own another session tree or context-compression protocol.
 
-## Unified memory domains
+## Classless memory assertions
 
-Every atomic memory has one domain: `user`, `project`, `environment`, `procedure`, `capability`,
-`task`, `topic`, or `episodic`. Code work normally emphasizes project, environment, procedure,
-capability, and task. General work normally emphasizes user, topic, task, and episodic memory. The
-temporal, gate, view, and evaluation algorithms are shared.
+Every new atomic memory is an independent assertion whose raw content is the source of truth. Scope
+states ownership and visibility; it is not a semantic domain. Procedure order, event time, branch
+provenance, runtime constraints, and exact prerequisites remain structural fields when present.
+Predicate, semantic domain, memory type, cardinality, fact key, and semantic key do not participate
+in new record identity or temporal correctness.
 
 Evidence is immutable ground truth, atomic memory is a reusable claim, and a state view is derived.
 No view or summary may become the only source of truth.
@@ -48,7 +49,7 @@ Implemented in the production extension path:
   non-code directory produces no repository or project identity.
 - Remote normalization across SSH, SCP-like, and HTTPS Git URLs without hashing repository contents.
 - Interaction-mode inference for coding, research, planning, conversation, and operation.
-- Pi 0.83 session-scoped models are included in the capability fingerprint, so model-scope changes
+- Pi 0.84 session-scoped models are included in the capability fingerprint, so model-scope changes
   create a new context revision.
 - Persisted Topic candidates and active topics with lexical continuation, calibrated score
   distributions, explicit-topic evidence, ambiguous pending state, and no automatic activation from
@@ -67,22 +68,29 @@ Implemented in the production extension path:
 
 ## P9–P13 implementation
 
-P9 uses append-only atomic claims, deterministic `factKey`, `single`/`set`/`ordered`/`event`
-cardinality, current/historical/all modes, revisioned heads, deterministic
-reinforce/supersede/coexist/historical/conflict/retract decisions, branch-local hypotheses,
-idempotency state, relationship records, and durable Saga repair. A claim is written before its head;
-an out-of-order historical single claim never enters the current head.
+P9 uses classless atomic assertions whose raw content is the source of truth. Stable record IDs,
+explicit provenance, conservative pairwise relationship resolution, decision traces, and a
+semantic-agnostic temporal state machine provide reinforce/supersede/coexist/conflict/retract
+evolution without assigning a semantic class. Branch locality and epistemic state are independent;
+only explicitly branch-local hypotheses can be abandoned.
 
-P10 applies security, domain/context affinity, temporal, branch, project, environment, trust,
-evidence-integrity, premise, and instruction-safety gates before Rerank or model exposure. Storage
+Natural-language evolution uses Write Fast, Consolidate Slow. Explicit Memory hits recalled during
+the current user turn become bounded pairwise candidates for the next `commit_memory` call. The raw
+assertion is saved first; background reasoning with the active Pi model may then apply a
+high-confidence relationship. If no record was explicitly recalled, slow consolidation can review
+the strongest Core vector candidate, but cosine remains candidate discovery only. Optional semantic
+hints assist that pairwise decision but do not form a slot schema. Similarity-only, ambiguous,
+failed, or unavailable reasoning preserves coexistence.
+
+P10 applies security, context affinity, temporal, branch, project, runtime-constraint, trust,
+evidence-integrity, recall-prerequisite, and instruction-safety gates before Rerank or model exposure. Storage
 filters are backed by an application-layer identity check. Exact reads, mutations, knowledge removal,
 and document inspection use the same boundary. External/model/knowledge content remains data and
 cannot become an instruction merely because it is relevant.
 
-P11 maintains Zvec-backed project, user, topic, task, and capability views through durable View-delta
-jobs and CAS retry. Every field retains current and historical atomic memory IDs. Stale reads return
-immediately and trigger local background revalidation; failures preserve the old View with failed or
-stale state.
+P11 maintains Zvec-backed project, user, topic, task, and capability views with CAS retry. Views are
+derived from atomic record IDs and retain current and historical references; they never create a
+second semantic identity system.
 
 P12 appends retrieval traces to a bounded in-memory buffer and flushes batches outside the answer
 path. It distinguishes exposure from actual tool-argument use, execution from verification, and
@@ -102,6 +110,6 @@ must establish the target incremental P95 foreground cost below 20 ms; implement
 does not claim the measured budget.
 
 Target incremental P95 foreground cost for P8–P13 combined is below 20 ms. Deep capability scans,
-semantic conflict analysis, LLM temporal classification, view rebuilding, effectiveness aggregation,
+relationship consolidation, view rebuilding, effectiveness aggregation,
 offline replay, strategy optimization, Shadow analysis, garbage collection, and repair never run on
 Pi's answer path.

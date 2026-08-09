@@ -21,11 +21,7 @@ import {
   type EmbeddingProvider,
 } from "@pi-mentis/pi-mentis-inference";
 import type { KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
-import type {
-  MemoryQuery,
-  MemoryService,
-  PredicateRegistry,
-} from "@pi-mentis/pi-mentis-memory-core";
+import type { MemoryQuery, MemoryService } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 
 import {
@@ -41,12 +37,7 @@ import { gateSearchHit, type GateRuntimeContext } from "./gates.js";
 import { EffectivenessService, type TaskOutcomeObservation } from "./effectiveness.js";
 import { AdaptivePolicyService } from "./policy.js";
 import { adaptiveCutoff } from "./adaptive-cutoff.js";
-import {
-  FilePredicateVectorCache,
-  SemanticQueryPlanner,
-  type MemoryQueryPlan,
-  type PredicateVectorCache,
-} from "./semantic-query-planner.js";
+import { SemanticQueryPlanner, type MemoryQueryPlan } from "./semantic-query-planner.js";
 
 export interface RetrievalQuery {
   readonly text: string;
@@ -75,11 +66,7 @@ export interface RetrievalService {
   search(query: RetrievalQuery, options?: RetrievalOptions): Promise<SearchResult>;
   recordOutcome?(namespace: string, outcome: TaskOutcomeObservation): Promise<void>;
   flush?(): Promise<void>;
-  /**
-   * Background warmup of semantic indices (predicate vectors). Non-blocking.
-   * Call during session startup so the first search does not stall on a
-   * cache-miss remote embedding.
-   */
+  /** Retained as a no-op lifecycle hook; V2 has no startup semantic index. */
   warmup?(): void;
 }
 
@@ -99,16 +86,11 @@ export interface CreateRetrievalServiceOptions {
   readonly embedding?: EmbeddingProvider;
   readonly embeddingModel?: string;
   readonly embeddingDimensions?: number;
-  readonly predicateRegistry?: PredicateRegistry;
-  readonly predicateVectorCache?: PredicateVectorCache;
-  readonly predicateCacheFile?: string;
   readonly semanticPlanner?: SemanticQueryPlanner;
 }
 
 function fallbackPlan(): MemoryQueryPlan {
   return {
-    predicateCandidates: [],
-    subjectCandidates: [],
     temporalIntent: "any",
     retrievalMode: "broad",
     confidence: 0,
@@ -117,38 +99,16 @@ function fallbackPlan(): MemoryQueryPlan {
   };
 }
 
-function predicatePrior(hit: SearchHit, plan: MemoryQueryPlan): number {
-  if (hit.kind !== "memory") return 0;
-  const factKey = hit.metadata?.["factKey"];
-  if (typeof factKey !== "string") return 0;
-  // Group keys are `domain:subject/predicate`; member keys add a member
-  // segment (`domain:subject/predicate/member`). The predicate is always
-  // the segment right after the subject.
-  const segments = factKey.split("/");
-  const predicate = segments.length >= 2 ? segments[1] : undefined;
-  if (predicate === undefined) return 0;
-  return (
-    plan.predicateCandidates.find((candidate) => candidate.predicate === predicate)?.confidence ?? 0
-  );
-}
-
-export function applyPredicateSoftPrior(
-  hit: SearchHit,
-  plan: MemoryQueryPlan,
-  now: number,
-  freshness: number,
-): SearchHit {
+export function applyAuthorityFreshness(hit: SearchHit, now: number, freshness: number): SearchHit {
   const base = authorityAndFreshness(hit, now, freshness);
-  const prior = predicatePrior(hit, plan);
   return {
     ...hit,
-    score: base * 0.84 + prior * 0.16,
+    score: base,
     metadata: {
       ...(hit.metadata ?? {}),
       recallScoreComponents: {
         fused: hit.score,
         authorityFreshness: base,
-        predicatePrior: prior,
       },
     },
   };
@@ -210,11 +170,6 @@ export class DefaultRetrievalService implements RetrievalService {
     this.#effectiveness = options.effectiveness;
     this.#policy = options.policy;
     this.#clock = options.clock ?? systemClock;
-    const vectorCache =
-      options.predicateVectorCache ??
-      (options.predicateCacheFile === undefined
-        ? undefined
-        : new FilePredicateVectorCache(options.predicateCacheFile));
     this.#semanticPlanner =
       options.semanticPlanner ??
       (options.embedding === undefined ||
@@ -225,10 +180,6 @@ export class DefaultRetrievalService implements RetrievalService {
             embedding: options.embedding,
             modelId: options.embeddingModel,
             dimensions: options.embeddingDimensions,
-            ...(options.predicateRegistry === undefined
-              ? {}
-              : { registry: options.predicateRegistry }),
-            ...(vectorCache === undefined ? {} : { cache: vectorCache }),
           }));
   }
 
@@ -318,7 +269,7 @@ export class DefaultRetrievalService implements RetrievalService {
               const values = fact.currentMemoryIds.map(
                 (memoryId) => fact.values?.[memoryId] ?? fact.value,
               );
-              return `${fact.factKey}: ${
+              return `${fact.recordKey}: ${
                 values.length > 1 ? `CONFLICT [${values.join(" | ")}]` : values[0]
               }`;
             })
@@ -474,9 +425,8 @@ export class DefaultRetrievalService implements RetrievalService {
           ];
         })
         .map((hit) =>
-          applyPredicateSoftPrior(
+          applyAuthorityFreshness(
             hit,
-            queryPlan,
             this.#clock.now(),
             activePolicy?.parameters.freshnessWeight ?? 0.1,
           ),
@@ -506,10 +456,8 @@ export class DefaultRetrievalService implements RetrievalService {
       }
       // Structural fact identity is decided BEFORE diversity: collapse
       // duplicate/version candidates per member identity, then run the
-      // set-aware diversity selection. Set siblings (same predicate group,
-      // different setMemberKey) are distinct facts and are never suppressed
-      // for content similarity — MMR only optimizes representational
-      // diversity among otherwise-unrelated candidates.
+      // diversity selection. Independent record identities are never
+      // collapsed merely because their content is similar.
       const deduped = structuralDedupe(ranked);
       const cutoff = adaptiveCutoff({ hits: deduped, mode: queryPlan.retrievalMode });
       const diversityTrace: DiversityTraceEntry[] = [];
@@ -616,13 +564,12 @@ export class DefaultRetrievalService implements RetrievalService {
             ...(this.#memory === undefined ? [] : ["knowledge-guided-memory"]),
             ...(stages["knowledgeVerification"] === undefined ? [] : ["knowledge-verification"]),
             "rrf",
-            "applicability-gates",
+            "runtime-constraint-gates",
             "authority-freshness",
-            "predicate-soft-prior",
             ...(stages["rerank"] === undefined ? [] : ["rerank"]),
             "structural-dedup",
             "adaptive-cutoff",
-            "set-aware-mmr",
+            "mmr",
             "context-budget",
           ],
           rankings: {

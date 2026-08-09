@@ -57,8 +57,8 @@ export class PerformanceTrace {
     const start = this.#timings.get("start") ?? performance.now();
     const now = performance.now();
     const get = (name: string, fallback: string): number =>
-      ((this.#timings.get(name) ?? this.#timings.get(fallback) ?? start) -
-        (this.#timings.get(fallback) ?? start));
+      (this.#timings.get(name) ?? this.#timings.get(fallback) ?? start) -
+      (this.#timings.get(fallback) ?? start);
 
     return {
       totalMs: Math.round((now - start) * 100) / 100,

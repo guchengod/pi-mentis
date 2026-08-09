@@ -79,9 +79,7 @@ export class MentisBackgroundQueue {
   async #drainAll(): Promise<void> {
     const remaining = [...this.#queue];
     this.#queue.length = 0;
-    const results = remaining.map((job) =>
-      job.execute().catch((err) => this.#logError(err, job)),
-    );
+    const results = remaining.map((job) => job.execute().catch((err) => this.#logError(err, job)));
     await Promise.allSettled(results);
     while (this.#running > 0) {
       await new Promise((resolve) => setTimeout(resolve, 1));

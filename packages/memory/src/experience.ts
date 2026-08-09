@@ -169,9 +169,6 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     if (candidate.validationPlan.length === 0 || candidate.successEvidence.length === 0) {
       throw new Error("Experience qualification requires a validation plan and success evidence");
     }
-    if (candidate.branchClaimState === "abandoned") {
-      throw new Error(`Experience ${id} belongs to an abandoned branch`);
-    }
     const qualified = {
       ...candidate,
       state: "qualified" as const,
@@ -204,17 +201,15 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     const result = await this.#memory.commit(
       {
         content,
-        type: "procedural",
-        domain: "procedure",
-        scope:
-          candidate.branchClaimState === "hypothesis" &&
-          candidate.scopeContext?.branchId !== undefined
-            ? { kind: "branch", id: candidate.scopeContext.branchId }
-            : { kind: "user", id: "experience" },
+        scope: { kind: "user", id: "experience" },
         ...(candidate.scopeContext === undefined ? {} : { scopeContext: candidate.scopeContext }),
-        ...(candidate.branchClaimState === undefined
-          ? {}
-          : { branchClaimState: candidate.branchClaimState }),
+        provenance: {
+          origin: "tool",
+          epistemicState: "verified",
+          ...(candidate.scopeContext?.branchId === undefined
+            ? {}
+            : { branchId: candidate.scopeContext.branchId }),
+        },
         confidence: betaSuccessEstimate(candidate),
         importance: 0.7,
         authority: EvidenceAuthority.VerifiedToolObservation,

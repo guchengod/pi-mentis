@@ -25,16 +25,15 @@ function extractUniqueToken(content: string): string {
   return content.split(" ")[0] ?? content;
 }
 
-function makeSearchHit(
-  record: Omit<MemoryRecord, "embedding">,
-  index: number,
-): SearchHit {
+function makeSearchHit(record: Omit<MemoryRecord, "embedding">, index: number): SearchHit {
   const nsParts = [
     record.scopeContext?.tenantId ?? "local",
     record.scopeContext?.userId ?? "local",
     record.scopeContext?.appId ?? "pi",
     record.scopeContext?.agentId ?? "pi-mentis",
-  ].map(encodeURIComponent).join(":");
+  ]
+    .map(encodeURIComponent)
+    .join(":");
   return {
     id: record.id,
     kind: "memory" as const,
@@ -48,9 +47,7 @@ function makeSearchHit(
   };
 }
 
-function mockMemoryService(
-  records: Map<string, Omit<MemoryRecord, "embedding">>,
-): MemoryService {
+function mockMemoryService(records: Map<string, Omit<MemoryRecord, "embedding">>): MemoryService {
   const svc = {
     async commit() {
       return { outcome: "created" as const, record: undefined, relatedIds: [] };
@@ -107,7 +104,10 @@ function mockMemoryService(
 
 function mockRetrievalService(memory: MemoryService): RetrievalService {
   const svc = {
-    async search(retrievalQuery: RetrievalQuery, _retrievalOpts?: RetrievalOptions): Promise<SearchResult> {
+    async search(
+      retrievalQuery: RetrievalQuery,
+      _retrievalOpts?: RetrievalOptions,
+    ): Promise<SearchResult> {
       void _retrievalOpts;
       const memoryResult = await memory.search(
         {
@@ -153,7 +153,11 @@ function makeScopeContext(overrides: Partial<PiScopeContext> = {}): PiScopeConte
   };
 }
 
-function makeTopicRecord(id: string, content: string, topicId: string): Omit<MemoryRecord, "embedding"> {
+function makeTopicRecord(
+  id: string,
+  content: string,
+  topicId: string,
+): Omit<MemoryRecord, "embedding"> {
   const scopeContext = makeScopeContext({ topicIds: [topicId] });
   return {
     id,
@@ -188,7 +192,6 @@ function makeTopicRecord(id: string, content: string, topicId: string): Omit<Mem
     revision: 1,
     factKey: "user/local/response_style",
     cardinality: "single" as const,
-    temporalState: "current" as const,
     evidenceIntegrity: "missing" as const,
   };
 }
@@ -233,7 +236,10 @@ describe("query-vs-ID consistency invariant", () => {
       text: query,
       limit: 10,
       scopeContext,
-      scopes: [{ kind: "topic" as const, id: topicId }, { kind: "user" as const, id: "local" }],
+      scopes: [
+        { kind: "topic" as const, id: topicId },
+        { kind: "user" as const, id: "local" },
+      ],
     });
 
     const found = result.hits.some((hit) => hit.id === recordId);
@@ -311,8 +317,7 @@ describe("query-vs-ID consistency invariant", () => {
 
   it("strong lexical match must retrieve the record regardless of kind=topic metadata", async () => {
     const topicId3 = "topic_default_plan";
-    const content3 =
-      `用户说"默认方案"时，意思是：优先选择维护成本最低的方案（lowest maintenance cost first），而不是默认实现方式或最常见的方案。`;
+    const content3 = `用户说"默认方案"时，意思是：优先选择维护成本最低的方案（lowest maintenance cost first），而不是默认实现方式或最常见的方案。`;
     const recordId3 = "test-TARGET-59938b43";
 
     const record = makeTopicRecord(recordId3, content3, topicId3);

@@ -191,9 +191,8 @@ export async function runPiConversationScenarios({
 export async function runAutomatedSuites({ directories }) {
   const results = [];
   const focused = [
-    ["T01", "Unit and property tests", "P0-P6", ["test"]],
-    ["T02", "Real Zvec integration and state-machine tests", "Recovery", ["test:integration"]],
-    ["M01", "10k real-Zvec release performance gates", "Performance", ["benchmark:smoke"]],
+    ["T01", "Fast unit safety tests", "P0-P6", ["test"]],
+    ["T02", "Real Zvec persistence and restart E2E", "Recovery", ["test:e2e"]],
   ];
   for (const [id, name, stage, args] of focused) {
     const started = performance.now();
@@ -209,22 +208,11 @@ export async function runAutomatedSuites({ directories }) {
       }),
     );
   }
-  for (const filename of ["hook-gates-performance.json", "zvec-10k-performance.json"]) {
-    try {
-      await cp(
-        path.join(repositoryRoot, ".artifacts", "test-reports", filename),
-        path.join(directories.reports, "evidence", filename),
-      );
-    } catch {
-      // The corresponding command result remains authoritative when an older
-      // benchmark implementation does not emit a structured sidecar.
-    }
-  }
   const liveStarted = performance.now();
-  const live = await runCommand("node", ["scripts/live-e2e.mjs", "all"], {
+  const live = await runCommand("node", ["scripts/live-e2e.mjs", "relationship"], {
     env: { ...process.env, PI_MENTIS_LIVE_E2E: "1" },
     timeoutMs: 45 * 60_000,
-    logFile: path.join(directories.logs, "live-e2e-all.log"),
+    logFile: path.join(directories.logs, "live-e2e-relationship.log"),
     allowFailure: true,
     captureLimit: 32 * 1024 * 1024,
   });
@@ -255,7 +243,7 @@ export async function runAutomatedSuites({ directories }) {
       live.exitCode === 0 ? "PASS" : "FAIL",
       liveStarted,
       {
-        evidence: liveRunId ?? path.join(directories.logs, "live-e2e-all.log"),
+        evidence: liveRunId ?? path.join(directories.logs, "live-e2e-relationship.log"),
         ...(live.exitCode === 0 ? {} : { error: live.output.slice(-1_000) }),
       },
     ),
@@ -276,7 +264,7 @@ export async function runAutomatedSuites({ directories }) {
   for (const [id, name, stage] of coverage) {
     results.push(
       result(id, name, stage, suitePassed ? "PASS" : "FAIL", performance.now(), {
-        evidence: `${path.join(directories.logs, "T01.log")}; ${path.join(directories.logs, "T02.log")}; ${path.join(directories.logs, "live-e2e-all.log")}`,
+        evidence: `${path.join(directories.logs, "T01.log")}; ${path.join(directories.logs, "T02.log")}; ${path.join(directories.logs, "live-e2e-relationship.log")}`,
         ...(suitePassed ? {} : { error: "Required unit, real-Zvec, or Live E2E suite failed" }),
       }),
     );

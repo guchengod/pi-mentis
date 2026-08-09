@@ -1,5 +1,4 @@
 import { stat } from "node:fs/promises";
-import path from "node:path";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -446,7 +445,6 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
         ...(embedding === undefined ? {} : { embedding }),
         embeddingModel: config.inference.siliconflow.embedding.model,
         embeddingDimensions: config.inference.siliconflow.embedding.dimensions,
-        predicateCacheFile: path.join(config.storage.rootDir, "predicate-semantic-index.json"),
         rerankModel: config.inference.siliconflow.rerank.model,
         rerankContextTokens: config.inference.siliconflow.rerank.maxInputTokens,
         rerankCandidateLimit: config.inference.rerank.candidateLimit,

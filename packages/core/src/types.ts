@@ -90,39 +90,24 @@ export interface SearchDiagnostics {
     readonly rerank: readonly string[];
     readonly mmr: readonly string[];
   }>;
-  /** Per-candidate diversity-selection trace (MMR/set-completeness). */
+  /** Per-candidate diversity-selection trace. */
   readonly diversity?: readonly Readonly<{
     readonly candidateId: string;
-    readonly predicate?: string;
-    readonly cardinality?: string;
-    readonly setMemberKey?: string;
-    readonly memberFactKey?: string;
     readonly pairwiseSimilarity: number;
-    readonly structuralRelation: "same_member" | "set_sibling" | "unrelated";
+    readonly structuralRelation: "same_record" | "same_content" | "unrelated";
     readonly mmrPenalty: number;
-    readonly preservedBySetCompleteness: boolean;
+    readonly preservedByIndependentIdentity: boolean;
     readonly selected: boolean;
     readonly dropReason?: string;
   }>[];
   readonly traceId?: string;
   readonly semanticQueryPlan?: Readonly<{
-    readonly predicateCandidates: readonly Readonly<{
-      readonly predicate: string;
-      readonly confidence: number;
-    }>[];
-    readonly subjectCandidates: readonly Readonly<{
-      readonly subject: string;
-      readonly confidence: number;
-    }>[];
     readonly temporalIntent: "current" | "historical" | "evolution" | "any";
     readonly retrievalMode: "focused" | "broad";
     readonly confidence: number;
     readonly memoryNeed: Readonly<{ readonly required: boolean; readonly confidence: number }>;
     readonly diagnostics?: Readonly<{
-      readonly predicateMargin?: number;
-      readonly predicateEntropy?: number;
       readonly plannerDegraded?: boolean;
-      readonly sourceDependency?: string;
       readonly sourceDependencySignal?: string;
     }>;
   }>;

@@ -55,12 +55,77 @@ const sessionManager = SessionManager.create(
   { id: request.sessionId },
 );
 const modelRuntime = await ModelRuntime.create({
-  authPath: path.join(request.piConfigDir, "auth.json"),
-  modelsPath: null,
-  modelsStorePath: path.join(request.piConfigDir, "models-store.json"),
+  authPath: request.model?.authPath ?? path.join(request.piConfigDir, "auth.json"),
+  modelsPath: request.model?.modelsPath ?? null,
+  modelsStorePath:
+    request.model?.modelsStorePath ?? path.join(request.piConfigDir, "models-store.json"),
   allowModelNetwork: false,
 });
 const modelRegistry = new ModelRegistry(modelRuntime);
+const activeModel =
+  request.model === undefined
+    ? undefined
+    : (await modelRuntime.getAvailable()).find(
+        (model) => model.provider === request.model.provider && model.id === request.model.id,
+      );
+if (request.model !== undefined && activeModel === undefined) {
+  throw new Error(
+    `Requested Pi model ${request.model.provider}/${request.model.id} is not available`,
+  );
+}
+const modelRequests = [];
+let lastModelRequestFinishedAt;
+const completeWithEvidence = modelRegistry.complete.bind(modelRegistry);
+
+function judgmentEvidence(response) {
+  const text = response.content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("\n");
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/iu)?.[1];
+  const candidate = fenced ?? text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
+  try {
+    const parsed = JSON.parse(candidate);
+    if (parsed === null || typeof parsed !== "object" || typeof parsed.relation !== "string") {
+      return undefined;
+    }
+    return {
+      relation: parsed.relation,
+      confidence: parsed.confidence,
+      signals: parsed.signals,
+      reasonCodes: parsed.reasonCodes,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+modelRegistry.complete = async (...args) => {
+  const startedAt = Date.now();
+  try {
+    const response = await completeWithEvidence(...args);
+    lastModelRequestFinishedAt = Date.now();
+    modelRequests.push({
+      provider: args[0].provider,
+      model: args[0].id,
+      status: "fulfilled",
+      stopReason: response.stopReason,
+      durationMs: Date.now() - startedAt,
+      ...(judgmentEvidence(response) === undefined ? {} : { judgment: judgmentEvidence(response) }),
+    });
+    return response;
+  } catch (error) {
+    lastModelRequestFinishedAt = Date.now();
+    modelRequests.push({
+      provider: args[0].provider,
+      model: args[0].id,
+      status: "rejected",
+      error: error instanceof Error ? error.name : "Error",
+      durationMs: Date.now() - startedAt,
+    });
+    throw error;
+  }
+};
 const runner = new ExtensionRunner(
   loaded.extensions,
   loaded.runtime,
@@ -129,8 +194,8 @@ runner.bindCore(
     setThinkingLevel: () => undefined,
   },
   {
-    getModel: () => undefined,
-    getScopedModels: () => [],
+    getModel: () => activeModel,
+    getScopedModels: () => (activeModel === undefined ? [] : [activeModel]),
     isIdle: () => true,
     isProjectTrusted: () => true,
     getSignal: () => undefined,
@@ -149,7 +214,37 @@ runner.bindCore(
 );
 
 const results = [];
+const aliases = new Map();
 let shutdownEmitted = false;
+
+function toolPayload(result) {
+  const text = result?.content?.find((item) => item.type === "text")?.text;
+  if (typeof text !== "string") throw new Error("Pi tool returned no text payload");
+  return JSON.parse(text);
+}
+
+function referencedValue(reference) {
+  let value = aliases.get(reference.$result);
+  if (value === undefined) throw new Error(`Unknown Pi driver result alias: ${reference.$result}`);
+  for (const segment of reference.$path ?? []) {
+    if (value === null || typeof value !== "object" || !(segment in value)) {
+      throw new Error(
+        `Missing Pi driver result path ${reference.$result}.${(reference.$path ?? []).join(".")}`,
+      );
+    }
+    value = value[segment];
+  }
+  return value;
+}
+
+function resolveReferences(value) {
+  if (Array.isArray(value)) return value.map(resolveReferences);
+  if (value === null || typeof value !== "object") return value;
+  if (typeof value.$result === "string") return referencedValue(value);
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, resolveReferences(child)]),
+  );
+}
 
 async function invokeCommand(name, args) {
   const command = runner.getCommand(name);
@@ -214,11 +309,12 @@ try {
     .sort();
   for (const [index, operation] of request.operations.entries()) {
     if (operation.kind === "tool") {
+      const parameters = resolveReferences(operation.parameters);
       // Direct commit_memory calls in this harness represent an explicit user instruction.
       // Emit the real Pi before_agent_start lifecycle first so provenance, authority, and
       // evidence validation exercise the same path as an interactive Pi turn.
-      if (operation.name === "commit_memory" && typeof operation.parameters?.content === "string") {
-        await runner.emitBeforeAgentStart(operation.parameters.content, undefined, "", {
+      if (operation.name === "commit_memory" && typeof parameters?.content === "string") {
+        await runner.emitBeforeAgentStart(parameters.content, undefined, "", {
           cwd: request.workspace,
         });
       }
@@ -229,12 +325,12 @@ try {
         type: "tool_execution_start",
         toolCallId,
         toolName: operation.name,
-        args: operation.parameters,
+        args: parameters,
       });
       try {
         const result = await definition.execute(
           toolCallId,
-          operation.parameters,
+          parameters,
           undefined,
           undefined,
           runner.createContext(),
@@ -252,12 +348,14 @@ try {
           if (typeof jobId !== "string") throw new Error("Knowledge tool returned no job ID");
           job = await waitForKnowledgeJob(jobId);
         }
-        results.push({
+        const entry = {
           kind: "tool",
           name: operation.name,
           result,
           ...(job === undefined ? {} : { job }),
-        });
+        };
+        results.push(entry);
+        if (typeof operation.as === "string") aliases.set(operation.as, toolPayload(result));
       } catch (error) {
         await runner.emit({
           type: "tool_execution_end",
@@ -268,6 +366,57 @@ try {
         });
         throw error;
       }
+      continue;
+    }
+    if (operation.kind === "input") {
+      const result = await runner.emitInput(operation.text, undefined, "interactive");
+      results.push({ kind: "input", text: operation.text, result });
+      continue;
+    }
+    if (operation.kind === "poll_memory_status") {
+      const records = resolveReferences(operation.records);
+      const definition = runner.getToolDefinition("search_memory");
+      if (definition === undefined) throw new Error("Pi tool search_memory is not registered");
+      const startedAt = Date.now();
+      const timeoutMs = operation.timeoutMs ?? 30_000;
+      const intervalMs = operation.intervalMs ?? 50;
+      const samples = [];
+      let converged = false;
+      while (Date.now() - startedAt <= timeoutMs) {
+        const statuses = {};
+        for (const record of records) {
+          const result = await definition.execute(
+            `${request.runId}-poll-${index}-${samples.length}-${record.id}`,
+            { id: record.id },
+            undefined,
+            undefined,
+            runner.createContext(),
+          );
+          const payload = toolPayload(result);
+          statuses[record.id] =
+            payload.search?.hits?.[0]?.status ?? payload.hits?.[0]?.status ?? null;
+        }
+        const elapsedMs = Date.now() - startedAt;
+        samples.push({ elapsedMs, statuses });
+        converged = records.every((record) => statuses[record.id] === record.status);
+        if (converged) break;
+        if (
+          lastModelRequestFinishedAt !== undefined &&
+          Date.now() - lastModelRequestFinishedAt >= 1_500
+        ) {
+          break;
+        }
+        await delay(intervalMs);
+      }
+      const entry = {
+        kind: "poll_memory_status",
+        converged,
+        convergenceMs: samples.at(-1)?.elapsedMs ?? 0,
+        ...(converged ? {} : { lastObserved: samples.at(-1) }),
+        samples,
+      };
+      results.push(entry);
+      if (typeof operation.as === "string") aliases.set(operation.as, entry);
       continue;
     }
     if (operation.kind === "command") {
@@ -314,8 +463,14 @@ try {
         })),
         commandSurface,
         results,
+        aliases: Object.fromEntries(aliases),
         notifications,
         errors,
+        activeModel:
+          activeModel === undefined
+            ? null
+            : { provider: activeModel.provider, id: activeModel.id, name: activeModel.name },
+        modelRequests,
         processId: process.pid,
       },
       null,
@@ -345,6 +500,11 @@ try {
           .sort(),
         notifications,
         errors,
+        activeModel:
+          activeModel === undefined
+            ? null
+            : { provider: activeModel.provider, id: activeModel.id, name: activeModel.name },
+        modelRequests,
         processId: process.pid,
       },
       null,

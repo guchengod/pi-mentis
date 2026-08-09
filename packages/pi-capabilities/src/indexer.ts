@@ -14,7 +14,8 @@ import {
 import type { KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
 import { ZvecStore, type StoredRecord, type StoredVectorRecord } from "@pi-mentis/pi-mentis-zvec";
 
-const PI_NAMESPACE = `pi:${PI_VERSION}`;import type {
+const PI_NAMESPACE = `pi:${PI_VERSION}`;
+import type {
   CapabilityPlan,
   CapabilityPlanner,
   CapabilityRecord,

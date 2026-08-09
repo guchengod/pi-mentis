@@ -76,8 +76,6 @@ export function deriveExperienceObservation(
     candidate: {
       goal: episode.goal,
       ...(scopeContext === undefined ? {} : { scopeContext }),
-      branchClaimState:
-        episode.branchId === undefined || episode.branchId === "root" ? "global" : "hypothesis",
       environment,
       prerequisites: [],
       steps,

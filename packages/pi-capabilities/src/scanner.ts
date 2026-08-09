@@ -1,7 +1,12 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { assertPiCompatibility, contentHash, stableHash, PI_VERSION } from "@pi-mentis/pi-mentis-core";
+import {
+  assertPiCompatibility,
+  contentHash,
+  stableHash,
+  PI_VERSION,
+} from "@pi-mentis/pi-mentis-core";
 import { glob } from "glob";
 
 import type { CapabilityRecord } from "./types.js";

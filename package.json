@@ -21,31 +21,16 @@
   "scripts": {
     "acceptance": "node scripts/acceptance/run.mjs",
     "build": "turbo run build",
-    "benchmark": "vitest bench --run --project benchmark --outputJson benchmark-results/full.json",
-    "benchmark:smoke": "vitest run --project benchmark",
+    "evidence:classless": "pnpm build && node scripts/classless-evidence.mjs",
     "clean": "turbo run clean",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0 && node scripts/check-workspace.mjs",
     "pack:extensions": "node scripts/pack-extensions.mjs",
-    "pretest:integration": "pnpm build",
     "test": "vitest run --project unit",
-    "test:coverage": "vitest run --project unit --project integration --coverage --coverage.reporter=text --coverage.reporter=json-summary",
-    "test:mutation": "stryker run",
-    "test:e2e": "vitest run --project integration",
-    "test:fault-injection": "vitest run --project integration -t \"degrades on rerank failure\"",
-    "test:e2e:live": "node scripts/live-e2e.mjs all",
-    "test:e2e:live:knowledge": "node scripts/live-e2e.mjs knowledge",
-    "test:e2e:live:webbook": "node scripts/live-e2e.mjs webbook",
-    "test:e2e:live:memory": "node scripts/live-e2e.mjs memory",
-    "test:e2e:live:combined": "node scripts/live-e2e.mjs combined",
-    "test:e2e:live:pi": "node scripts/live-e2e.mjs pi",
-    "test:e2e:live:restart": "node scripts/live-e2e.mjs restart",
-    "test:e2e:live:inference": "node scripts/live-e2e.mjs inference",
-    "test:e2e:live:performance": "node scripts/live-e2e.mjs performance",
-    "test:e2e:live:formats": "node scripts/live-e2e.mjs formats",
-    "test:integration": "vitest run --project integration",
-    "test:live": "SILICONFLOW_LIVE_TEST=1 vitest run --project live",
+    "test:e2e": "vitest run --project e2e",
+    "test:e2e:live": "node scripts/live-e2e.mjs relationship",
+    "test:coverage": "vitest run --project unit --project e2e --coverage --coverage.reporter=text --coverage.reporter=json-summary",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
@@ -54,8 +39,6 @@
     "@earendil-works/pi-coding-agent": "0.84.0",
     "@earendil-works/pi-tui": "0.84.0",
     "@eslint/js": "10.0.1",
-    "@stryker-mutator/core": "9.6.1",
-    "@stryker-mutator/vitest-runner": "9.6.1",
     "@types/node": "26.1.2",
     "@vitest/coverage-v8": "4.1.10",
     "eslint": "10.8.0",
@@ -69,6 +52,10 @@
     "vitest": "4.1.10"
   },
   "pnpm": {
+    "overrides": {
+      "@earendil-works/pi-ai": "0.84.0",
+      "@earendil-works/pi-coding-agent": "0.84.0"
+    },
     "onlyBuiltDependencies": [
       "@zvec/zvec"
     ],

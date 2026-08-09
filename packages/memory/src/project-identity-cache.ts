@@ -109,7 +109,9 @@ export class ProjectIdentityCache {
 
 let globalCache: ProjectIdentityCache | undefined;
 
-export function getProjectIdentityCache(options?: ProjectIdentityCacheOptions): ProjectIdentityCache {
+export function getProjectIdentityCache(
+  options?: ProjectIdentityCacheOptions,
+): ProjectIdentityCache {
   if (globalCache === undefined) {
     globalCache = new ProjectIdentityCache(options);
   }

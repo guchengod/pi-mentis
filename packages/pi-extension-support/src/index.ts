@@ -116,3 +116,14 @@ export {
   type PublicRecallResult,
   type MentisToolFacade,
 } from "./memory-tools.js";
+export {
+  createPiPairwiseRelationshipReasoner,
+  type PiPairwiseRelationshipJudgment,
+  type PiPairwiseRelationshipReasoner,
+  type PiRecalledMemoryEvidence,
+} from "./pairwise-memory-reasoner.js";
+export {
+  RecentAssertionOverlay,
+  type RecentAssertion,
+  type RecentAssertionOverlayOptions,
+} from "./recent-assertion-overlay.js";

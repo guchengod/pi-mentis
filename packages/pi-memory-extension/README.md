@@ -26,8 +26,9 @@ pi
 请调用 search_memory，搜索我关于 TypeScript 编译配置的偏好。
 ```
 
-记忆类型：`preference`、`requirement`、`fact`、`decision`、`procedural`、`episodic`、`task`。
-支持 `single` / `set` / `ordered` / `event` 时间基数；迟到旧事实只进历史，冲突保留双方，Branch hypothesis 在验证前不污染主事实。检索前执行身份、项目、环境、时间、证据和指令安全 Gate。
+Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Type、Domain、Cardinality、Fact Key 或 Semantic Key。需要纠正、强化或撤回时，Agent 会优先在同一轮用 `search_memory` 找到具体旧记录，再用不变的 `commit_memory({content})` 写入新陈述。主写路径先完成保存；后台优先对本轮召回的具体记录做 pairwise reasoning；没有显式召回时可复核 Core 找到的最强向量候选。相似度只选候选，不能改变状态；只有高置信成对证据才能建立 reinforce / supersede / retract / conflict 关系，不确定时安全 coexist。
+
+这不是关键词或 correction/retraction 分类器。相似度只负责找候选，不能改变状态；后台整合保留原始来源、关系边和 decision trace。Branch hypothesis 在验证前不污染主事实；检索前仍执行身份、项目、环境、时间、证据和指令安全 Gate。
 
 查看状态：`/mentis status`
 
