@@ -2,6 +2,9 @@
 
 Pi Mentis keeps three deliberately separate verification layers.
 
+All three publishable extension packages must always share one version. Run `pnpm check:versions`
+before a release; `pnpm lint` and `pnpm pack:extensions` enforce the same invariant automatically.
+
 ## Fast unit suite
 
 `pnpm test` covers deterministic contracts and safety boundaries. It must not open Zvec, access the

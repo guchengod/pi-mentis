@@ -15,6 +15,7 @@ export async function buildAndPack({ logs, state }) {
     ["format-check", ["format:check"]],
     ["lint", ["lint"]],
     ["typecheck", ["typecheck"]],
+    ["versions", ["check:versions"]],
     ["unit", ["test"]],
     ["e2e", ["test:e2e"]],
     ["build", ["build"]],
