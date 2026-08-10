@@ -9,7 +9,7 @@ import {
   shouldExcludeFromAutomaticRecall,
   sanitizeForLog,
 } from "../src/projection.js";
-import { toRemoteSafe } from "../src/secret-detector.js";
+import { classifySensitivity, toRemoteSafe } from "../src/secret-detector.js";
 import { detectAccessIntent } from "../src/maintenance-intent.js";
 import type { MemoryRecord, Sensitivity } from "../src/types.js";
 
@@ -164,6 +164,21 @@ describe("remote safety", () => {
     expect(safe.policy).toBe("allow");
     expect(safe.text).toBe("构建命令是 pnpm build");
     expect(safe.redacted).toBe(false);
+  });
+
+  it("keeps opaque run identifiers public unless they are credential-labeled", () => {
+    const identifier = "CONTEXT_FOLD_20260810T103859352Z";
+    const acceptanceIdentifier = "MENTIS_ACCEPTANCE_20260810T132223494Z_aaeee703";
+    expect(classifySensitivity(`本会话标识为 ${identifier}`).sensitivity).toBe("public");
+    expect(toRemoteSafe(`本会话标识为 ${identifier}`)).toMatchObject({
+      policy: "allow",
+      text: `本会话标识为 ${identifier}`,
+      redacted: false,
+    });
+    expect(classifySensitivity(`API_KEY=${identifier}`).sensitivity).not.toBe("public");
+    expect(
+      classifySensitivity(`${acceptanceIdentifier} BUILD_ERROR src/index.ts:42`).sensitivity,
+    ).toBe("public");
   });
 
   it("secret API key is local_only", () => {

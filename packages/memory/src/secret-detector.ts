@@ -46,6 +46,7 @@ export interface SecretDetection {
 
 const BENIGN_IDENTIFIER_PATTERNS: readonly RegExp[] = [
   /^MENTIS_[A-Z]+_\d{14}_[a-f0-9]{8,}$/,
+  /^MENTIS_[A-Z]+_\d{8}T\d{6,9}Z_[a-f0-9]{8,}$/,
   /^MENTIS_CASE_\d{8}_[a-f0-9]{8,}$/,
   /^TRACE_\d{8}_[a-f0-9]{8,}$/,
   /^BUILD_[A-Z]+_\d{8}_[a-f0-9]{8,}$/,
@@ -66,7 +67,12 @@ function isBenignIdentifier(token: string): boolean {
   if (!token.includes("_")) return false;
   if (!/^[A-Z]/.test(token)) return false;
   const clean = token.endsWith("-") ? token.slice(0, -1) : token;
-  return BENIGN_IDENTIFIER_PATTERNS.some((pattern) => pattern.test(clean));
+  return (
+    BENIGN_IDENTIFIER_PATTERNS.some((pattern) => pattern.test(clean)) ||
+    // Opaque run/build/event identifiers are data, not credentials. Credential
+    // labels are checked separately so API_KEY=<value> remains protected.
+    (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(clean) && /\d/.test(clean))
+  );
 }
 
 // ─── High-confidence format rules ─────────────────────────────────
@@ -147,6 +153,13 @@ function shannonEntropy(str: string): number {
   return entropy;
 }
 
+function isCredentialLabeledAt(text: string, tokenStart: number): boolean {
+  const prefix = text.slice(Math.max(0, tokenStart - 48), tokenStart);
+  return /(?:api[_ -]?key|secret[_ -]?key|access[_ -]?token|auth[_ -]?token|password|passwd|pwd|credential|密码|密钥|凭据)\s*(?::|=|is\b|为)\s*['"]?$/i.test(
+    prefix,
+  );
+}
+
 function detectHighEntropySpans(text: string): SecretSpan[] {
   const spans: SecretSpan[] = [];
   const tokenRegex = /[A-Za-z0-9+/=_-]{20,}/g;
@@ -155,7 +168,8 @@ function detectHighEntropySpans(text: string): SecretSpan[] {
     const token = match[0];
     if (/^(?:https?|file):/i.test(token)) continue;
     if (/^\d+$/.test(token)) continue;
-    if (isBenignIdentifier(token)) continue;
+    const credentialLabeled = isCredentialLabeledAt(text, match.index);
+    if (isBenignIdentifier(token) && !credentialLabeled) continue;
     const hasUpper = /[A-Z]/.test(token);
     const hasLower = /[a-z]/.test(token);
     const hasDigit = /\d/.test(token);
@@ -183,9 +197,11 @@ function detectContextSignals(text: string): SecretKind[] {
 }
 
 function benignIdentifierScore(text: string): number {
-  const tokens = text.match(/[A-Z_][A-Z0-9_]{8,}/g);
-  if (tokens === null || tokens.length === 0) return 0;
-  const benignCount = tokens.filter((t) => isBenignIdentifier(t)).length;
+  const tokens = [...text.matchAll(/[A-Z_][A-Z0-9_]{8,}/g)];
+  if (tokens.length === 0) return 0;
+  const benignCount = tokens.filter(
+    (match) => isBenignIdentifier(match[0]) && !isCredentialLabeledAt(text, match.index),
+  ).length;
   return Math.min(0.9, benignCount * 0.3);
 }
 

@@ -34,6 +34,7 @@ import {
   ContextStateService,
   DefaultRememberCoordinator,
   CurrentTurnMemoryEvidence,
+  DeferredRelationshipLearningScheduler,
   DurableRelationshipLearningCoordinator,
   PiCaptureSession,
   createExperienceLearningService,
@@ -73,6 +74,7 @@ import {
   EffectivenessService,
   createRetrievalService,
   decideRecall,
+  isExplicitAnchoredIdRecall,
   evaluateReplayCandidate,
   type RetrievalService,
   type MentisServiceAccess,
@@ -137,7 +139,7 @@ function registerIntegratedTools(
   relationshipTurn: CurrentTurnMemoryEvidence,
   recentAssertions: RecentAssertionOverlay,
   recallGuard: CurrentTurnRecallGuard,
-  durableRelationships: DurableRelationshipLearningCoordinator | undefined,
+  relationshipScheduler: DeferredRelationshipLearningScheduler | undefined,
 ): void {
   const memory = services.getMemory();
   const rememberCoord =
@@ -196,7 +198,7 @@ function registerIntegratedTools(
         relationshipCandidates.length > 0 &&
         reasoner !== undefined &&
         memory !== undefined &&
-        durableRelationships !== undefined
+        relationshipScheduler !== undefined
       ) {
         const incomingId = result.id;
         const relationshipScope = getScopeContext();
@@ -224,7 +226,7 @@ function registerIntegratedTools(
           candidateIds: scheduledCandidates.map((candidate) => candidate.id),
         });
         if (durable !== undefined) {
-          durableRelationships.schedule(durable, reasoner, "normal", (resolvedId) => {
+          relationshipScheduler.schedule(durable, reasoner, "normal", (resolvedId) => {
             recentAssertions.resolve(resolvedId);
           });
         }
@@ -448,6 +450,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     maxQueueLength: 64,
   });
   let durableRelationships: DurableRelationshipLearningCoordinator | undefined;
+  let deferredRelationships: DeferredRelationshipLearningScheduler | undefined;
   let scopePlanner: ScopeSemanticPlanner | undefined;
 
   runtime.registerEmbedding({
@@ -570,6 +573,13 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
     const startup = performance.now();
     const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
+    if (storageStatus.inactiveAlternateStore !== undefined) {
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis selected ${storageStatus.mentisRoot} as the single active store. The independent store at ${storageStatus.inactiveAlternateStore.root} is inactive and was not modified.`,
+        "warning",
+      );
+    }
     if (storageStatus.legacyProjectStoreDetected) {
       notifyWhenUiAvailable(
         context,
@@ -597,6 +607,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         queue: backgroundQueue,
         owner: `pi-mentis:${process.pid}:${operationId("operation")}`,
       });
+      deferredRelationships = new DeferredRelationshipLearningScheduler(durableRelationships);
     }
 
     // Create evidence store BEFORE tool registration so coordinators
@@ -650,14 +661,14 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         relationshipTurn,
         recentAssertions,
         recallGuard,
-        durableRelationships,
+        deferredRelationships,
       );
       registered = true;
     }
 
     const startupReasoner = createPiPairwiseRelationshipReasoner(context);
     if (startupReasoner !== undefined) {
-      await durableRelationships?.recover(startupReasoner, 128, (resolvedId) => {
+      deferredRelationships?.recover(startupReasoner, 128, (resolvedId) => {
         recentAssertions.resolve(resolvedId);
       });
     }
@@ -976,6 +987,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
   pi.on("input", async (event) => {
     startupIdleWork.activity();
+    deferredRelationships?.activity();
     relationshipTurn.beginTurn();
     recallGuard.beginTurn();
     if (latestRetrievalTraceId !== undefined) {
@@ -1071,6 +1083,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   pi.on("agent_settled", async () => {
     await captureSession?.finish().catch(() => undefined);
     startupIdleWork.settled();
+    deferredRelationships?.settled();
   });
   pi.on("before_agent_start", async (event, context) => {
     const trace = new PerformanceTrace();
@@ -1309,6 +1322,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       trace.snapshot({ projectCacheHit, topicReused, taskReused });
       return;
     }
+    if (isExplicitAnchoredIdRecall(event.prompt)) {
+      trace.snapshot({ projectCacheHit, topicReused, taskReused });
+      return;
+    }
     const decision = decideRecall({
       prompt: event.prompt,
       queryCacheHit: false,
@@ -1407,8 +1424,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
   pi.on("session_shutdown", async (event) => {
     startupIdleWork.cancel();
+    deferredRelationships?.close();
     durableRelationships?.close();
-    await backgroundQueue.drain();
+    await backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true });
     // Pi reloads the extension for reload, new, resume, and fork — the
     // factory runs again so we must reset the global runtime. Only "quit"
     // keeps the same process; just dispose there.

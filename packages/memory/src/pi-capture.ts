@@ -5,6 +5,9 @@ import {
   type Clock,
   type OperationOptions,
 } from "@pi-mentis/pi-mentis-core";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { offloadToolResult } from "./offload.js";
 import type {
@@ -21,6 +24,97 @@ import type {
 
 const VERIFICATION_COMMAND =
   /(?:^|\s)(?:test|typecheck|lint|check|build|verify|go\s+test|cargo\s+test|pytest|vitest|jest|tsc)(?:\s|$)/i;
+const MAX_RECOVERED_TOOL_RESULT_BYTES = 256 * 1024 * 1024;
+const PI_BASH_OUTPUT_FILE = /^pi-bash-[a-f0-9]{16}\.log$/;
+
+function objectValue(input: unknown, key: string): unknown {
+  return typeof input === "object" && input !== null
+    ? (input as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function sourceReportedBytes(details: unknown): number | undefined {
+  const totalBytes = objectValue(objectValue(details, "truncation"), "totalBytes");
+  return typeof totalBytes === "number" && Number.isFinite(totalBytes) && totalBytes >= 0
+    ? totalBytes
+    : undefined;
+}
+
+function isInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+/**
+ * Pi's bash tool keeps the complete output in a process-owned temporary file when
+ * the text returned to extensions is truncated. Recover only that narrowly
+ * identified file; arbitrary paths supplied by tools remain untrusted data.
+ */
+export async function recoverFullToolResult(
+  envelope: ToolResultEnvelope,
+): Promise<ToolResultEnvelope> {
+  const capturedBytes = Buffer.byteLength(envelope.text, "utf8");
+  const reportedBytes = sourceReportedBytes(envelope.details);
+  const truncation = objectValue(envelope.details, "truncation");
+  const hostTruncated = objectValue(truncation, "truncated") === true;
+  const fullOutputPath = objectValue(envelope.details, "fullOutputPath");
+  if (
+    envelope.toolName !== "bash" ||
+    !hostTruncated ||
+    typeof fullOutputPath !== "string" ||
+    !PI_BASH_OUTPUT_FILE.test(path.basename(fullOutputPath))
+  ) {
+    return {
+      ...envelope,
+      captureIntegrity: hostTruncated
+        ? {
+            complete: false,
+            lossy: true,
+            ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+            capturedBytes,
+            truncationStage: "host",
+          }
+        : { complete: true, lossy: false, capturedBytes },
+    };
+  }
+  try {
+    const [temporaryRoot, resolved] = await Promise.all([
+      realpath(tmpdir()),
+      realpath(fullOutputPath),
+    ]);
+    if (!isInside(temporaryRoot, resolved)) throw new Error("Pi bash output is outside tmpdir");
+    const metadata = await stat(resolved);
+    if (!metadata.isFile() || metadata.size > MAX_RECOVERED_TOOL_RESULT_BYTES) {
+      throw new Error("Pi bash output is not a bounded regular file");
+    }
+    const text = await readFile(resolved, "utf8");
+    const recoveredBytes = Buffer.byteLength(text, "utf8");
+    return {
+      ...envelope,
+      text,
+      captureIntegrity: {
+        complete: reportedBytes === undefined || recoveredBytes >= reportedBytes,
+        lossy: reportedBytes !== undefined && recoveredBytes < reportedBytes,
+        ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+        capturedBytes: recoveredBytes,
+        ...(reportedBytes !== undefined && recoveredBytes < reportedBytes
+          ? { truncationStage: "host" as const }
+          : {}),
+      },
+    };
+  } catch {
+    return {
+      ...envelope,
+      captureIntegrity: {
+        complete: false,
+        lossy: true,
+        ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+        capturedBytes,
+        truncationStage: "host",
+      },
+    };
+  }
+}
 
 export interface StartPiEpisodeInput {
   readonly goal: string;
@@ -256,6 +350,7 @@ export class PiCaptureSession {
   ): Promise<OffloadedToolResult | undefined> {
     const episode = this.#episode;
     if (episode === undefined) return undefined;
+    const recoveredEnvelope = await recoverFullToolResult(envelope);
     const started = this.#tools.get(envelope.toolCallId);
     const eventId = stableHash(
       "pi-event:v1",
@@ -269,7 +364,7 @@ export class PiCaptureSession {
       episode.id,
       eventId,
       {
-        ...envelope,
+        ...recoveredEnvelope,
         ...(started?.startedAt === undefined ? {} : { startedAt: started.startedAt }),
       },
       this.#policy,
@@ -280,7 +375,7 @@ export class PiCaptureSession {
         input: envelope.input,
         result: result.symbolic,
         tokenAccounting: result.tokenAccounting,
-        ...(result.mode === "inline" ? { inlineText: envelope.text } : {}),
+        ...(result.mode === "inline" ? { inlineText: recoveredEnvelope.text } : {}),
       },
       envelope.completedAt,
       envelope.toolCallId,

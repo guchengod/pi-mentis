@@ -301,6 +301,7 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
       relativePath,
       state: "pending",
       chunks: [],
+      ...(input.captureIntegrity === undefined ? {} : { captureIntegrity: input.captureIntegrity }),
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,

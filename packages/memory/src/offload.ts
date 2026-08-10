@@ -69,11 +69,11 @@ export function summarizeToolResult(
       ? undefined
       : Math.max(0, envelope.completedAt - envelope.startedAt);
   const exitCode = detailNumber(envelope.details, "exitCode");
-  const mode = classifyToolResult(bytes, policy);
-  const isInline = mode === "inline";
-  const captureIntegrity: ArtifactCaptureIntegrity = isInline
-    ? { complete: true, lossy: false, capturedBytes: bytes }
-    : { complete: false, lossy: true, capturedBytes: bytes, truncationStage: "host" };
+  const captureIntegrity: ArtifactCaptureIntegrity = envelope.captureIntegrity ?? {
+    complete: true,
+    lossy: false,
+    capturedBytes: bytes,
+  };
   return {
     tool: envelope.toolName,
     status: envelope.isError ? "failed" : "completed",
@@ -85,8 +85,8 @@ export function summarizeToolResult(
     keyErrors,
     files: pathsFrom(envelope.input, envelope.text),
     ...(artifact === undefined ? {} : { artifactId: artifact.id }),
-    truncated: bytes > policy.inlineMaxBytes,
-    originalBytes: bytes,
+    truncated: bytes > policy.inlineMaxBytes || captureIntegrity.lossy,
+    originalBytes: captureIntegrity.sourceReportedBytes ?? bytes,
     ...(bytes <= policy.inlineMaxBytes
       ? {}
       : { preview: Buffer.from(envelope.text).subarray(0, policy.previewBytes).toString("utf8") }),
@@ -117,6 +117,15 @@ export async function offloadToolResult(
     toolCallId: envelope.toolCallId,
     mediaType: "text/plain; charset=utf-8",
     content: envelope.text,
+    captureIntegrity: {
+      complete: envelope.captureIntegrity?.complete ?? true,
+      lossy: envelope.captureIntegrity?.lossy ?? false,
+      capturedBytes: envelope.captureIntegrity?.capturedBytes ?? bytes,
+      storedBytes: bytes,
+      ...(envelope.captureIntegrity?.truncationStage === undefined
+        ? {}
+        : { truncationStage: envelope.captureIntegrity.truncationStage }),
+    },
   });
   const symbolic = summarizeToolResult(envelope, policy, artifact);
   const header = `<pi-mentis-tool-result artifact_id="${artifact.id}" mode="${mode}">\n${JSON.stringify(symbolic, null, 2)}\n</pi-mentis-tool-result>`;

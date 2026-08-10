@@ -3,6 +3,8 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { resolveStorageRoot } from "../../packages/core/dist/index.js";
+
 import { installIsolated } from "./build-install.mjs";
 import { PiAcceptanceDriver } from "./pi-driver.mjs";
 import { PiRpcAcceptanceDriver } from "./rpc-driver.mjs";
@@ -190,7 +192,9 @@ export async function runCompactionBranchScenario({
   environment,
 }) {
   const started = performance.now();
-  const zvecRoot = path.join(directories.state, "compaction-zvec");
+  const zvecRoot = resolveStorageRoot({
+    environment: { ...process.env, PI_CODING_AGENT_DIR: piHome },
+  }).zvecRoot;
   await configureWorkspace(fixtures.repoA, zvecRoot, runId);
   const rpc = new PiRpcAcceptanceDriver(
     rpcOptions({
@@ -204,6 +208,8 @@ export async function runCompactionBranchScenario({
     }),
   );
   let restartRpc;
+  let artifactQueryRpc;
+  let capturedArtifactId;
   let passed = false;
   let error;
   const temporaryArtifactPaths = [];
@@ -221,19 +227,64 @@ export async function runCompactionBranchScenario({
     await rpc.start();
     await rpc.command({ type: "set_auto_compaction", enabled: false }, 30_000);
     await rpc.prompt(`记住本会话标识 ${runId}，只回复收到。`);
-    const bashResults = [];
+    const artifactTurn = await rpc.prompt(
+      "请执行 large-log.mjs 并在完成后只回复 log-ok，不要修改文件或重定向输出。",
+      5 * 60_000,
+    );
+    const artifactEnd = artifactTurn.events.find(
+      (event) =>
+        event.type === "tool_execution_end" &&
+        event.toolName === "bash" &&
+        typeof event.result?.details?.piMentis?.symbolic?.artifactId === "string",
+    );
+    const artifactDetails = artifactEnd?.result?.details;
+    const originalArtifactDetails = artifactDetails?.original ?? artifactDetails;
+    const symbolicArtifact = artifactDetails?.piMentis?.symbolic;
+    const fullArtifactOutputPath = originalArtifactDetails?.fullOutputPath;
+    capturedArtifactId = symbolicArtifact?.artifactId;
+    const artifactCapturePassed =
+      artifactTurn.response.success === true &&
+      artifactEnd?.result?.isError !== true &&
+      originalArtifactDetails?.truncation?.truncated === true &&
+      typeof fullArtifactOutputPath === "string" &&
+      typeof capturedArtifactId === "string" &&
+      symbolicArtifact?.captureIntegrity?.complete === true &&
+      symbolicArtifact?.captureIntegrity?.lossy === false &&
+      symbolicArtifact?.originalBytes >= 10 * 1024 * 1024;
+    if (typeof fullArtifactOutputPath === "string") {
+      temporaryArtifactPaths.push(fullArtifactOutputPath);
+      const copiedPath = path.join(directories.artifacts, path.basename(fullArtifactOutputPath));
+      await cp(fullArtifactOutputPath, copiedPath, { preserveTimestamps: true });
+      artifactEvidence.push({
+        source: "mentis-hook",
+        artifactId: capturedArtifactId,
+        captureIntegrity: symbolicArtifact?.captureIntegrity,
+        originalPath: fullArtifactOutputPath,
+        copiedPath,
+        byteLength: (await stat(fullArtifactOutputPath)).size,
+        sha256: await hashFile(fullArtifactOutputPath),
+      });
+    }
+    // Mentis correctly keeps the agent-visible context small, so use Pi's
+    // direct native bash RPC only as a separate compaction fixture. Product
+    // artifact capture was already asserted through the real agent tool path.
+    const nativeCompactionResults = [];
     for (let index = 0; index < 4; index++) {
-      const bash = await rpc.command(
-        { type: "bash", command: `node large-log.mjs # compaction sample ${index + 1}` },
+      const native = await rpc.command(
+        { type: "bash", command: `node large-log.mjs # native compaction ${index + 1}` },
         2 * 60_000,
       );
-      bashResults.push(bash);
-      const fullOutputPath = bash.data?.fullOutputPath;
+      nativeCompactionResults.push(native);
+      const fullOutputPath = native.data?.fullOutputPath;
       if (typeof fullOutputPath === "string") {
         temporaryArtifactPaths.push(fullOutputPath);
-        const copiedPath = path.join(directories.artifacts, path.basename(fullOutputPath));
+        const copiedPath = path.join(
+          directories.artifacts,
+          `native-${index + 1}-${path.basename(fullOutputPath)}`,
+        );
         await cp(fullOutputPath, copiedPath, { preserveTimestamps: true });
         artifactEvidence.push({
+          source: "native-compaction-fixture",
           originalPath: fullOutputPath,
           copiedPath,
           byteLength: (await stat(fullOutputPath)).size,
@@ -241,7 +292,6 @@ export async function runCompactionBranchScenario({
         });
       }
     }
-    await rpc.prompt("只说明刚才日志中的文件和行号，不要修改文件。");
     const compact = await rpc.command(
       { type: "compact", customInstructions: `保留 ${runId}、构建错误、文件和证据来源。` },
       5 * 60_000,
@@ -257,11 +307,12 @@ export async function runCompactionBranchScenario({
     const compactSerialized = JSON.stringify(compactEntries.data);
     const branchSerialized = JSON.stringify(branchEntries.data);
     passed =
-      bashResults.every(
-        (bash) =>
-          bash.success === true &&
-          bash.data?.truncated === true &&
-          typeof bash.data?.fullOutputPath === "string",
+      artifactCapturePassed &&
+      nativeCompactionResults.every(
+        (native) =>
+          native.success === true &&
+          native.data?.truncated === true &&
+          typeof native.data?.fullOutputPath === "string",
       ) &&
       compact.success === true &&
       typeof compact.data?.summary === "string" &&
@@ -282,6 +333,7 @@ export async function runCompactionBranchScenario({
       environment,
       tools: ["bash", "commit_memory", "search_memory"],
     });
+    restartOptions.sessionDir = rpc.options.sessionDir;
     if (typeof state.data?.sessionId === "string") restartOptions.sessionId = state.data.sessionId;
     restartRpc = new PiRpcAcceptanceDriver(restartOptions);
     await restartRpc.start();
@@ -293,11 +345,46 @@ export async function runCompactionBranchScenario({
       restartedSerialized.includes(runId) &&
       artifactEvidence.every((artifact) => artifact.byteLength >= 10 * 1024 * 1024);
     if (!passed) error = "Compaction, branch, or full artifact did not survive Pi restart";
+    await restartRpc.stop();
+    if (typeof capturedArtifactId !== "string") throw new Error("No captured artifact ID");
+    artifactQueryRpc = new PiRpcAcceptanceDriver(
+      rpcOptions({
+        piHome,
+        workspace: fixtures.repoA,
+        directories,
+        runId,
+        label: "artifact-query",
+        environment,
+        tools: ["search_memory"],
+      }),
+    );
+    await artifactQueryRpc.start();
+    const artifactQuery = await artifactQueryRpc.prompt(
+      `这是一个全新会话。请实际使用 Artifact ID ${capturedArtifactId} 在该 ID 内查询“BUILD_ERROR src/index.ts 文件和行号”，只根据查询结果回答。`,
+    );
+    const artifactQueryStart = artifactQuery.events.find(
+      (event) =>
+        event.type === "tool_execution_start" &&
+        event.toolName === "search_memory" &&
+        event.args?.id === capturedArtifactId,
+    );
+    const artifactQueryEnd = artifactQuery.events.find(
+      (event) =>
+        event.type === "tool_execution_end" &&
+        event.toolName === "search_memory" &&
+        event.toolCallId === artifactQueryStart?.toolCallId,
+    );
+    passed =
+      passed &&
+      artifactQueryStart?.args?.query?.includes("BUILD_ERROR") === true &&
+      JSON.stringify(artifactQueryEnd?.result?.content ?? []).includes("src/index.ts:42");
+    if (!passed) error = "Artifact capture, anchored query, compaction, fork, or restart failed";
   } catch (caught) {
     error = caught instanceof Error ? caught.message : String(caught);
   } finally {
     await rpc.stop().catch(() => undefined);
     await restartRpc?.stop().catch(() => undefined);
+    await artifactQueryRpc?.stop().catch(() => undefined);
     if (settingsExisted) await writeFile(settingsFile, settingsSnapshot, { mode: 0o600 });
     else await rm(settingsFile, { force: true });
     await writeJson(
@@ -324,7 +411,13 @@ export async function runCompactionBranchScenario({
     passed ? "PASS" : "FAIL",
     started,
     {
-      evidence: rpc.options.evidenceFile,
+      evidence: [
+        rpc.options.evidenceFile,
+        restartRpc?.options.evidenceFile,
+        artifactQueryRpc?.options.evidenceFile,
+      ]
+        .filter(Boolean)
+        .join("; "),
       ...(passed ? {} : { error: error ?? "compaction Zvec invariants failed" }),
     },
   );

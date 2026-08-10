@@ -28,6 +28,26 @@ export interface RecallSignals {
   readonly isCommand: boolean;
 }
 
+const PUBLIC_MEMORY_ID = "[a-f0-9]{64}";
+
+/**
+ * Exact public-ID lookups should use the anchored search_memory path. Running a
+ * broad semantic auto-recall first adds latency and can time out without adding
+ * evidence to an already precise request.
+ */
+export function isExplicitAnchoredIdRecall(prompt: string): boolean {
+  return (
+    new RegExp(
+      `(?:\\bmemory\\b|\\bartifact\\b|记忆|工件|证据)[^\\n]{0,32}(?:\\bid\\b|编号)[^\\n]{0,8}\\b${PUBLIC_MEMORY_ID}\\b`,
+      "i",
+    ).test(prompt) ||
+    new RegExp(
+      `(?:\\bid\\b|编号)[^\\n]{0,8}\\b${PUBLIC_MEMORY_ID}\\b[^\\n]{0,32}(?:\\bmemory\\b|\\bartifact\\b|记忆|工件|证据)`,
+      "i",
+    ).test(prompt)
+  );
+}
+
 /**
  * Structural fast-recall gate. It deliberately does not classify the prompt:
  * every non-command, non-trivial input gets the same memory lane and budget.

@@ -195,7 +195,11 @@ runner.bindCore(
   },
   {
     getModel: () => activeModel,
-    getScopedModels: () => (activeModel === undefined ? [] : [activeModel]),
+    // Pi 0.84 exposes scoped models as { model, thinkingLevel } entries rather
+    // than bare model descriptors. Keep the driver context shape identical to
+    // the interactive runtime so extensions can safely inspect model.provider.
+    getScopedModels: () =>
+      activeModel === undefined ? [] : [{ model: activeModel, thinkingLevel: "off" }],
     isIdle: () => true,
     isProjectTrusted: () => true,
     getSignal: () => undefined,
@@ -446,6 +450,24 @@ try {
       continue;
     }
     throw new Error(`Unknown Pi driver operation: ${operation.kind}`);
+  }
+  // Direct tool scenarios do not naturally pass through Pi's agent loop. Emit the
+  // lifecycle event that production uses to arm deferred relationship learning,
+  // then keep the process alive until the first real model request settles. Without
+  // this, session_shutdown cancels the deferred scheduler before pairwise reasoning
+  // can start, making the live relationship suite report a false harness failure.
+  if (request.model !== undefined) {
+    await runner.emit({ type: "agent_settled" });
+    const settleDeadline = Date.now() + 90_000;
+    while (Date.now() < settleDeadline && modelRequests.length === 0) {
+      await delay(100);
+    }
+    if (modelRequests.length > 0) {
+      const quietDeadline = Date.now() + 1_500;
+      while (Date.now() < quietDeadline) {
+        await delay(100);
+      }
+    }
   }
   await runner.emit({ type: "session_shutdown", reason: "quit" });
   shutdownEmitted = true;

@@ -29,6 +29,7 @@ import {
   ContextStateService,
   DefaultRememberCoordinator,
   CurrentTurnMemoryEvidence,
+  DeferredRelationshipLearningScheduler,
   DurableRelationshipLearningCoordinator,
   MentisBackgroundQueue,
   PiCaptureSession,
@@ -109,7 +110,7 @@ function registerMemoryTools(
   relationshipTurn: CurrentTurnMemoryEvidence,
   recentAssertions: RecentAssertionOverlay,
   recallGuard: CurrentTurnRecallGuard,
-  durableRelationships: DurableRelationshipLearningCoordinator | undefined,
+  relationshipScheduler: DeferredRelationshipLearningScheduler | undefined,
 ): void {
   // Build coordinators and register shared tool pair.
   const memory = services.getMemory();
@@ -170,7 +171,7 @@ function registerMemoryTools(
         relationshipCandidates.length > 0 &&
         reasoner !== undefined &&
         memory !== undefined &&
-        durableRelationships !== undefined
+        relationshipScheduler !== undefined
       ) {
         const incomingId = result.id;
         const relationshipScope = getScopeContext();
@@ -198,7 +199,7 @@ function registerMemoryTools(
           candidateIds: scheduledCandidates.map((candidate) => candidate.id),
         });
         if (durable !== undefined) {
-          durableRelationships.schedule(durable, reasoner, "normal", (resolvedId) => {
+          relationshipScheduler.schedule(durable, reasoner, "normal", (resolvedId) => {
             recentAssertions.resolve(resolvedId);
           });
         }
@@ -301,6 +302,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let policy: AdaptivePolicyService | undefined;
   let latestRetrievalTraceId: string | undefined;
   let durableRelationships: DurableRelationshipLearningCoordinator | undefined;
+  let deferredRelationships: DeferredRelationshipLearningScheduler | undefined;
   runtime.registerEmbedding({
     id: "siliconflow",
     version: "1.0.0",
@@ -397,6 +399,13 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   pi.on("session_start", async (event, context) => {
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
     const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
+    if (storageStatus.inactiveAlternateStore !== undefined) {
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis selected ${storageStatus.mentisRoot} as the single active store. The independent store at ${storageStatus.inactiveAlternateStore.root} is inactive and was not modified.`,
+        "warning",
+      );
+    }
     if (storageStatus.legacyProjectStoreDetected) {
       notifyWhenUiAvailable(
         context,
@@ -422,6 +431,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         queue: backgroundQueue,
         owner: `pi-mentis-memory:${process.pid}:${operationId("operation")}`,
       });
+      deferredRelationships = new DeferredRelationshipLearningScheduler(durableRelationships);
     }
 
     // Create evidence store BEFORE tool registration so coordinators
@@ -453,7 +463,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         relationshipTurn,
         recentAssertions,
         recallGuard,
-        durableRelationships,
+        deferredRelationships,
       );
       pi.registerCommand("mentis", {
         description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
@@ -512,7 +522,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     }
     const startupReasoner = createPiPairwiseRelationshipReasoner(context);
     if (startupReasoner !== undefined) {
-      await durableRelationships?.recover(startupReasoner, 128, (resolvedId) => {
+      deferredRelationships?.recover(startupReasoner, 128, (resolvedId) => {
         recentAssertions.resolve(resolvedId);
       });
     }
@@ -716,6 +726,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     };
   });
   pi.on("input", async (event) => {
+    deferredRelationships?.activity();
     relationshipTurn.beginTurn();
     recallGuard.beginTurn();
     if (latestRetrievalTraceId !== undefined) {
@@ -993,10 +1004,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   });
   pi.on("agent_settled", async () => {
     await captureSession?.finish().catch(() => undefined);
+    deferredRelationships?.settled();
   });
   pi.on("session_shutdown", async (event) => {
+    deferredRelationships?.close();
     durableRelationships?.close();
-    await backgroundQueue.drain();
+    await backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true });
     if (event.reason === "quit") {
       await runtime.dispose();
     } else {

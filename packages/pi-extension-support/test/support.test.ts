@@ -97,8 +97,6 @@ describe("Pi extension support", () => {
       {
         id: "old",
         status: "current",
-        projection: "shadowed_by_pending",
-        shadowedByPendingId: "new",
       },
     ]);
     expect(persistent.hits[0]).not.toHaveProperty("projection");
@@ -208,7 +206,7 @@ describe("Pi extension support", () => {
       provisionalLatestId: "new",
       hits: [
         { id: "new", projection: "provisional_latest" },
-        { id: "old", projection: "shadowed_by_pending" },
+        { id: "old", status: "current" },
       ],
     });
   });
@@ -308,6 +306,43 @@ describe("Pi extension support", () => {
       incomingHints: { valueHint: "51842" },
     });
     expect(complete).toHaveBeenCalledOnce();
+  });
+
+  it("aborts pairwise model work when relationship shutdown is requested", async () => {
+    let observedSignal: AbortSignal | undefined;
+    const complete = vi.fn(
+      async (
+        _model: unknown,
+        _request: unknown,
+        options: { readonly signal: AbortSignal },
+      ): Promise<never> => {
+        observedSignal = options.signal;
+        return await new Promise<never>((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(new Error("pairwise aborted")), {
+            once: true,
+          });
+        });
+      },
+    );
+    const reasoner = createPiPairwiseRelationshipReasoner({
+      model: { provider: "test", id: "test" },
+      modelRegistry: { complete },
+    } as unknown as Parameters<typeof createPiPairwiseRelationshipReasoner>[0]);
+    const controller = new AbortController();
+    const judgment = reasoner?.judge(
+      "default port is now 51842",
+      {
+        id: "old",
+        content: "default port is 46321",
+        status: "current",
+        match: "semantic",
+      },
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(judgment).rejects.toThrow("pairwise aborted");
+    expect(observedSignal?.aborted).toBe(true);
   });
 
   it("accepts only exact public memory IDs", () => {

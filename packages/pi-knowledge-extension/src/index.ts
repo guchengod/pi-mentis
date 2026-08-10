@@ -473,6 +473,13 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
   pi.on("session_start", async (_event, context) => {
     tuiContext = context;
     const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
+    if (storageStatus.inactiveAlternateStore !== undefined) {
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis selected ${storageStatus.mentisRoot} as the single active store. The independent store at ${storageStatus.inactiveAlternateStore.root} is inactive and was not modified.`,
+        "warning",
+      );
+    }
     if (storageStatus.legacyProjectStoreDetected) {
       notifyWhenUiAvailable(
         context,
