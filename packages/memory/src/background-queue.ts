@@ -16,11 +16,19 @@ export interface MentisBackgroundQueueOptions {
   readonly logError?: (err: unknown, job: MentisBackgroundJob) => void;
 }
 
+export interface MentisBackgroundDrainOptions {
+  /** Maximum time to wait for already-running work. Omit for an unbounded drain. */
+  readonly timeoutMs?: number;
+  /** Drop queued work instead of starting it. Durable jobs remain recoverable from storage. */
+  readonly cancelPending?: boolean;
+}
+
 export class MentisBackgroundQueue {
   readonly #queue: MentisBackgroundJob[] = [];
   readonly #maxConcurrency: number;
   readonly #maxQueueLength: number;
   readonly #logError: (err: unknown, job: MentisBackgroundJob) => void;
+  readonly #active = new Set<Promise<void>>();
   #running = 0;
   #draining = false;
   #drainPromise: Promise<void> | undefined;
@@ -55,34 +63,53 @@ export class MentisBackgroundQueue {
     return this.#running;
   }
 
-  async drain(): Promise<void> {
+  async drain(options: MentisBackgroundDrainOptions = {}): Promise<boolean> {
     this.#draining = true;
-    this.#drainPromise ??= this.#drainAll();
-    return this.#drainPromise;
+    this.#drainPromise ??= this.#drainAll(options.cancelPending ?? false);
+    if (options.timeoutMs === undefined) {
+      await this.#drainPromise;
+      return true;
+    }
+    const timeoutMs = Math.max(0, options.timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.#drainPromise.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   #drain(): void {
     while (this.#running < this.#maxConcurrency && this.#queue.length > 0 && !this.#draining) {
       const job = this.#queue.shift();
       if (job === undefined) break;
-      this.#running += 1;
-      job
-        .execute()
-        .catch((err) => this.#logError(err, job))
-        .finally(() => {
-          this.#running -= 1;
-          if (!this.#draining) this.#drain();
-        });
+      this.#start(job);
     }
   }
 
-  async #drainAll(): Promise<void> {
+  #start(job: MentisBackgroundJob): Promise<void> {
+    this.#running += 1;
+    const execution = job
+      .execute()
+      .catch((err) => this.#logError(err, job))
+      .finally(() => {
+        this.#active.delete(execution);
+        this.#running -= 1;
+        if (!this.#draining) this.#drain();
+      });
+    this.#active.add(execution);
+    return execution;
+  }
+
+  async #drainAll(cancelPending: boolean): Promise<void> {
     const remaining = [...this.#queue];
     this.#queue.length = 0;
-    const results = remaining.map((job) => job.execute().catch((err) => this.#logError(err, job)));
-    await Promise.allSettled(results);
-    while (this.#running > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
+    const started = cancelPending ? [] : remaining.map((job) => this.#start(job));
+    await Promise.allSettled([...this.#active, ...started]);
   }
 }

@@ -13,7 +13,10 @@ import { StorageRootMigrationRequiredError, StorageSplitBrainError } from "./err
  * Resolution order:
  *   1. PI_MENTIS_HOME env var (absolute path, test override)
  *   2. process.env["PI_CODING_AGENT_DIR"] (explicit Pi profile)
- *   3. ~/.pi/agent (Pi's default agent profile)
+ *   3. ~/.pi/.pi-mentis (stable default-profile storage)
+ *
+ * A store created by 0.1.41 at ~/.pi/agent/.pi-mentis remains compatible
+ * when it is the only existing default-profile store.
  */
 export interface StorageRootResolutionOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -37,7 +40,10 @@ export interface StorageRootResolution {
   readonly isExplicitOverride: boolean;
   readonly isDefaultProfile: boolean;
   readonly canonicalEvidence: StorageRootEvidence;
-  readonly legacyHomeEvidence?: StorageRootEvidence;
+  readonly selectionStrategy:
+    "explicit-override" | "explicit-profile-root" | "default-home-root" | "agent-root-compat";
+  readonly inactiveAlternateEvidence?: StorageRootEvidence;
+  readonly multipleStoresDetected: boolean;
   readonly migrationRequired: boolean;
   readonly splitBrainDetected: boolean;
 }
@@ -105,6 +111,8 @@ export function resolveStorageRoot(
       isExplicitOverride: true,
       isDefaultProfile: false,
       canonicalEvidence: storageEvidence(resolved),
+      selectionStrategy: "explicit-override",
+      multipleStoresDetected: false,
       migrationRequired: false,
       splitBrainDetected: false,
     };
@@ -112,11 +120,37 @@ export function resolveStorageRoot(
 
   // 2. Standard Pi home
   const pi = resolvePiHome(environment, homeDir);
-  const mentisRoot = path.join(pi.path, ".pi-mentis");
-  const canonicalEvidence = storageEvidence(mentisRoot);
-  const legacyHomeRoot = path.join(homeDir, ".pi", ".pi-mentis");
-  const legacyHomeEvidence = pi.isDefaultProfile ? storageEvidence(legacyHomeRoot) : undefined;
-  const migrationRequired = legacyHomeEvidence?.detected ?? false;
+  if (!pi.isDefaultProfile) {
+    const mentisRoot = path.join(pi.path, ".pi-mentis");
+    return {
+      piHome: pi.path,
+      mentisRoot,
+      zvecRoot: path.join(mentisRoot, "zvec"),
+      source: pi.source,
+      isExplicitOverride: false,
+      isDefaultProfile: false,
+      canonicalEvidence: storageEvidence(mentisRoot),
+      selectionStrategy: "explicit-profile-root",
+      multipleStoresDetected: false,
+      migrationRequired: false,
+      splitBrainDetected: false,
+    };
+  }
+
+  // The default profile historically stored Mentis beside `agent/`. Release
+  // 0.1.41 briefly selected `agent/.pi-mentis`; retain that location only when
+  // it is the sole existing store. If both exist, the long-lived home root wins
+  // deterministically and the alternate is reported as inactive. This keeps
+  // every Pi mode on one active root without silently overwriting either store.
+  const homeRoot = path.join(homeDir, ".pi", ".pi-mentis");
+  const agentRoot = path.join(pi.path, ".pi-mentis");
+  const homeEvidence = storageEvidence(homeRoot);
+  const agentEvidence = storageEvidence(agentRoot);
+  const selectAgentCompatibilityRoot = !homeEvidence.detected && agentEvidence.detected;
+  const mentisRoot = selectAgentCompatibilityRoot ? agentRoot : homeRoot;
+  const canonicalEvidence = selectAgentCompatibilityRoot ? agentEvidence : homeEvidence;
+  const alternateEvidence = selectAgentCompatibilityRoot ? homeEvidence : agentEvidence;
+  const multipleStoresDetected = homeEvidence.detected && agentEvidence.detected;
   return {
     piHome: pi.path,
     mentisRoot,
@@ -125,9 +159,13 @@ export function resolveStorageRoot(
     isExplicitOverride: false,
     isDefaultProfile: pi.isDefaultProfile,
     canonicalEvidence,
-    ...(legacyHomeEvidence === undefined ? {} : { legacyHomeEvidence }),
-    migrationRequired,
-    splitBrainDetected: migrationRequired && canonicalEvidence.detected,
+    selectionStrategy: selectAgentCompatibilityRoot ? "agent-root-compat" : "default-home-root",
+    ...(alternateEvidence.detected ? { inactiveAlternateEvidence: alternateEvidence } : {}),
+    multipleStoresDetected,
+    migrationRequired: false,
+    // Only the selected root is active. A second physical store is surfaced as
+    // inactive evidence instead of disabling the entire memory extension.
+    splitBrainDetected: false,
   };
 }
 
@@ -137,20 +175,20 @@ export function resolveStorageRoot(
  * this branch.
  */
 export function assertStorageRootReady(root: StorageRootResolution): void {
-  if (!root.migrationRequired) return;
+  if (!root.migrationRequired && !root.splitBrainDetected) return;
   const ErrorType = root.splitBrainDetected
     ? StorageSplitBrainError
     : StorageRootMigrationRequiredError;
   throw new ErrorType(
     root.splitBrainDetected
-      ? `[STORAGE_SPLIT_BRAIN] Pi Mentis found independent stores at ${root.mentisRoot} and ${root.legacyHomeEvidence?.root}. Refusing to choose one silently.`
-      : `[STORAGE_ROOT_MIGRATION_REQUIRED] Pi Mentis found a legacy store at ${root.legacyHomeEvidence?.root}. Migrate it to ${root.mentisRoot} before using the new canonical root.`,
+      ? `[STORAGE_SPLIT_BRAIN] Pi Mentis could not select one active store for ${root.mentisRoot}.`
+      : `[STORAGE_ROOT_MIGRATION_REQUIRED] Pi Mentis storage at ${root.mentisRoot} requires migration.`,
     {
       operation: "storage-root-resolution",
       retryable: false,
       details: {
         canonicalRoot: root.mentisRoot,
-        legacyRoot: root.legacyHomeEvidence?.root,
+        legacyRoot: root.inactiveAlternateEvidence?.root,
         splitBrainDetected: root.splitBrainDetected,
         migrationRequired: root.migrationRequired,
       },
@@ -219,7 +257,9 @@ export interface StorageStatus {
   readonly isDefaultProfile: boolean;
   readonly migrationRequired: boolean;
   readonly splitBrainDetected: boolean;
-  readonly legacyHomeStore?: StorageRootEvidence;
+  readonly selectionStrategy: StorageRootResolution["selectionStrategy"];
+  readonly multipleStoresDetected: boolean;
+  readonly inactiveAlternateStore?: StorageRootEvidence;
   readonly legacyProjectStoreDetected: boolean;
   readonly legacyProjectStorePath?: string;
   readonly legacyProjectStore?: StorageRootEvidence;
@@ -243,7 +283,11 @@ export function getStorageStatus(
     isDefaultProfile: root.isDefaultProfile,
     migrationRequired: root.migrationRequired,
     splitBrainDetected: root.splitBrainDetected,
-    ...(root.legacyHomeEvidence === undefined ? {} : { legacyHomeStore: root.legacyHomeEvidence }),
+    selectionStrategy: root.selectionStrategy,
+    multipleStoresDetected: root.multipleStoresDetected,
+    ...(root.inactiveAlternateEvidence === undefined
+      ? {}
+      : { inactiveAlternateStore: root.inactiveAlternateEvidence }),
     legacyProjectStoreDetected: legacy.detected,
     ...(legacy.detected ? { legacyProjectStorePath: legacy.path } : {}),
     ...(legacy.detected ? { legacyProjectStore: legacy.evidence } : {}),

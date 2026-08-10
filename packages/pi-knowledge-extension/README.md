@@ -32,7 +32,7 @@ pi
 
 ## 配置
 
-默认从 `~/.pi/agent/.pi-mentis/config.json` 读取全局 profile 配置，不随启动目录或
+默认从 `~/.pi/.pi-mentis/config.json` 读取全局 profile 配置，不随启动目录或
 Workspace 变化。显式 Pi profile 使用 `<PI_CODING_AGENT_DIR>/.pi-mentis`；
 `PI_MENTIS_HOME` 可指定隔离的绝对路径。所有字段可省略：
 
@@ -45,7 +45,7 @@ Workspace 变化。显式 Pi profile 使用 `<PI_CODING_AGENT_DIR>/.pi-mentis`�
       "rerank": { "model": "BAAI/bge-reranker-v2-m3", "maxInputTokens": 8192 }
     }
   },
-  "storage": { "rootDir": "/Users/your-name/.pi/agent/.pi-mentis/zvec" }
+  "storage": { "rootDir": "/Users/your-name/.pi/.pi-mentis/zvec" }
 }
 ```
 
@@ -74,8 +74,9 @@ API Key 只放环境变量。Embedding 模型或维度变化时需先备份并�
 
 ## 存储与安全
 
-- 默认数据目录 `~/.pi/agent/.pi-mentis/zvec`；同一存储目录只允许一个写入进程。
-- 发现旧 `~/.pi/.pi-mentis` 与 canonical root 并存时会停止初始化，不会静默选择或覆盖。
+- 默认数据目录 `~/.pi/.pi-mentis/zvec`；同一存储目录只允许一个写入进程。
+- 仅存在 `~/.pi/agent/.pi-mentis` 时会兼容使用；两套目录并存时固定选择稳定的
+  home root，另一套只报告为 inactive，不会自动合并、覆盖或删除。
 - API Key 不进入存储或日志；私网 URL、XML 实体、Zip Slip 和压缩炸弹会被拒绝。
 - 备份前停止 Pi，整体复制存储目录。
 

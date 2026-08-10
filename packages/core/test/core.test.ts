@@ -262,7 +262,7 @@ describe("single global storage root", () => {
         homeDir,
       });
 
-      expect(implicit.mentisRoot).toBe(path.join(defaultAgentDir, ".pi-mentis"));
+      expect(implicit.mentisRoot).toBe(path.join(homeDir, ".pi", ".pi-mentis"));
       expect(explicit.mentisRoot).toBe(implicit.mentisRoot);
       expect(implicit.source).toBe("pi-default-agent-dir");
       expect(explicit.source).toBe("pi-agent-dir");
@@ -297,28 +297,29 @@ describe("single global storage root", () => {
     }
   });
 
-  it("fails closed when a default-profile legacy root requires migration", async () => {
+  it("selects one compatible default-profile root without disabling the extension", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-legacy-"));
     try {
       const homeDir = path.join(root, "home");
-      const legacyRoot = path.join(homeDir, ".pi", ".pi-mentis");
-      await mkdir(legacyRoot, { recursive: true });
-      await writeFile(path.join(legacyRoot, "config.json"), "{}\n");
+      const stableRoot = path.join(homeDir, ".pi", ".pi-mentis");
+      const agentCompatibilityRoot = path.join(homeDir, ".pi", "agent", ".pi-mentis");
 
-      const migration = resolveStorageRoot({ environment: {}, homeDir });
-      expect(migration.migrationRequired).toBe(true);
-      expect(migration.splitBrainDetected).toBe(false);
-      expect(() => assertStorageRootReady(migration)).toThrowError(
-        expect.objectContaining({ code: "STORAGE_ROOT_MIGRATION_REQUIRED" }),
-      );
+      await mkdir(agentCompatibilityRoot, { recursive: true });
+      await writeFile(path.join(agentCompatibilityRoot, "config.json"), "{}\n");
+      const compatibility = resolveStorageRoot({ environment: {}, homeDir });
+      expect(compatibility.mentisRoot).toBe(agentCompatibilityRoot);
+      expect(compatibility.selectionStrategy).toBe("agent-root-compat");
+      expect(() => assertStorageRootReady(compatibility)).not.toThrow();
 
-      await mkdir(migration.mentisRoot, { recursive: true });
-      await writeFile(path.join(migration.mentisRoot, "config.json"), "{}\n");
-      const splitBrain = resolveStorageRoot({ environment: {}, homeDir });
-      expect(splitBrain.splitBrainDetected).toBe(true);
-      expect(() => assertStorageRootReady(splitBrain)).toThrowError(
-        expect.objectContaining({ code: "STORAGE_SPLIT_BRAIN" }),
-      );
+      await mkdir(stableRoot, { recursive: true });
+      await writeFile(path.join(stableRoot, "config.json"), "{}\n");
+      const deterministic = resolveStorageRoot({ environment: {}, homeDir });
+      expect(deterministic.mentisRoot).toBe(stableRoot);
+      expect(deterministic.selectionStrategy).toBe("default-home-root");
+      expect(deterministic.multipleStoresDetected).toBe(true);
+      expect(deterministic.splitBrainDetected).toBe(false);
+      expect(deterministic.inactiveAlternateEvidence?.root).toBe(agentCompatibilityRoot);
+      expect(() => assertStorageRootReady(deterministic)).not.toThrow();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

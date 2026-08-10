@@ -41,6 +41,7 @@ export interface PiPairwiseRelationshipReasoner {
   judge(
     incomingContent: string,
     candidate: PiRecalledMemoryEvidence,
+    signal?: AbortSignal,
   ): Promise<PiPairwiseRelationshipJudgment>;
 }
 
@@ -159,8 +160,11 @@ export function createPiPairwiseRelationshipReasoner(
   const model = context.model;
   if (model === undefined) return undefined;
   return {
-    async judge(incomingContent, candidate) {
+    async judge(incomingContent, candidate, signal) {
       const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
       const timeout = setTimeout(() => controller.abort(), 15_000);
       try {
         const response = await context.modelRegistry.complete(
@@ -203,6 +207,7 @@ export function createPiPairwiseRelationshipReasoner(
         return parseJudgment(text);
       } finally {
         clearTimeout(timeout);
+        signal?.removeEventListener("abort", abort);
       }
     },
   };

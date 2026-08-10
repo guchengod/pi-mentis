@@ -1,6 +1,6 @@
 # Configuration
 
-The default profile reads `~/.pi/agent/.pi-mentis/config.json`; it does not vary with
+The default profile reads `~/.pi/.pi-mentis/config.json`; it does not vary with
 the current workspace. An explicit Pi profile reads
 `<PI_CODING_AGENT_DIR>/.pi-mentis/config.json`, while `PI_MENTIS_HOME` selects an
 intentional isolated absolute root. Omitted fields inherit safe defaults:
@@ -32,7 +32,7 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
     "effectiveness": { "enabled": true, "flushIntervalMs": 250, "maxBatch": 64 },
     "adaptivePolicy": { "enabled": true, "cooldownMs": 1800000 }
   },
-  "storage": { "rootDir": "/Users/your-name/.pi/agent/.pi-mentis/zvec" }
+  "storage": { "rootDir": "/Users/your-name/.pi/.pi-mentis/zvec" }
 }
 ```
 
@@ -40,11 +40,11 @@ Set the credential in the environment, never the JSON file. Validation enforces 
 0.84.0 or newer, HTTPS (except localhost tests), 768–4096 dimensions, 8K–32K Rerank context,
 bounded queues/resources, and coherent context budgets.
 
-The default Zvec root is `~/.pi/agent/.pi-mentis/zvec`. If the former
-`~/.pi/.pi-mentis` root still contains a config or active manifest, startup fails closed
-with `STORAGE_ROOT_MIGRATION_REQUIRED` or `STORAGE_SPLIT_BRAIN`. Pi Mentis never chooses,
-copies, merges, or deletes either store implicitly. Back up and migrate the logical data
-before removing the legacy marker.
+The stable default Zvec root is `~/.pi/.pi-mentis/zvec`. A store created by 0.1.41 at
+`~/.pi/agent/.pi-mentis` remains active when it is the only existing store. If both locations
+exist, Pi Mentis deterministically selects the stable home root and reports the agent-root store
+as inactive; it never copies, merges, deletes, or writes the inactive store implicitly. Use
+`PI_MENTIS_HOME` when intentionally inspecting an isolated store.
 
 `performance.queue.maxQueuedTaskAgeMs` applies to background and maintenance work, not
 user-requested jobs. The scheduler reserves 20% of queue capacity and one worker lane for

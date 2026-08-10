@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   CurrentTurnMemoryEvidence,
+  DeferredRelationshipLearningScheduler,
+  MentisBackgroundQueue,
   RelationshipEvidenceProducer,
   acceptsRelationshipProposal,
   conflictGate,
@@ -28,6 +30,83 @@ const sameHints = {
 };
 
 describe("relationship mutation safety", () => {
+  it("bounds shutdown without starting queued durable work", async () => {
+    const queue = new MentisBackgroundQueue({ maxConcurrency: 1 });
+    let releaseRunning!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const running = new Promise<void>((resolve) => {
+      releaseRunning = resolve;
+    });
+    queue.enqueue({
+      kind: "memory.consolidate",
+      execute: async () => {
+        markStarted();
+        await running;
+      },
+    });
+    await started;
+    let queuedRan = false;
+    queue.enqueue({
+      kind: "memory.consolidate",
+      execute: async () => {
+        queuedRan = true;
+      },
+    });
+
+    const drained = await queue.drain({ timeoutMs: 10, cancelPending: true });
+    expect(drained).toBe(false);
+    expect(queuedRan).toBe(false);
+    expect(queue.pendingCount).toBe(0);
+
+    releaseRunning();
+  });
+
+  it("defers relationship model work until the agent is settled", async () => {
+    const scheduled: string[] = [];
+    const target = {
+      schedule(work: { readonly incomingId: string }) {
+        scheduled.push(work.incomingId);
+      },
+      async recover() {
+        return 0;
+      },
+    };
+    const deferred = new DeferredRelationshipLearningScheduler(target, { delayMs: 0 });
+    const work = {
+      incomingId: "new-memory",
+      namespace: "local:local:pi:pi-mentis",
+      state: "pending" as const,
+      candidates: [],
+      scopeContext: {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+      },
+      attempts: 0,
+      maxAttempts: 3,
+      updatedAt: 1,
+      operationKeys: [],
+    };
+    const reasoner: PairwiseRelationshipReasoner = {
+      async judge() {
+        throw new Error("not used");
+      },
+    };
+
+    deferred.schedule(work, reasoner);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(scheduled).toEqual([]);
+
+    deferred.settled();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(scheduled).toEqual(["new-memory"]);
+    deferred.close();
+  });
+
   it("accepts reinforcement without requiring a new assertion", () => {
     const proposal = {
       relation: "reinforce" as const,

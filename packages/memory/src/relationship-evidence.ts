@@ -27,6 +27,7 @@ export interface PairwiseRelationshipReasoner {
   judge(
     incomingContent: string,
     candidate: RecalledMemoryEvidence,
+    signal?: AbortSignal,
   ): Promise<PairwiseRelationshipJudgment>;
 }
 
@@ -469,6 +470,151 @@ export interface DurableRelationshipLearningCoordinatorOptions {
   readonly leaseMs?: number;
 }
 
+export interface RelationshipLearningSchedulingTarget {
+  schedule(
+    work: import("./types.js").RelationshipLearningWork,
+    reasoner: PairwiseRelationshipReasoner,
+    recoveryReason?: import("./types.js").RelationshipRecoveryReason,
+    onResolved?: (incomingId: string) => void,
+  ): void;
+  recover(
+    reasoner: PairwiseRelationshipReasoner,
+    limit?: number,
+    onResolved?: (incomingId: string) => void,
+  ): Promise<number>;
+}
+
+export interface DeferredRelationshipLearningSchedulerOptions {
+  readonly delayMs?: number;
+}
+
+/**
+ * Keeps remote pairwise reasoning out of the active Agent turn. Durable work is
+ * already persisted before it reaches this scheduler, so cancelling an idle
+ * timer on CLI shutdown never loses the relationship task.
+ */
+export class DeferredRelationshipLearningScheduler {
+  readonly #target: RelationshipLearningSchedulingTarget;
+  readonly #delayMs: number;
+  readonly #pending = new Map<
+    string,
+    {
+      readonly work: import("./types.js").RelationshipLearningWork;
+      readonly reasoner: PairwiseRelationshipReasoner;
+      readonly recoveryReason: import("./types.js").RelationshipRecoveryReason;
+      readonly onResolved?: (incomingId: string) => void;
+    }
+  >();
+  #recovery:
+    | {
+        readonly reasoner: PairwiseRelationshipReasoner;
+        readonly limit: number;
+        readonly onResolved?: (incomingId: string) => void;
+      }
+    | undefined;
+  #timer: ReturnType<typeof setTimeout> | undefined;
+  #settled = false;
+  #closed = false;
+
+  constructor(
+    target: RelationshipLearningSchedulingTarget,
+    options: DeferredRelationshipLearningSchedulerOptions = {},
+  ) {
+    this.#target = target;
+    this.#delayMs = Math.max(0, options.delayMs ?? 250);
+  }
+
+  schedule(
+    work: import("./types.js").RelationshipLearningWork,
+    reasoner: PairwiseRelationshipReasoner,
+    recoveryReason: import("./types.js").RelationshipRecoveryReason = "normal",
+    onResolved?: (incomingId: string) => void,
+  ): void {
+    if (this.#closed) return;
+    this.#pending.set(work.incomingId, {
+      work,
+      reasoner,
+      recoveryReason,
+      ...(onResolved === undefined ? {} : { onResolved }),
+    });
+    this.#arm();
+  }
+
+  recover(
+    reasoner: PairwiseRelationshipReasoner,
+    limit = 128,
+    onResolved?: (incomingId: string) => void,
+  ): void {
+    if (this.#closed) return;
+    this.#recovery = {
+      reasoner,
+      limit,
+      ...(onResolved === undefined ? {} : { onResolved }),
+    };
+    this.#arm();
+  }
+
+  activity(): void {
+    this.#settled = false;
+    this.#cancelTimer();
+  }
+
+  settled(): void {
+    this.#settled = true;
+    this.#arm();
+  }
+
+  close(): void {
+    this.#closed = true;
+    this.#cancelTimer();
+    this.#pending.clear();
+    this.#recovery = undefined;
+  }
+
+  get pendingCount(): number {
+    return this.#pending.size + (this.#recovery === undefined ? 0 : 1);
+  }
+
+  #arm(): void {
+    if (
+      this.#closed ||
+      !this.#settled ||
+      this.#timer !== undefined ||
+      (this.#pending.size === 0 && this.#recovery === undefined)
+    ) {
+      return;
+    }
+    this.#timer = setTimeout(() => {
+      this.#timer = undefined;
+      void this.#flush();
+    }, this.#delayMs);
+    this.#timer.unref?.();
+  }
+
+  async #flush(): Promise<void> {
+    if (this.#closed || !this.#settled) return;
+    const recovery = this.#recovery;
+    this.#recovery = undefined;
+    if (recovery !== undefined) {
+      await this.#target
+        .recover(recovery.reasoner, recovery.limit, recovery.onResolved)
+        .catch(() => undefined);
+    }
+    if (this.#closed || !this.#settled) return;
+    const pending = [...this.#pending.values()];
+    this.#pending.clear();
+    for (const item of pending) {
+      this.#target.schedule(item.work, item.reasoner, item.recoveryReason, item.onResolved);
+    }
+    this.#arm();
+  }
+
+  #cancelTimer(): void {
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
+    this.#timer = undefined;
+  }
+}
+
 /** Schedules durable work, recovers expired leases, and applies bounded retry backoff. */
 export class DurableRelationshipLearningCoordinator {
   readonly #memory: import("./types.js").MemoryService;
@@ -477,6 +623,7 @@ export class DurableRelationshipLearningCoordinator {
   readonly #owner: string;
   readonly #leaseMs: number;
   readonly #retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #activeControllers = new Set<AbortController>();
   #closed = false;
 
   constructor(options: DurableRelationshipLearningCoordinatorOptions) {
@@ -505,11 +652,18 @@ export class DurableRelationshipLearningCoordinator {
       kind: "memory.consolidate",
       coalesceKey: `memory.consolidate:${work.incomingId}`,
       execute: async () => {
+        if (this.#closed) return;
+        const controller = new AbortController();
+        this.#activeControllers.add(controller);
+        const cancellableReasoner: PairwiseRelationshipReasoner = {
+          judge: (incomingContent, candidate) =>
+            reasoner.judge(incomingContent, candidate, controller.signal),
+        };
         try {
           await this.#consolidation.consolidate(
             work.incomingId,
             candidates,
-            reasoner,
+            cancellableReasoner,
             work.scopeContext,
             { owner: this.#owner, leaseMs: this.#leaseMs, recoveryReason },
           );
@@ -522,6 +676,8 @@ export class DurableRelationshipLearningCoordinator {
           }
         } catch {
           await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
+        } finally {
+          this.#activeControllers.delete(controller);
         }
       },
     });
@@ -547,6 +703,8 @@ export class DurableRelationshipLearningCoordinator {
 
   close(): void {
     this.#closed = true;
+    for (const controller of this.#activeControllers) controller.abort();
+    this.#activeControllers.clear();
     for (const timer of this.#retryTimers.values()) clearTimeout(timer);
     this.#retryTimers.clear();
   }

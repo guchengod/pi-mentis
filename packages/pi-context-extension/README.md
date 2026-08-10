@@ -44,7 +44,7 @@ export SILICONFLOW_API_KEY="your-api-key"
 默认模型：Embedding `Qwen/Qwen3-Embedding-8B`（1024 维），Rerank `Qwen/Qwen3-Reranker-8B`。
 可选 BAAI 模型（`SILICONFLOW_EMBEDDING_MODEL`、`SILICONFLOW_EMBEDDING_DIMENSIONS`、`SILICONFLOW_RERANKER_MODEL`、`SILICONFLOW_RERANK_MAX_INPUT_TOKENS`）。
 
-详细配置默认位于 `~/.pi/agent/.pi-mentis/config.json`，不随启动目录或 Workspace
+详细配置默认位于 `~/.pi/.pi-mentis/config.json`，不随启动目录或 Workspace
 变化；所有字段可省略并继承安全默认值。显式 Pi profile 使用
 `<PI_CODING_AGENT_DIR>/.pi-mentis`，`PI_MENTIS_HOME` 可指定隔离的绝对路径。
 API Key 只放环境变量，不要写入 JSON。
@@ -68,10 +68,9 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 
 ## 数据与安全
 
-- 备份前停止 Pi，整体复制 `storage.rootDir`（默认
-  `~/.pi/agent/.pi-mentis/zvec`）。
-- 发现旧 `~/.pi/.pi-mentis` 与 canonical root 并存时会停止初始化，不会静默选择、
-  合并或覆盖任何一套数据。
+- 备份前停止 Pi，整体复制 `storage.rootDir`（默认 `~/.pi/.pi-mentis/zvec`）。
+- 仅存在 `~/.pi/agent/.pi-mentis` 时会兼容使用；两套目录并存时固定选择稳定的
+  `~/.pi/.pi-mentis`，另一套只报告为 inactive，不会自动合并、覆盖或删除。
 - 同一存储目录只允许一个写入进程。
 - 自动召回有软/硬超时（默认 300ms / 800ms），不会无限阻塞回复。
 - 召回内容标记为不受信任证据，不会覆盖当前用户指令。
