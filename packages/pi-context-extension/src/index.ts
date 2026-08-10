@@ -74,6 +74,7 @@ import {
   EffectivenessService,
   createRetrievalService,
   decideRecall,
+  isExplicitAnchoredIdRecall,
   evaluateReplayCandidate,
   type RetrievalService,
   type MentisServiceAccess,
@@ -1318,6 +1319,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     }
     trace.mark("capture");
     if (!config.retrieval.automaticRecall) {
+      trace.snapshot({ projectCacheHit, topicReused, taskReused });
+      return;
+    }
+    if (isExplicitAnchoredIdRecall(event.prompt)) {
       trace.snapshot({ projectCacheHit, topicReused, taskReused });
       return;
     }

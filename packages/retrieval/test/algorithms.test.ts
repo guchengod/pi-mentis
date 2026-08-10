@@ -4,6 +4,7 @@ import { EvidenceAuthority, type SearchHit } from "@pi-mentis/pi-mentis-core";
 import {
   authorityAndFreshness,
   decideRecall,
+  isExplicitAnchoredIdRecall,
   maximalMarginalRelevance,
   reciprocalRankFusion,
   selectContext,
@@ -122,5 +123,13 @@ describe("retrieval algorithms", () => {
         isCommand: false,
       }),
     ).toMatchObject({ shouldRecall: true, sources: ["memory"], allowRerank: false });
+  });
+
+  it("recognizes anchored Memory ID requests without treating arbitrary hashes as IDs", () => {
+    const id = "11c6a1be4df1b0c3d354e6e6590f915bcdfc636156ad741ea2a0411718c9f23a";
+    expect(isExplicitAnchoredIdRecall(`请按 Memory ID ${id} 精确查询`)).toBe(true);
+    expect(isExplicitAnchoredIdRecall(`请查询记忆编号：${id}`)).toBe(true);
+    expect(isExplicitAnchoredIdRecall(`请在 Artifact ID ${id} 内继续查询`)).toBe(true);
+    expect(isExplicitAnchoredIdRecall(`这个提交哈希是 ${id}`)).toBe(false);
   });
 });

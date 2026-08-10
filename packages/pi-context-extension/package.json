@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis",
-  "version": "0.1.43",
+  "version": "0.1.44",
   "description": "Integrated Pi Mentis knowledge-first memory extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",

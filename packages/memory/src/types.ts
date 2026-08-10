@@ -800,6 +800,7 @@ export interface ToolResultEnvelope {
   readonly input: Readonly<Record<string, unknown>>;
   readonly text: string;
   readonly details?: unknown;
+  readonly captureIntegrity?: ArtifactCaptureIntegrity;
   readonly isError: boolean;
   readonly cwd: string;
   readonly startedAt?: number;

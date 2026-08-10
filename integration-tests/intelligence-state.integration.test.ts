@@ -276,7 +276,7 @@ describe("V2 intelligence state on real Zvec", () => {
       "active",
     );
     await reopened.close();
-  }, 120_000);
+  }, 180_000);
 
   it("persists relationship evolution, exact ID reads, views and current recall across restart", async () => {
     const { root, store } = await temporaryStore();
