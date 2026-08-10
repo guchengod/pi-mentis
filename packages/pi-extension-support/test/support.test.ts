@@ -97,8 +97,6 @@ describe("Pi extension support", () => {
       {
         id: "old",
         status: "current",
-        projection: "shadowed_by_pending",
-        shadowedByPendingId: "new",
       },
     ]);
     expect(persistent.hits[0]).not.toHaveProperty("projection");
@@ -208,7 +206,7 @@ describe("Pi extension support", () => {
       provisionalLatestId: "new",
       hits: [
         { id: "new", projection: "provisional_latest" },
-        { id: "old", projection: "shadowed_by_pending" },
+        { id: "old", status: "current" },
       ],
     });
   });

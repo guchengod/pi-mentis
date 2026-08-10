@@ -265,26 +265,14 @@ export class RecentAssertionOverlay {
     const latest = relevant[0];
     if (latest === undefined) return result;
 
-    const shadowedIds = new Set(latest.candidateIds);
     const projected = result.hits.map((hit): PublicRecallHit => {
       if (hit.id === latest.memoryId) {
         return { ...hit, provisional: true, projection: "provisional_latest" };
       }
-      if (shadowedIds.has(hit.id)) {
-        return {
-          ...hit,
-          projection: "shadowed_by_pending",
-          shadowedByPendingId: latest.memoryId,
-        };
-      }
       return hit;
     });
     const rank = (hit: PublicRecallHit): number =>
-      hit.projection === "provisional_latest"
-        ? 0
-        : hit.projection === "shadowed_by_pending"
-          ? 2
-          : 1;
+      hit.projection === "provisional_latest" ? 0 : 1;
     projected.sort((left, right) => rank(left) - rank(right));
 
     const pendingSummary =

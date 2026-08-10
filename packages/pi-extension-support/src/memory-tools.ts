@@ -254,7 +254,7 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       "Use id for exact retrieval and id plus query for history, evidence, correction, or conflicts.",
       "Do not search automatically at every session start, for trivial queries, or merely to verify a successful commit.",
       'A semantic query search miss does not prove a memory was never stored. If storage existence matters and an exact ID is available, use ID lookup. Otherwise state only that the current search did not retrieve it — never claim "it was not written" solely because a query search returned no results.',
-      'When consistency is "pending_relationship", prefer the hit marked projection="provisional_latest" for the user\'s immediate current-session answer. Hits marked "shadowed_by_pending" remain persistent storage truth but are provisionally older; do not claim their persistent status has already changed.',
+      'When consistency is "pending_relationship", prefer the hit marked projection="provisional_latest" for the user\'s immediate current-session answer, but keep the other returned hits as persistent evidence until relationship consolidation resolves. Do not claim any persistent status has already changed.',
       "When noDirectSupport is true, the retrieved memories do not directly answer the requested fact. If alreadySearchedThisTurn is also true, stop reformulating the same query and answer that current memory has insufficient information.",
     ],
     async execute(_toolCallId, toolParams, abortSignal, _onUpdate, context) {
