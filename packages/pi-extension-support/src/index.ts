@@ -110,6 +110,7 @@ export {
   SearchMemoryParameters,
   COMMIT_MEMORY_DESCRIPTION,
   SEARCH_MEMORY_DESCRIPTION,
+  isValidPublicMemoryId,
   registerMemoryToolPair,
   type PublicRememberResult,
   type PublicRecallHit,
@@ -124,6 +125,10 @@ export {
 } from "./pairwise-memory-reasoner.js";
 export {
   RecentAssertionOverlay,
+  projectDurablePendingAssertions,
+  projectDurablePendingAutomaticRecall,
   type RecentAssertion,
+  type DurablePendingProjectionReader,
   type RecentAssertionOverlayOptions,
 } from "./recent-assertion-overlay.js";
+export { assessRecallSupport, CurrentTurnRecallGuard } from "./recall-grounding.js";

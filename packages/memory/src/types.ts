@@ -116,6 +116,15 @@ export type EpistemicState = "asserted" | "verified" | "hypothesis";
 export type MemoryRelationship =
   "reinforce" | "supersede" | "retract" | "conflict" | "coexist" | "unrelated" | "uncertain";
 
+export type PairwiseIdentityDecision = "same" | "different" | "uncertain";
+
+/** Pairwise identity is evidence about two concrete assertions, never a memory category. */
+export interface PairwiseIdentityEvidence {
+  readonly referent: PairwiseIdentityDecision;
+  readonly attribute: PairwiseIdentityDecision;
+  readonly value: PairwiseIdentityDecision;
+}
+
 /** Optional, non-authoritative structure extracted while comparing two memories. */
 export interface MemorySemanticHints {
   readonly subjectHint?: string;
@@ -128,23 +137,32 @@ export interface MemorySemanticHints {
  * records; they are not a class assigned to either memory.
  */
 export interface PairwiseRelationshipSignals {
-  readonly sameReferent: boolean;
-  readonly sameAttribute: boolean;
+  readonly identityEvidence: PairwiseIdentityEvidence;
+  /** Legacy proposal fields are retained only for trace compatibility. Gates ignore them. */
+  readonly sameReferent?: boolean;
+  readonly sameAttribute?: boolean;
   readonly explicitNewAssertion: boolean;
   readonly explicitRetraction: boolean;
   /** A concrete new value is installed in place of the older value. */
   readonly replacementValuePresent: boolean;
   readonly compatibleValue: boolean;
   readonly incompatibleValue: boolean;
+  readonly mutuallyExclusive: boolean;
 }
 
 export interface MemoryRelationshipEvidence {
-  readonly relation: Exclude<MemoryRelationship, "coexist" | "unrelated" | "uncertain">;
+  /** The model proposal, including safe/non-mutating outcomes retained for audit. */
+  readonly relation: MemoryRelationship;
   readonly targetIds: readonly string[];
   readonly confidence: number;
   readonly reasonCodes: readonly string[];
   readonly source?: "explicit_internal" | "same_turn_recall" | "background_consolidation";
   readonly signals?: PairwiseRelationshipSignals;
+  readonly proposalRelationship?: MemoryRelationship;
+  readonly proposalConfidence?: number;
+  readonly gateName?: "reinforceGate" | "supersedeGate" | "retractGate" | "conflictGate";
+  readonly gateAccepted?: boolean;
+  readonly gateRejectReasons?: readonly string[];
   readonly incomingHints?: MemorySemanticHints;
   readonly targetHints?: Readonly<Record<string, MemorySemanticHints>>;
 }
@@ -198,10 +216,48 @@ export interface MemoryDecisionTrace {
   readonly confidence: number;
   readonly reasonCodes: readonly string[];
   readonly signals?: PairwiseRelationshipSignals;
+  readonly proposalRelationship?: MemoryRelationship;
+  readonly proposalConfidence?: number;
+  readonly gateName?: string;
+  readonly gateAccepted?: boolean;
+  readonly gateRejectReasons?: readonly string[];
   readonly incomingHints?: MemorySemanticHints;
   readonly targetHints?: Readonly<Record<string, MemorySemanticHints>>;
   readonly temporalAction: string;
+  readonly temporalPreState?: Readonly<Record<string, string>>;
+  readonly temporalPostState?: Readonly<Record<string, string>>;
+  readonly operationKey?: string;
+  readonly recoveryReason?: RelationshipRecoveryReason;
   readonly timestamp: number;
+}
+
+export type RelationshipLearningState =
+  "pending" | "processing" | "resolved" | "failed_retryable" | "failed_terminal";
+
+export type RelationshipRecoveryReason =
+  "normal" | "retry" | "startup_reconciliation" | "lease_recovery";
+
+export interface RelationshipLearningCandidate {
+  readonly id: string;
+  readonly source: "same_turn_recall" | "semantic_candidate";
+}
+
+export interface RelationshipLearningWork {
+  readonly incomingId: string;
+  readonly namespace: string;
+  readonly state: RelationshipLearningState;
+  readonly candidates: readonly RelationshipLearningCandidate[];
+  readonly scopeContext: PiScopeContext;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly updatedAt: number;
+  readonly nextRetryAt?: number;
+  readonly processingOwner?: string;
+  readonly processingStartedAt?: number;
+  readonly leaseExpiresAt?: number;
+  readonly lastError?: string;
+  readonly operationKeys: readonly string[];
+  readonly recoveryReason?: RelationshipRecoveryReason;
 }
 
 /** Old metadata is quarantined here for read compatibility and diagnosis only. */
@@ -273,6 +329,12 @@ export interface MemoryRecord {
    * must never block (or be blocked by) properly keyed set members.
    */
   readonly decisionTraceId?: string;
+  /** Durable recovery marker for asynchronous pairwise relationship learning. */
+  readonly relationshipLearningState?: RelationshipLearningState;
+  readonly relationshipLearningUpdatedAt?: number;
+  readonly relationshipLearningAttempts?: number;
+  readonly relationshipCandidateIds?: readonly string[];
+  readonly relationshipDecisionTraceId?: string;
   readonly legacy?: LegacyMemoryMetadata;
   /** Last automatic resolution outcome for a conflicted candidate. */
   readonly conflictResolution?: Readonly<{
@@ -305,6 +367,8 @@ export interface CommitMemoryCommand {
   readonly relationshipEvidence?: MemoryRelationshipEvidence;
   /** Optional structure produced together with relationship evidence. */
   readonly semanticHints?: MemorySemanticHints;
+  /** Concrete pair candidates known before raw persistence; never part of the public tool schema. */
+  readonly relationshipCandidates?: readonly RelationshipLearningCandidate[];
 }
 
 export type MemoryContentOrigin =
@@ -345,6 +409,7 @@ export interface CommitMemoryResult {
   readonly relatedIds: readonly string[];
   readonly relationDecision: MemoryRelationship;
   readonly traceId?: string;
+  readonly relationshipCandidateIds?: readonly string[];
 }
 
 export interface RelationshipConsolidationResult {
@@ -354,6 +419,7 @@ export interface RelationshipConsolidationResult {
   readonly relationDecision: MemoryRelationship;
   readonly reason: string;
   readonly traceId?: string;
+  readonly operationKey?: string;
 }
 
 export interface MemoryQuery {
@@ -398,6 +464,38 @@ export interface MemoryService {
     evidence: MemoryRelationshipEvidence,
     options: MemoryMutationOptions,
   ): Promise<RelationshipConsolidationResult>;
+  prepareRelationshipLearning?(
+    incomingId: string,
+    candidates: readonly RelationshipLearningCandidate[],
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined>;
+  claimRelationshipLearning?(
+    incomingId: string,
+    input: {
+      readonly owner: string;
+      readonly leaseMs: number;
+      readonly recoveryReason: RelationshipRecoveryReason;
+    },
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined>;
+  resolveRelationshipLearning?(
+    incomingId: string,
+    operationKeys: readonly string[],
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined>;
+  failRelationshipLearning?(
+    incomingId: string,
+    error: unknown,
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined>;
+  listRecoverableRelationshipLearning?(input?: {
+    readonly limit?: number;
+    readonly now?: number;
+  }): Promise<readonly RelationshipLearningWork[]>;
+  listPendingRelationshipLearning?(input?: {
+    readonly limit?: number;
+  }): Promise<readonly RelationshipLearningWork[]>;
+  getRelationshipLearning?(incomingId: string): Promise<RelationshipLearningWork | undefined>;
   getView?(
     kind: ViewKind,
     scopeId: string,

@@ -52,8 +52,28 @@ import type {
   MemorySearchOptions,
   MemoryService,
   PiScopeContext,
+  RelationshipLearningCandidate,
+  RelationshipLearningWork,
+  RelationshipRecoveryReason,
   RelationshipConsolidationResult,
 } from "./types.js";
+
+const RELATIONSHIP_LEARNING_KIND = "memory-relationship-learning-v1";
+const RELATIONSHIP_LEARNING_MAX_ATTEMPTS = 4;
+const RELATIONSHIP_LEARNING_SCAN_LIMIT = 512;
+
+export function relationshipOperationKey(
+  incomingId: string,
+  targetIds: readonly string[],
+  relation: MemoryRelationship,
+): string {
+  return stableHash(
+    "memory-relationship-operation:v1",
+    incomingId,
+    relation,
+    ...[...targetIds].sort(),
+  );
+}
 
 export interface CreateMemoryServiceOptions {
   readonly store: ZvecStore;
@@ -211,6 +231,247 @@ export class DefaultMemoryService implements MemoryService {
     return { scope: memoryScopeForDecision(decision, scopeContext), embedding };
   }
 
+  async getRelationshipLearning(incomingId: string): Promise<RelationshipLearningWork | undefined> {
+    const record = await this.#readRecord(incomingId);
+    if (record === undefined) return undefined;
+    return (
+      await this.#state.get<RelationshipLearningWork>(
+        this.#relationshipLearningStateId(
+          scopedNamespace(record.scope, record.scopeContext),
+          incomingId,
+        ),
+      )
+    )?.value;
+  }
+
+  async prepareRelationshipLearning(
+    incomingId: string,
+    candidates: readonly RelationshipLearningCandidate[],
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined> {
+    const record = await this.#readRecord(incomingId);
+    if (record === undefined) return undefined;
+    this.#assertBoundary(record, options.scopeContext);
+    const namespace = scopedNamespace(record.scope, record.scopeContext);
+    const id = this.#relationshipLearningStateId(namespace, incomingId);
+    const existing = await this.#state.get<RelationshipLearningWork>(id);
+    if (existing?.value.state === "resolved" || existing?.value.state === "failed_terminal") {
+      return existing.value;
+    }
+    const merged = this.#mergeRelationshipCandidates(existing?.value.candidates ?? [], candidates);
+    if (merged.length === 0) return existing?.value;
+    const now = this.#clock.now();
+    const work: RelationshipLearningWork = {
+      incomingId,
+      namespace,
+      state: "pending",
+      candidates: merged,
+      scopeContext: record.scopeContext ?? options.scopeContext,
+      attempts: existing?.value.attempts ?? record.relationshipLearningAttempts ?? 0,
+      maxAttempts: existing?.value.maxAttempts ?? RELATIONSHIP_LEARNING_MAX_ATTEMPTS,
+      updatedAt: now,
+      operationKeys: existing?.value.operationKeys ?? [],
+    };
+    await this.#state.put(
+      { id, kind: RELATIONSHIP_LEARNING_KIND, namespace, value: work },
+      {
+        status: "pending",
+        now,
+        ...(existing === undefined ? {} : { expectedRevision: existing.revision }),
+      },
+    );
+    await this.#updateRelationshipLearningRecord(record, work);
+    return work;
+  }
+
+  async claimRelationshipLearning(
+    incomingId: string,
+    input: {
+      readonly owner: string;
+      readonly leaseMs: number;
+      readonly recoveryReason: RelationshipRecoveryReason;
+    },
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined> {
+    const record = await this.#readRecord(incomingId);
+    if (record === undefined) return undefined;
+    this.#assertBoundary(record, options.scopeContext);
+    const namespace = scopedNamespace(record.scope, record.scopeContext);
+    const id = this.#relationshipLearningStateId(namespace, incomingId);
+    const existing = await this.#state.get<RelationshipLearningWork>(id);
+    if (existing === undefined) return undefined;
+    const now = this.#clock.now();
+    for (const candidate of existing.value.candidates) {
+      const dependency = await this.getRelationshipLearning(candidate.id);
+      if (
+        dependency !== undefined &&
+        (dependency.state === "pending" ||
+          dependency.state === "processing" ||
+          dependency.state === "failed_retryable")
+      ) {
+        return undefined;
+      }
+    }
+    const recoverable =
+      existing.value.state === "pending" ||
+      (existing.value.state === "failed_retryable" && (existing.value.nextRetryAt ?? 0) <= now) ||
+      (existing.value.state === "processing" && (existing.value.leaseExpiresAt ?? 0) <= now);
+    if (!recoverable || existing.value.attempts >= existing.value.maxAttempts) return undefined;
+    const { nextRetryAt: _nextRetryAt, lastError: _lastError, ...claimable } = existing.value;
+    void _nextRetryAt;
+    void _lastError;
+    const work: RelationshipLearningWork = {
+      ...claimable,
+      state: "processing",
+      attempts: existing.value.attempts + 1,
+      updatedAt: now,
+      processingOwner: input.owner,
+      processingStartedAt: now,
+      leaseExpiresAt: now + Math.max(1_000, input.leaseMs),
+      recoveryReason: input.recoveryReason,
+    };
+    await this.#state.put(
+      { id, kind: RELATIONSHIP_LEARNING_KIND, namespace, value: work },
+      { status: "processing", expectedRevision: existing.revision, now },
+    );
+    await this.#updateRelationshipLearningRecord(record, work);
+    return work;
+  }
+
+  async resolveRelationshipLearning(
+    incomingId: string,
+    operationKeys: readonly string[],
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined> {
+    const record = await this.#readRecord(incomingId);
+    if (record === undefined) return undefined;
+    this.#assertBoundary(record, options.scopeContext);
+    const namespace = scopedNamespace(record.scope, record.scopeContext);
+    const id = this.#relationshipLearningStateId(namespace, incomingId);
+    const existing = await this.#state.get<RelationshipLearningWork>(id);
+    if (existing === undefined) return undefined;
+    const now = this.#clock.now();
+    const {
+      processingOwner: _processingOwner,
+      processingStartedAt: _processingStartedAt,
+      leaseExpiresAt: _leaseExpiresAt,
+      nextRetryAt: _nextRetryAt,
+      lastError: _lastError,
+      ...resolvable
+    } = existing.value;
+    void _processingOwner;
+    void _processingStartedAt;
+    void _leaseExpiresAt;
+    void _nextRetryAt;
+    void _lastError;
+    const work: RelationshipLearningWork = {
+      ...resolvable,
+      state: "resolved",
+      updatedAt: now,
+      operationKeys: [...new Set([...existing.value.operationKeys, ...operationKeys])],
+    };
+    await this.#state.put(
+      { id, kind: RELATIONSHIP_LEARNING_KIND, namespace, value: work },
+      { status: "resolved", expectedRevision: existing.revision, now },
+    );
+    await this.#updateRelationshipLearningRecord(await this.#readRecord(incomingId), work);
+    return work;
+  }
+
+  async failRelationshipLearning(
+    incomingId: string,
+    error: unknown,
+    options: MemoryMutationOptions,
+  ): Promise<RelationshipLearningWork | undefined> {
+    const record = await this.#readRecord(incomingId);
+    if (record === undefined) return undefined;
+    this.#assertBoundary(record, options.scopeContext);
+    const namespace = scopedNamespace(record.scope, record.scopeContext);
+    const id = this.#relationshipLearningStateId(namespace, incomingId);
+    const existing = await this.#state.get<RelationshipLearningWork>(id);
+    if (existing === undefined) return undefined;
+    const now = this.#clock.now();
+    const terminal = existing.value.attempts >= existing.value.maxAttempts;
+    const retryDelayMs = Math.min(60_000, 1_000 * 2 ** Math.max(0, existing.value.attempts - 1));
+    const {
+      processingOwner: _processingOwner,
+      processingStartedAt: _processingStartedAt,
+      leaseExpiresAt: _leaseExpiresAt,
+      nextRetryAt: _nextRetryAt,
+      ...failable
+    } = existing.value;
+    void _processingOwner;
+    void _processingStartedAt;
+    void _leaseExpiresAt;
+    void _nextRetryAt;
+    const work: RelationshipLearningWork = {
+      ...failable,
+      state: terminal ? "failed_terminal" : "failed_retryable",
+      updatedAt: now,
+      ...(terminal ? {} : { nextRetryAt: now + retryDelayMs }),
+      lastError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+    };
+    await this.#state.put(
+      { id, kind: RELATIONSHIP_LEARNING_KIND, namespace, value: work },
+      {
+        status: terminal ? "failed_terminal" : "failed_retryable",
+        expectedRevision: existing.revision,
+        now,
+      },
+    );
+    await this.#updateRelationshipLearningRecord(record, work);
+    return work;
+  }
+
+  async listRecoverableRelationshipLearning(
+    input: { readonly limit?: number; readonly now?: number } = {},
+  ): Promise<readonly RelationshipLearningWork[]> {
+    const now = input.now ?? this.#clock.now();
+    const limit = Math.max(1, Math.min(input.limit ?? 128, RELATIONSHIP_LEARNING_SCAN_LIMIT));
+    await this.#repairMissingRelationshipLearningMarkers(limit);
+    const states = await Promise.all(
+      (["pending", "processing", "failed_retryable"] as const).map((status) =>
+        this.#state.list<RelationshipLearningWork>({
+          kind: RELATIONSHIP_LEARNING_KIND,
+          status,
+          limit,
+        }),
+      ),
+    );
+    return states
+      .flat()
+      .map((state) => state.value)
+      .filter(
+        (work) =>
+          work.state === "pending" ||
+          (work.state === "failed_retryable" && (work.nextRetryAt ?? 0) <= now) ||
+          (work.state === "processing" && (work.leaseExpiresAt ?? 0) <= now),
+      )
+      .sort((left, right) => left.updatedAt - right.updatedAt)
+      .slice(0, limit);
+  }
+
+  async listPendingRelationshipLearning(
+    input: { readonly limit?: number } = {},
+  ): Promise<readonly RelationshipLearningWork[]> {
+    const limit = Math.max(1, Math.min(input.limit ?? 64, RELATIONSHIP_LEARNING_SCAN_LIMIT));
+    await this.#repairMissingRelationshipLearningMarkers(limit);
+    const states = await Promise.all(
+      (["pending", "processing", "failed_retryable"] as const).map((status) =>
+        this.#state.list<RelationshipLearningWork>({
+          kind: RELATIONSHIP_LEARNING_KIND,
+          status,
+          limit,
+        }),
+      ),
+    );
+    return states
+      .flat()
+      .map((state) => state.value)
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, limit);
+  }
+
   async commit(
     command: CommitMemoryCommand,
     options: OperationOptions = {},
@@ -358,21 +619,25 @@ export class DefaultMemoryService implements MemoryService {
           topK: 8,
           filter: `namespace = ${quoteFilter(scopeKey)} AND status = "active"`,
         });
-    const candidateRecords = await this.#store.fetchVectors(
-      "memory",
-      discovered.map((item) => item.id),
-    );
-    const candidates: RelationshipCandidate[] = discovered.flatMap((item) => {
-      const stored = candidateRecords.get(item.id);
+    const candidateIds = [
+      ...new Set([
+        ...discovered.map((item) => item.id),
+        ...(command.relationshipCandidates ?? []).map((candidate) => candidate.id),
+      ]),
+    ];
+    const candidateRecords = await this.#store.fetchVectors("memory", candidateIds);
+    const discoveredSimilarity = new Map(discovered.map((item) => [item.id, item.score]));
+    const candidates: RelationshipCandidate[] = candidateIds.flatMap((id) => {
+      const itemScore = discoveredSimilarity.get(id);
+      const stored = candidateRecords.get(id);
       if (stored === undefined) return [];
       return [
         {
           record: adaptLegacyMemory(decodeStoredPayload(stored)),
-          similarity: cosineSimilarity(item.score),
+          similarity: itemScore === undefined ? 0 : cosineSimilarity(itemScore),
         },
       ];
     });
-
     const observedAt = command.observedAt ?? now;
     const id = stableHash(
       "memory:v2",
@@ -396,6 +661,15 @@ export class DefaultMemoryService implements MemoryService {
         : { branchId: command.scopeContext.branchId }),
     };
     const inferredOrderedItems = command.orderedItems ?? orderedItems(command.content);
+    const relationshipCandidates = this.#mergeRelationshipCandidates(
+      command.relationshipCandidates ?? [],
+      candidates.map((candidate) => ({
+        id: candidate.record.id,
+        source: "semantic_candidate" as const,
+      })),
+    ).slice(0, 6);
+    const relationshipLearningPending =
+      command.relationshipEvidence === undefined && relationshipCandidates.length > 0;
     const record: MemoryRecord = {
       schemaVersion: 2,
       id,
@@ -445,6 +719,10 @@ export class DefaultMemoryService implements MemoryService {
           }),
       ...(command.temporalKind === undefined ? {} : { temporalKind: command.temporalKind }),
       ...(command.occurredAt === undefined ? {} : { occurredAt: command.occurredAt }),
+      relationshipLearningState: relationshipLearningPending ? "pending" : "resolved",
+      relationshipLearningUpdatedAt: now,
+      relationshipLearningAttempts: 0,
+      relationshipCandidateIds: relationshipCandidates.map((candidate) => candidate.id),
     };
     const trace = await this.#temporal.persistTrace({
       incomingId: id,
@@ -456,6 +734,9 @@ export class DefaultMemoryService implements MemoryService {
     });
     const traced = { ...record, decisionTraceId: trace.id };
     await this.#store.upsertVectors("memory", [this.#record(traced)]);
+    if (relationshipLearningPending) {
+      await this.#persistInitialRelationshipLearningWork(traced, relationshipCandidates);
+    }
     await this.#applyTargetTransitions(temporalPlan, id, now);
     await this.#temporal.persistRelationships(scopeKey, id, temporalPlan);
     await this.#views?.enqueueMemory(withoutEmbedding(traced));
@@ -466,7 +747,126 @@ export class DefaultMemoryService implements MemoryService {
       relatedIds: resolution.targetIds,
       relationDecision: resolution.relation,
       traceId: trace.id,
+      relationshipCandidateIds: relationshipCandidates.map((candidate) => candidate.id),
     };
+  }
+
+  #relationshipLearningStateId(namespace: string, incomingId: string): string {
+    return this.#state.id(RELATIONSHIP_LEARNING_KIND, namespace, incomingId);
+  }
+
+  #mergeRelationshipCandidates(
+    left: readonly RelationshipLearningCandidate[],
+    right: readonly RelationshipLearningCandidate[],
+  ): readonly RelationshipLearningCandidate[] {
+    const merged = new Map<string, RelationshipLearningCandidate>();
+    for (const candidate of [...left, ...right]) {
+      if (candidate.id.length === 0) continue;
+      const previous = merged.get(candidate.id);
+      merged.set(candidate.id, {
+        id: candidate.id,
+        source:
+          previous?.source === "same_turn_recall" || candidate.source === "same_turn_recall"
+            ? "same_turn_recall"
+            : "semantic_candidate",
+      });
+    }
+    return [...merged.values()].slice(0, 6);
+  }
+
+  async #readRecord(id: string): Promise<MemoryRecord | undefined> {
+    const stored = (await this.#store.fetchVectors("memory", [id])).get(id);
+    if (stored === undefined) return undefined;
+    const vector = stored.vectors["embedding"];
+    if (!(vector instanceof Float32Array) && !Array.isArray(vector)) return undefined;
+    return {
+      ...adaptLegacyMemory(decodeStoredPayload(stored)),
+      embedding: vector instanceof Float32Array ? vector : Float32Array.from(vector),
+    };
+  }
+
+  #assertBoundary(record: MemoryRecord, scopeContext: MemoryMutationOptions["scopeContext"]): void {
+    if (boundaryKey(record.scopeContext) !== boundaryKey(scopeContext)) {
+      throw new Error(`Memory ${record.id} crosses a security boundary`);
+    }
+  }
+
+  async #persistInitialRelationshipLearningWork(
+    record: MemoryRecord,
+    candidates: readonly RelationshipLearningCandidate[],
+  ): Promise<RelationshipLearningWork> {
+    const namespace = scopedNamespace(record.scope, record.scopeContext);
+    const now = this.#clock.now();
+    const work: RelationshipLearningWork = {
+      incomingId: record.id,
+      namespace,
+      state: "pending",
+      candidates,
+      scopeContext: record.scopeContext ?? {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+      },
+      attempts: 0,
+      maxAttempts: RELATIONSHIP_LEARNING_MAX_ATTEMPTS,
+      updatedAt: now,
+      operationKeys: [],
+    };
+    await this.#state.put(
+      {
+        id: this.#relationshipLearningStateId(namespace, record.id),
+        kind: RELATIONSHIP_LEARNING_KIND,
+        namespace,
+        value: work,
+      },
+      { status: "pending", now },
+    );
+    return work;
+  }
+
+  async #updateRelationshipLearningRecord(
+    record: MemoryRecord | undefined,
+    work: RelationshipLearningWork,
+  ): Promise<void> {
+    if (record === undefined) return;
+    const updated: MemoryRecord = {
+      ...record,
+      relationshipLearningState: work.state,
+      relationshipLearningUpdatedAt: work.updatedAt,
+      relationshipLearningAttempts: work.attempts,
+      relationshipCandidateIds: work.candidates.map((candidate) => candidate.id),
+      updatedAt: Math.max(record.updatedAt, work.updatedAt),
+      revision: record.revision + 1,
+    };
+    await this.#store.upsertVectors("memory", [this.#record(updated)]);
+  }
+
+  async #repairMissingRelationshipLearningMarkers(limit: number): Promise<void> {
+    const documents = await this.#store.filterVectors("memory", 'status = "active"', limit);
+    for (const document of documents) {
+      const record = adaptLegacyMemory(decodeStoredPayload(document));
+      if (
+        record.relationshipLearningState !== "pending" &&
+        record.relationshipLearningState !== "processing" &&
+        record.relationshipLearningState !== "failed_retryable"
+      ) {
+        continue;
+      }
+      const namespace = scopedNamespace(record.scope, record.scopeContext);
+      const id = this.#relationshipLearningStateId(namespace, record.id);
+      if ((await this.#state.get(id)) !== undefined) continue;
+      await this.#persistInitialRelationshipLearningWork(
+        {
+          ...record,
+          embedding: new Float32Array(this.#dimensions),
+        },
+        (record.relationshipCandidateIds ?? []).map((candidateId) => ({
+          id: candidateId,
+          source: "semantic_candidate",
+        })),
+      );
+    }
   }
 
   #outcome(relation: MemoryRelationship): CommitMemoryResult["outcome"] {
@@ -564,16 +964,115 @@ export class DefaultMemoryService implements MemoryService {
         resolution.relation === "unrelated" ||
         resolution.relation === "uncertain"
       ) {
+        const operationKey = relationshipOperationKey(
+          incomingId,
+          resolution.targetIds,
+          resolution.relation,
+        );
+        const learning = await this.getRelationshipLearning(incomingId);
+        if (learning?.operationKeys.includes(operationKey) === true) {
+          return {
+            action: "skipped",
+            incomingId,
+            targetIds: resolution.targetIds,
+            relationDecision: resolution.relation,
+            reason: "duplicate_relationship_operation",
+            operationKey,
+          };
+        }
+        const temporalState = Object.fromEntries([
+          [incoming.id, incoming.status],
+          ...activeTargets.map((target) => [target.id, target.status] as const),
+        ]);
+        const trace = await this.#temporal.persistTrace({
+          incomingId,
+          candidateIds: resolution.targetIds,
+          relationDecision: resolution.relation,
+          confidence: resolution.confidence,
+          reasonCodes: [...resolution.reasonCodes, "slow_consolidation"],
+          ...(evidence.signals === undefined ? {} : { signals: evidence.signals }),
+          ...(evidence.proposalRelationship === undefined
+            ? {}
+            : { proposalRelationship: evidence.proposalRelationship }),
+          ...(evidence.proposalConfidence === undefined
+            ? {}
+            : { proposalConfidence: evidence.proposalConfidence }),
+          ...(evidence.gateName === undefined ? {} : { gateName: evidence.gateName }),
+          ...(evidence.gateAccepted === undefined ? {} : { gateAccepted: evidence.gateAccepted }),
+          ...(evidence.gateRejectReasons === undefined
+            ? {}
+            : { gateRejectReasons: evidence.gateRejectReasons }),
+          ...(evidence.incomingHints === undefined
+            ? {}
+            : { incomingHints: evidence.incomingHints }),
+          ...(evidence.targetHints === undefined ? {} : { targetHints: evidence.targetHints }),
+          temporalPreState: temporalState,
+          temporalPostState: temporalState,
+          operationKey,
+          recoveryReason: learning?.recoveryReason ?? "normal",
+          temporalAction: "no_persistent_mutation",
+        });
+        await this.#store.upsertVectors("memory", [
+          this.#record({
+            ...incoming,
+            embedding:
+              incomingVector instanceof Float32Array
+                ? incomingVector
+                : Float32Array.from(incomingVector),
+            decisionTraceId: trace.id,
+          }),
+        ]);
         return {
           action: "skipped",
           incomingId,
           targetIds: resolution.targetIds,
           relationDecision: resolution.relation,
           reason: resolution.reasonCodes.join(","),
+          operationKey,
+        };
+      }
+      if (
+        (resolution.relation === "supersede" || resolution.relation === "retract") &&
+        activeTargets.some(
+          (target) =>
+            target.observedAt > incoming.observedAt ||
+            (target.observedAt === incoming.observedAt && target.authority > incoming.authority),
+        )
+      ) {
+        return {
+          action: "skipped",
+          incomingId,
+          targetIds: resolution.targetIds,
+          relationDecision: "uncertain",
+          reason: "incoming_is_older_or_lower_authority_than_target",
+        };
+      }
+      const operationKey = relationshipOperationKey(
+        incomingId,
+        resolution.targetIds,
+        resolution.relation,
+      );
+      const learning = await this.getRelationshipLearning(incomingId);
+      if (learning?.operationKeys.includes(operationKey) === true) {
+        return {
+          action: "skipped",
+          incomingId,
+          targetIds: resolution.targetIds,
+          relationDecision: resolution.relation,
+          reason: "duplicate_relationship_operation",
+          operationKey,
         };
       }
       const now = this.#clock.now();
       const plan = this.#temporal.plan(resolution.relation, resolution.targetIds);
+      const temporalPreState = Object.fromEntries([
+        [incoming.id, incoming.status],
+        ...activeTargets.map((target) => [target.id, target.status] as const),
+      ]);
+      const temporalPostState = Object.fromEntries([
+        [incoming.id, resolution.relation === "reinforce" ? "superseded" : plan.incomingStatus],
+        ...activeTargets.map((target) => [target.id, plan.targetStatus ?? target.status] as const),
+      ]);
       const trace = await this.#temporal.persistTrace({
         incomingId,
         candidateIds: resolution.targetIds,
@@ -581,8 +1080,23 @@ export class DefaultMemoryService implements MemoryService {
         confidence: resolution.confidence,
         reasonCodes: [...resolution.reasonCodes, "slow_consolidation"],
         ...(evidence.signals === undefined ? {} : { signals: evidence.signals }),
+        ...(evidence.proposalRelationship === undefined
+          ? {}
+          : { proposalRelationship: evidence.proposalRelationship }),
+        ...(evidence.proposalConfidence === undefined
+          ? {}
+          : { proposalConfidence: evidence.proposalConfidence }),
+        ...(evidence.gateName === undefined ? {} : { gateName: evidence.gateName }),
+        ...(evidence.gateAccepted === undefined ? {} : { gateAccepted: evidence.gateAccepted }),
+        ...(evidence.gateRejectReasons === undefined
+          ? {}
+          : { gateRejectReasons: evidence.gateRejectReasons }),
         ...(evidence.incomingHints === undefined ? {} : { incomingHints: evidence.incomingHints }),
         ...(evidence.targetHints === undefined ? {} : { targetHints: evidence.targetHints }),
+        temporalPreState,
+        temporalPostState,
+        operationKey,
+        recoveryReason: learning?.recoveryReason ?? "normal",
         temporalAction:
           resolution.relation === "reinforce"
             ? "merge_reinforcement_preserve_source"
@@ -673,6 +1187,7 @@ export class DefaultMemoryService implements MemoryService {
         relationDecision: resolution.relation,
         reason: "high_confidence_pairwise_evidence",
         traceId: trace.id,
+        operationKey,
       };
     } finally {
       release();

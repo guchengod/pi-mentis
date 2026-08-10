@@ -9,6 +9,7 @@ import {
   TaskPriority,
   assertPiCompatibility,
   detectInstalledPackageVersion,
+  getStorageStatus,
   getOrCreateRuntime,
   loadConfig,
   inferInteractionMode,
@@ -28,7 +29,7 @@ import {
   ContextStateService,
   DefaultRememberCoordinator,
   CurrentTurnMemoryEvidence,
-  RelationshipConsolidationCoordinator,
+  DurableRelationshipLearningCoordinator,
   MentisBackgroundQueue,
   PiCaptureSession,
   createExperienceLearningService,
@@ -51,6 +52,8 @@ import {
   notifyWhenUiAvailable,
   registerMemoryToolPair,
   createPiPairwiseRelationshipReasoner,
+  projectDurablePendingAssertions,
+  CurrentTurnRecallGuard,
   RecentAssertionOverlay,
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 import {
@@ -105,7 +108,8 @@ function registerMemoryTools(
   getScopePlanner: () => ScopeSemanticPlanner | undefined,
   relationshipTurn: CurrentTurnMemoryEvidence,
   recentAssertions: RecentAssertionOverlay,
-  backgroundQueue: MentisBackgroundQueue,
+  recallGuard: CurrentTurnRecallGuard,
+  durableRelationships: DurableRelationshipLearningCoordinator | undefined,
 ): void {
   // Build coordinators and register shared tool pair.
   const memory = services.getMemory();
@@ -113,8 +117,6 @@ function registerMemoryTools(
     memory !== undefined ? new DefaultRememberCoordinator(memory, getScopePlanner()) : undefined;
   const recallCoord =
     services.getRetrieval() !== undefined ? new DefaultRecallCoordinator(services) : undefined;
-  const consolidationCoord =
-    memory === undefined ? undefined : new RelationshipConsolidationCoordinator({ memory });
 
   registerMemoryToolPair(pi, {
     async remember(content, signal, toolContext) {
@@ -137,8 +139,12 @@ function registerMemoryTools(
           scopeContext: getScopeContext(),
           ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
           ...(evRef !== undefined ? { evidenceRef: evRef } : {}),
+          relationshipCandidates: recalled.map((candidate) => ({
+            id: candidate.id,
+            source: candidate.evidenceSource,
+          })),
           onCommitted: (committed) => {
-            discoveredCandidateIds = committed.relatedIds;
+            discoveredCandidateIds = committed.relationshipCandidateIds ?? committed.relatedIds;
           },
           ...(signal !== undefined ? { signal } : {}),
         },
@@ -163,38 +169,46 @@ function registerMemoryTools(
         result.outcome === "remembered" &&
         relationshipCandidates.length > 0 &&
         reasoner !== undefined &&
-        consolidationCoord !== undefined
+        memory !== undefined &&
+        durableRelationships !== undefined
       ) {
         const incomingId = result.id;
         const relationshipScope = getScopeContext();
+        const durable = await memory.prepareRelationshipLearning?.(
+          incomingId,
+          relationshipCandidates.map((candidate) => ({
+            id: candidate.id,
+            source: candidate.evidenceSource,
+          })),
+          { scopeContext: relationshipScope },
+        );
+        const scheduledCandidates =
+          durable?.candidates.map((candidate) => ({
+            id: candidate.id,
+            content: relationshipCandidates.find((item) => item.id === candidate.id)?.content ?? "",
+            status: "current" as const,
+            match: "semantic" as const,
+            evidenceSource: candidate.source,
+          })) ?? relationshipCandidates;
         recentAssertions.record({
           memoryId: incomingId,
           content,
           observedAt: Date.now(),
           authority: "explicit_user",
-          candidateIds: relationshipCandidates.map((candidate) => candidate.id),
+          candidateIds: scheduledCandidates.map((candidate) => candidate.id),
         });
-        backgroundQueue.enqueue({
-          kind: "memory.consolidate",
-          coalesceKey: `memory.consolidate:${incomingId}`,
-          execute: async () => {
-            try {
-              await consolidationCoord.consolidate(
-                incomingId,
-                relationshipCandidates,
-                reasoner,
-                relationshipScope,
-              );
-            } finally {
-              recentAssertions.resolve(incomingId);
-            }
-          },
-        });
+        if (durable !== undefined) {
+          durableRelationships.schedule(durable, reasoner, "normal", (resolvedId) => {
+            recentAssertions.resolve(resolvedId);
+          });
+        }
         return { ...result, relationshipLearning: "scheduled" as const };
       }
       return result;
     },
     async recall(request, signal) {
+      const repeated = recallGuard.repeated(request);
+      if (repeated !== undefined) return repeated;
       if (recallCoord === undefined) {
         return { found: false, resourceType: "unknown", anchored: false, hits: [] };
       }
@@ -204,7 +218,24 @@ function registerMemoryTools(
         ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
         ...(signal !== undefined ? { signal } : {}),
       });
-      const projected = recentAssertions.project(request, result);
+      const durableProjected =
+        memory === undefined
+          ? result
+          : await projectDurablePendingAssertions(
+              {
+                getRelationshipLearning: async (id) => memory.getRelationshipLearning?.(id),
+                listPendingRelationshipLearning: (input) =>
+                  memory.listPendingRelationshipLearning?.(input) ?? Promise.resolve([]),
+                get: (id) =>
+                  memory.get(id, {
+                    scopeContext: getScopeContext(),
+                    accessIntent: "explicit_id",
+                  }),
+              },
+              request,
+              result,
+            );
+      const projected = recentAssertions.project(request, durableProjected);
       relationshipTurn.recordRecall(
         projected.hits
           .filter((hit) => hit.resourceType === "memory")
@@ -216,7 +247,7 @@ function registerMemoryTools(
             evidenceSource: "same_turn_recall",
           })),
       );
-      return projected;
+      return recallGuard.record(request, projected);
     },
   });
 }
@@ -247,6 +278,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   const backgroundQueue = new MentisBackgroundQueue({ maxConcurrency: 1, maxQueueLength: 32 });
   const relationshipTurn = new CurrentTurnMemoryEvidence();
   const recentAssertions = new RecentAssertionOverlay();
+  const recallGuard = new CurrentTurnRecallGuard();
   const telemetry = new InMemoryTelemetry();
   const runtime = getOrCreateRuntime();
   let storeHandle: SharedZvecStoreHandle | undefined;
@@ -268,6 +300,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let effectiveness: EffectivenessService | undefined;
   let policy: AdaptivePolicyService | undefined;
   let latestRetrievalTraceId: string | undefined;
+  let durableRelationships: DurableRelationshipLearningCoordinator | undefined;
   runtime.registerEmbedding({
     id: "siliconflow",
     version: "1.0.0",
@@ -363,6 +396,14 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
 
   pi.on("session_start", async (event, context) => {
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
+    const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
+    if (storageStatus.legacyProjectStoreDetected) {
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis detected and ignored a project-local legacy store at ${storageStatus.legacyProjectStorePath}. The active global-profile store is ${storageStatus.effectiveZvecRoot}.`,
+        "warning",
+      );
+    }
     let runtimeReadyError: Error | undefined;
     try {
       await runtime.ready(context.signal);
@@ -375,6 +416,13 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       );
     }
     const memory = runtime.getMemory<MemoryService>();
+    if (memory !== undefined && durableRelationships === undefined) {
+      durableRelationships = new DurableRelationshipLearningCoordinator({
+        memory,
+        queue: backgroundQueue,
+        owner: `pi-mentis-memory:${process.pid}:${operationId("operation")}`,
+      });
+    }
 
     // Create evidence store BEFORE tool registration so coordinators
     // receive a valid reference through dynamic accessors.
@@ -404,7 +452,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         () => scopePlanner,
         relationshipTurn,
         recentAssertions,
-        backgroundQueue,
+        recallGuard,
+        durableRelationships,
       );
       pi.registerCommand("mentis", {
         description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
@@ -430,6 +479,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
           notifyWhenUiAvailable(
             commandCtx,
             formatPiToolJson({
+              storage: getStorageStatus(commandCtx.cwd, config.storage.rootDir),
               runtime: runtime.snapshot(),
               scheduler: scheduler.snapshot(),
               context:
@@ -459,6 +509,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         },
       });
       registered = true;
+    }
+    const startupReasoner = createPiPairwiseRelationshipReasoner(context);
+    if (startupReasoner !== undefined) {
+      await durableRelationships?.recover(startupReasoner, 128, (resolvedId) => {
+        recentAssertions.resolve(resolvedId);
+      });
     }
     if (memory === undefined || storeHandle === undefined) {
       if (runtimeReadyError === undefined) {
@@ -661,6 +717,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   });
   pi.on("input", async (event) => {
     relationshipTurn.beginTurn();
+    recallGuard.beginTurn();
     if (latestRetrievalTraceId !== undefined) {
       const confirmation = /^(?:对|是的|没错|就是这个|正确|yes|correct|exactly)\b/i.test(
         event.text.trim(),
@@ -938,6 +995,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     await captureSession?.finish().catch(() => undefined);
   });
   pi.on("session_shutdown", async (event) => {
+    durableRelationships?.close();
     await backgroundQueue.drain();
     if (event.reason === "quit") {
       await runtime.dispose();

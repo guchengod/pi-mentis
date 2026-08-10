@@ -141,7 +141,15 @@ export interface PublicRecallResult {
   readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
   readonly anchored: boolean;
   readonly reason?:
-    "not_found" | "scope_denied" | "not_ready" | "expired" | "failed" | "ambiguous" | "unavailable";
+    | "not_found"
+    | "scope_denied"
+    | "not_ready"
+    | "expired"
+    | "failed"
+    | "ambiguous"
+    | "unavailable"
+    | "invalid_memory_id"
+    | "no_direct_memory_support";
   readonly summary?: string;
   readonly hits: readonly PublicRecallHit[];
   readonly traceId?: string;
@@ -149,6 +157,14 @@ export interface PublicRecallResult {
   readonly consistency?: "pending_relationship";
   readonly provisionalLatestId?: string;
   readonly pendingRelationshipIds?: readonly string[];
+  readonly supportLevel?: "direct" | "related" | "weak" | "none";
+  readonly noDirectSupport?: boolean;
+  readonly alreadySearchedThisTurn?: boolean;
+}
+
+/** Public memory IDs are the exact lowercase SHA-256-shaped IDs returned by Mentis. */
+export function isValidPublicMemoryId(value: string): boolean {
+  return /^[a-f0-9]{64}$/u.test(value);
 }
 
 // ─── Tool Descriptions ────────────────────────────────────────────
@@ -234,10 +250,12 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       "Use search_memory when the request depends on durable context from earlier sessions that is not already available.",
       "Use it for explicit memory questions, previous work, saved preferences, project history, past decisions, fixes, or task continuation.",
       "When the user pastes a Mentis-returned record ID and asks about its content, history, corrections, or evidence, use search_memory with the id parameter for anchored retrieval.",
+      "A Mentis memory ID is exactly 64 lowercase hexadecimal characters and must have been returned by Mentis. Short opaque labels and arbitrary alphanumeric tokens are ordinary content, not memory IDs.",
       "Use id for exact retrieval and id plus query for history, evidence, correction, or conflicts.",
       "Do not search automatically at every session start, for trivial queries, or merely to verify a successful commit.",
       'A semantic query search miss does not prove a memory was never stored. If storage existence matters and an exact ID is available, use ID lookup. Otherwise state only that the current search did not retrieve it — never claim "it was not written" solely because a query search returned no results.',
       'When consistency is "pending_relationship", prefer the hit marked projection="provisional_latest" for the user\'s immediate current-session answer. Hits marked "shadowed_by_pending" remain persistent storage truth but are provisionally older; do not claim their persistent status has already changed.',
+      "When noDirectSupport is true, the retrieved memories do not directly answer the requested fact. If alreadySearchedThisTurn is also true, stop reformulating the same query and answer that current memory has insufficient information.",
     ],
     async execute(_toolCallId, toolParams, abortSignal, _onUpdate, context) {
       const query = typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;
@@ -245,9 +263,24 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       if (query === undefined && id === undefined) {
         throw new Error("search_memory requires query, id, or both");
       }
+      if (id !== undefined && !isValidPublicMemoryId(id)) {
+        if (query === undefined) {
+          return toolResult({
+            found: false,
+            resourceType: "unknown",
+            anchored: false,
+            reason: "invalid_memory_id",
+            summary:
+              "The supplied token is not a Mentis memory ID. Treat it as ordinary user content rather than an ID.",
+            hits: [],
+            supportLevel: "none",
+            noDirectSupport: true,
+          } satisfies PublicRecallResult);
+        }
+      }
       const request: { readonly query?: string; readonly id?: string } = {
         ...(query ? { query } : {}),
-        ...(id ? { id } : {}),
+        ...(id && isValidPublicMemoryId(id) ? { id } : {}),
       };
       const result = await facade.recall(request, abortSignal, context);
       return toolResult(result);

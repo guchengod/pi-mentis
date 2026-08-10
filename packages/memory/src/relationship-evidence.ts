@@ -4,6 +4,7 @@ import type {
   MemorySemanticHints,
   PairwiseRelationshipSignals,
 } from "./types.js";
+import type { MentisBackgroundQueue } from "./background-queue.js";
 
 export interface RecalledMemoryEvidence {
   readonly id: string;
@@ -38,6 +39,156 @@ export interface RelationshipProposal {
   readonly relation: MemoryRelationship;
   readonly confidence: number;
   readonly signals?: PairwiseRelationshipSignals;
+  readonly incomingHints?: MemorySemanticHints;
+  readonly targetHints?: MemorySemanticHints;
+}
+
+export interface RelationshipEvidenceValidation {
+  readonly valid: boolean;
+  readonly gateName?: "reinforceGate" | "supersedeGate" | "retractGate" | "conflictGate";
+  readonly rejectReasons: readonly string[];
+}
+
+function canonicalHint(value: string | undefined): string | undefined {
+  const normalized = value
+    ?.normalize("NFKC")
+    .toLocaleLowerCase()
+    .replaceAll(/[\p{P}\p{S}\s]+/gu, "");
+  return normalized === undefined || normalized.length === 0 ? undefined : normalized;
+}
+
+function corroboratesSameIdentity(
+  incoming: string | undefined,
+  target: string | undefined,
+): boolean {
+  const left = canonicalHint(incoming);
+  const right = canonicalHint(target);
+  return left !== undefined && right !== undefined && left === right;
+}
+
+function hasCanonicalHint(value: string | undefined): boolean {
+  return canonicalHint(value) !== undefined;
+}
+
+/**
+ * Rejects internally contradictory model proposals before a relationship gate
+ * can authorize a persistent transition. Pairwise hints are open text, not a
+ * subject registry; they only corroborate that both sides name the same target.
+ */
+export function validateRelationshipEvidence(
+  proposal: RelationshipProposal,
+): RelationshipEvidenceValidation {
+  const signals = proposal.signals;
+  if (signals === undefined) return { valid: false, rejectReasons: ["signals_missing"] };
+  const identity = signals.identityEvidence;
+  if (identity === undefined) {
+    return { valid: false, rejectReasons: ["identity_evidence_missing"] };
+  }
+  const rejectReasons: string[] = [];
+  const gateName =
+    proposal.relation === "reinforce"
+      ? "reinforceGate"
+      : proposal.relation === "supersede"
+        ? "supersedeGate"
+        : proposal.relation === "retract"
+          ? "retractGate"
+          : proposal.relation === "conflict"
+            ? "conflictGate"
+            : undefined;
+  if (gateName === undefined) {
+    return { valid: false, rejectReasons: ["relationship_is_non_mutating"] };
+  }
+  const threshold =
+    proposal.relation === "reinforce"
+      ? 0.9
+      : proposal.relation === "supersede"
+        ? 0.92
+        : proposal.relation === "retract"
+          ? 0.94
+          : 0.95;
+  if (proposal.confidence < threshold) rejectReasons.push("confidence_below_gate_threshold");
+  if (identity.referent !== "same") rejectReasons.push("referent_identity_not_same");
+  if (identity.attribute !== "same") rejectReasons.push("attribute_identity_not_same");
+  if (
+    identity.referent === "same" &&
+    !corroboratesSameIdentity(
+      proposal.incomingHints?.subjectHint,
+      proposal.targetHints?.subjectHint,
+    )
+  ) {
+    rejectReasons.push("referent_identity_not_corroborated");
+  }
+  if (
+    identity.attribute === "same" &&
+    !(
+      corroboratesSameIdentity(
+        proposal.incomingHints?.relationHint,
+        proposal.targetHints?.relationHint,
+      ) ||
+      (corroboratesSameIdentity(
+        proposal.incomingHints?.subjectHint,
+        proposal.targetHints?.subjectHint,
+      ) &&
+        hasCanonicalHint(proposal.incomingHints?.relationHint) &&
+        hasCanonicalHint(proposal.targetHints?.relationHint))
+    )
+  ) {
+    rejectReasons.push("attribute_identity_not_corroborated");
+  }
+
+  switch (proposal.relation) {
+    case "reinforce":
+      if (identity.value !== "same") rejectReasons.push("reinforcement_value_not_same");
+      if (!signals.compatibleValue || signals.incompatibleValue) {
+        rejectReasons.push("reinforcement_value_signals_inconsistent");
+      }
+      if (
+        signals.replacementValuePresent ||
+        signals.explicitRetraction ||
+        signals.mutuallyExclusive
+      ) {
+        rejectReasons.push("reinforcement_contains_destructive_semantics");
+      }
+      break;
+    case "supersede":
+      if (identity.value !== "different") rejectReasons.push("replacement_value_not_different");
+      if (
+        !signals.explicitNewAssertion ||
+        signals.explicitRetraction ||
+        !signals.replacementValuePresent ||
+        !signals.incompatibleValue ||
+        signals.compatibleValue
+      ) {
+        rejectReasons.push("replacement_evidence_inconsistent");
+      }
+      break;
+    case "retract":
+      if (
+        !signals.explicitRetraction ||
+        signals.replacementValuePresent ||
+        signals.compatibleValue ||
+        signals.mutuallyExclusive
+      ) {
+        rejectReasons.push("withdrawal_evidence_inconsistent");
+      }
+      break;
+    case "conflict":
+      if (identity.value !== "different") rejectReasons.push("conflict_value_not_different");
+      if (
+        !signals.mutuallyExclusive ||
+        !signals.incompatibleValue ||
+        signals.compatibleValue ||
+        signals.explicitNewAssertion ||
+        signals.explicitRetraction ||
+        signals.replacementValuePresent
+      ) {
+        rejectReasons.push("conflict_evidence_inconsistent");
+      }
+      break;
+    default:
+      break;
+  }
+  return { valid: rejectReasons.length === 0, gateName, rejectReasons };
 }
 
 export function reinforceGate(proposal: RelationshipProposal): boolean {
@@ -45,9 +196,8 @@ export function reinforceGate(proposal: RelationshipProposal): boolean {
   return (
     proposal.relation === "reinforce" &&
     signals !== undefined &&
+    validateRelationshipEvidence(proposal).valid &&
     confidence >= 0.9 &&
-    signals.sameReferent &&
-    signals.sameAttribute &&
     signals.compatibleValue &&
     !signals.incompatibleValue &&
     !signals.replacementValuePresent &&
@@ -60,9 +210,8 @@ export function supersedeGate(proposal: RelationshipProposal): boolean {
   return (
     proposal.relation === "supersede" &&
     signals !== undefined &&
+    validateRelationshipEvidence(proposal).valid &&
     confidence >= 0.92 &&
-    signals.sameReferent &&
-    signals.sameAttribute &&
     signals.explicitNewAssertion &&
     !signals.explicitRetraction &&
     signals.replacementValuePresent &&
@@ -76,9 +225,8 @@ export function retractGate(proposal: RelationshipProposal): boolean {
   return (
     proposal.relation === "retract" &&
     signals !== undefined &&
+    validateRelationshipEvidence(proposal).valid &&
     confidence >= 0.94 &&
-    signals.sameReferent &&
-    signals.sameAttribute &&
     signals.explicitRetraction &&
     !signals.replacementValuePresent &&
     !signals.compatibleValue
@@ -90,9 +238,8 @@ export function conflictGate(proposal: RelationshipProposal): boolean {
   return (
     proposal.relation === "conflict" &&
     signals !== undefined &&
+    validateRelationshipEvidence(proposal).valid &&
     confidence >= 0.95 &&
-    signals.sameReferent &&
-    signals.sameAttribute &&
     signals.incompatibleValue &&
     !signals.compatibleValue &&
     !signals.explicitNewAssertion &&
@@ -158,41 +305,65 @@ export class RelationshipEvidenceProducer {
         judgment: await reasoner.judge(incomingContent, candidate),
       })),
     );
-    const acceptedJudgments = judgments
-      .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+    const fulfilledJudgments = judgments.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    );
+    if (fulfilledJudgments.length === 0) {
+      const failure = judgments.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+      return undefined;
+    }
+    const acceptedJudgments = fulfilledJudgments
       .filter(({ judgment }) => acceptsRelationshipProposal(judgment))
       .sort((left, right) => right.judgment.confidence - left.judgment.confidence);
     const strongest = acceptedJudgments[0];
-    if (strongest === undefined) return undefined;
     const runnerUp = acceptedJudgments[1];
-    if (
+    const ambiguous =
+      strongest !== undefined &&
       runnerUp !== undefined &&
-      runnerUp.judgment.confidence >= strongest.judgment.confidence - 0.03
-    ) {
-      return undefined;
-    }
+      runnerUp.judgment.confidence >= strongest.judgment.confidence - 0.03;
+    const selected =
+      strongest === undefined || ambiguous
+        ? fulfilledJudgments.toSorted(
+            (left, right) => right.judgment.confidence - left.judgment.confidence,
+          )[0]
+        : strongest;
+    if (selected === undefined) return undefined;
     const targetHints =
-      strongest.judgment.targetHints === undefined
+      selected.judgment.targetHints === undefined
         ? undefined
-        : { [strongest.candidate.id]: strongest.judgment.targetHints };
+        : { [selected.candidate.id]: selected.judgment.targetHints };
     const candidateReason =
-      strongest.candidate.evidenceSource === "semantic_candidate"
+      selected.candidate.evidenceSource === "semantic_candidate"
         ? "semantic_candidate_pairwise_review"
         : "same_turn_recalled_target";
+    const validation = validateRelationshipEvidence(selected.judgment);
+    const gateAccepted = strongest !== undefined && !ambiguous;
+    const gateRejectReasons = gateAccepted
+      ? []
+      : ambiguous
+        ? ["ambiguous_competing_relationship_targets"]
+        : validation.rejectReasons;
     return {
-      relation: strongest.judgment.relation as MemoryRelationshipEvidence["relation"],
-      targetIds: [strongest.candidate.id],
-      confidence: strongest.judgment.confidence,
+      relation: selected.judgment.relation,
+      targetIds: [selected.candidate.id],
+      confidence: selected.judgment.confidence,
       reasonCodes: [
         "pairwise_memory_reasoning",
         candidateReason,
-        ...strongest.judgment.reasonCodes,
+        ...selected.judgment.reasonCodes,
+        ...(gateAccepted ? [] : ["deterministic_gate_rejected"]),
       ],
       source: "background_consolidation",
-      signals: strongest.judgment.signals,
-      ...(strongest.judgment.incomingHints === undefined
+      signals: selected.judgment.signals,
+      proposalRelationship: selected.judgment.relation,
+      proposalConfidence: selected.judgment.confidence,
+      ...(validation.gateName === undefined ? {} : { gateName: validation.gateName }),
+      gateAccepted,
+      gateRejectReasons,
+      ...(selected.judgment.incomingHints === undefined
         ? {}
-        : { incomingHints: strongest.judgment.incomingHints }),
+        : { incomingHints: selected.judgment.incomingHints }),
       ...(targetHints === undefined ? {} : { targetHints }),
     };
   }
@@ -217,27 +388,201 @@ export class RelationshipConsolidationCoordinator {
     recalled: readonly RecalledMemoryEvidence[],
     reasoner: PairwiseRelationshipReasoner,
     scopeContext: import("./types.js").PiScopeContext,
+    execution: {
+      readonly owner?: string;
+      readonly recoveryReason?: import("./types.js").RelationshipRecoveryReason;
+      readonly leaseMs?: number;
+    } = {},
   ): Promise<import("./types.js").RelationshipConsolidationResult | undefined> {
     if (this.#memory.consolidateRelationship === undefined || recalled.length === 0) {
       return undefined;
     }
-    const incoming = await this.#memory.get(incomingId, {
-      scopeContext,
-      accessIntent: "explicit_id",
-    });
-    if (incoming === undefined || incoming.status !== "active") return undefined;
-    const fresh: RecalledMemoryEvidence[] = [];
-    for (const candidate of recalled) {
-      if (candidate.id === incomingId) continue;
-      const record = await this.#memory.get(candidate.id, {
+    let candidates = recalled;
+    let claimed = false;
+    let failed = false;
+    let operationKeys: readonly string[] = [];
+    if (this.#memory.claimRelationshipLearning !== undefined) {
+      const lease = await this.#memory.claimRelationshipLearning(
+        incomingId,
+        {
+          owner: execution.owner ?? `pi-mentis:${process.pid}`,
+          leaseMs: execution.leaseMs ?? 45_000,
+          recoveryReason: execution.recoveryReason ?? "normal",
+        },
+        { scopeContext },
+      );
+      if (lease === undefined) return undefined;
+      claimed = true;
+      const supplied = new Map(recalled.map((candidate) => [candidate.id, candidate]));
+      candidates = lease.candidates.map(
+        (candidate) =>
+          supplied.get(candidate.id) ?? {
+            id: candidate.id,
+            content: "",
+            status: "current" as const,
+            match: "semantic" as const,
+            evidenceSource: candidate.source,
+          },
+      );
+    }
+    try {
+      const incoming = await this.#memory.get(incomingId, {
         scopeContext,
         accessIntent: "explicit_id",
       });
-      if (record?.status !== "active") continue;
-      fresh.push({ ...candidate, content: record.content, status: "current" });
+      if (incoming === undefined || incoming.status !== "active") return undefined;
+      const fresh: RecalledMemoryEvidence[] = [];
+      for (const candidate of candidates) {
+        if (candidate.id === incomingId) continue;
+        const record = await this.#memory.get(candidate.id, {
+          scopeContext,
+          accessIntent: "explicit_id",
+        });
+        if (record?.status !== "active") continue;
+        fresh.push({ ...candidate, content: record.content, status: "current" });
+      }
+      const evidence = await this.#producer.produce(incoming.content, fresh, reasoner);
+      const result =
+        evidence === undefined
+          ? undefined
+          : await this.#memory.consolidateRelationship(incomingId, evidence, { scopeContext });
+      operationKeys = result?.operationKey === undefined ? [] : [result.operationKey];
+      return result;
+    } catch (error) {
+      failed = true;
+      await this.#memory.failRelationshipLearning?.(incomingId, error, { scopeContext });
+      throw error;
+    } finally {
+      if (claimed && !failed) {
+        await this.#memory.resolveRelationshipLearning?.(incomingId, operationKeys, {
+          scopeContext,
+        });
+      }
     }
-    const evidence = await this.#producer.produce(incoming.content, fresh, reasoner);
-    if (evidence === undefined) return undefined;
-    return this.#memory.consolidateRelationship(incomingId, evidence, { scopeContext });
+  }
+}
+
+export interface DurableRelationshipLearningCoordinatorOptions {
+  readonly memory: import("./types.js").MemoryService;
+  readonly queue: MentisBackgroundQueue;
+  readonly owner?: string;
+  readonly leaseMs?: number;
+}
+
+/** Schedules durable work, recovers expired leases, and applies bounded retry backoff. */
+export class DurableRelationshipLearningCoordinator {
+  readonly #memory: import("./types.js").MemoryService;
+  readonly #queue: MentisBackgroundQueue;
+  readonly #consolidation: RelationshipConsolidationCoordinator;
+  readonly #owner: string;
+  readonly #leaseMs: number;
+  readonly #retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  #closed = false;
+
+  constructor(options: DurableRelationshipLearningCoordinatorOptions) {
+    this.#memory = options.memory;
+    this.#queue = options.queue;
+    this.#consolidation = new RelationshipConsolidationCoordinator({ memory: options.memory });
+    this.#owner = options.owner ?? `pi-mentis:${process.pid}`;
+    this.#leaseMs = options.leaseMs ?? 45_000;
+  }
+
+  schedule(
+    work: import("./types.js").RelationshipLearningWork,
+    reasoner: PairwiseRelationshipReasoner,
+    recoveryReason: import("./types.js").RelationshipRecoveryReason = "normal",
+    onResolved?: (incomingId: string) => void,
+  ): void {
+    if (this.#closed) return;
+    const candidates: RecalledMemoryEvidence[] = work.candidates.map((candidate) => ({
+      id: candidate.id,
+      content: "",
+      status: "current",
+      match: "semantic",
+      evidenceSource: candidate.source,
+    }));
+    this.#queue.enqueue({
+      kind: "memory.consolidate",
+      coalesceKey: `memory.consolidate:${work.incomingId}`,
+      execute: async () => {
+        try {
+          await this.#consolidation.consolidate(
+            work.incomingId,
+            candidates,
+            reasoner,
+            work.scopeContext,
+            { owner: this.#owner, leaseMs: this.#leaseMs, recoveryReason },
+          );
+          const latest = await this.#memory.getRelationshipLearning?.(work.incomingId);
+          if (latest?.state === "resolved") onResolved?.(work.incomingId);
+          else if (latest?.state === "pending" || latest?.state === "processing") {
+            this.#scheduleDeferred(latest, reasoner, onResolved);
+          } else if (latest?.state === "failed_retryable") {
+            await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
+          }
+        } catch {
+          await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
+        }
+      },
+    });
+  }
+
+  async recover(
+    reasoner: PairwiseRelationshipReasoner,
+    limit = 128,
+    onResolved?: (incomingId: string) => void,
+  ): Promise<number> {
+    const recoverable = (await this.#memory.listPendingRelationshipLearning?.({ limit })) ?? [];
+    for (const work of recoverable) {
+      const recoveryReason =
+        work.state === "processing"
+          ? "lease_recovery"
+          : work.state === "failed_retryable"
+            ? "retry"
+            : "startup_reconciliation";
+      this.schedule(work, reasoner, recoveryReason, onResolved);
+    }
+    return recoverable.length;
+  }
+
+  close(): void {
+    this.#closed = true;
+    for (const timer of this.#retryTimers.values()) clearTimeout(timer);
+    this.#retryTimers.clear();
+  }
+
+  async #scheduleRetry(
+    incomingId: string,
+    reasoner: PairwiseRelationshipReasoner,
+    onResolved?: (incomingId: string) => void,
+  ): Promise<void> {
+    if (this.#closed || this.#retryTimers.has(incomingId)) return;
+    const work = await this.#memory.getRelationshipLearning?.(incomingId);
+    if (work?.state !== "failed_retryable") return;
+    const delay = Math.max(0, (work.nextRetryAt ?? Date.now()) - Date.now());
+    const timer = setTimeout(() => {
+      this.#retryTimers.delete(incomingId);
+      if (!this.#closed) this.schedule(work, reasoner, "retry", onResolved);
+    }, delay);
+    timer.unref?.();
+    this.#retryTimers.set(incomingId, timer);
+  }
+
+  #scheduleDeferred(
+    work: import("./types.js").RelationshipLearningWork,
+    reasoner: PairwiseRelationshipReasoner,
+    onResolved?: (incomingId: string) => void,
+  ): void {
+    if (this.#closed || this.#retryTimers.has(work.incomingId)) return;
+    const delay =
+      work.state === "processing"
+        ? Math.max(1_000, (work.leaseExpiresAt ?? Date.now() + 1_000) - Date.now())
+        : 1_000;
+    const timer = setTimeout(() => {
+      this.#retryTimers.delete(work.incomingId);
+      if (!this.#closed) this.schedule(work, reasoner, "retry", onResolved);
+    }, delay);
+    timer.unref?.();
+    this.#retryTimers.set(work.incomingId, timer);
   }
 }

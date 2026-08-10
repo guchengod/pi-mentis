@@ -111,6 +111,11 @@ export const ProviderUnavailableError = defineError(
 export const SearchTimeoutError = defineError("SearchTimeoutError", "SEARCH_TIMEOUT");
 export const StorageBusyError = defineError("StorageBusyError", "STORAGE_BUSY");
 export const StorageCorruptionError = defineError("StorageCorruptionError", "STORAGE_CORRUPTION");
+export const StorageRootMigrationRequiredError = defineError(
+  "StorageRootMigrationRequiredError",
+  "STORAGE_ROOT_MIGRATION_REQUIRED",
+);
+export const StorageSplitBrainError = defineError("StorageSplitBrainError", "STORAGE_SPLIT_BRAIN");
 export const QueueFullError = defineError("QueueFullError", "QUEUE_FULL");
 export const OperationCancelledError = defineError(
   "OperationCancelledError",

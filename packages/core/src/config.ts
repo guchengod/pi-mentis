@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { ConfigurationError } from "./errors.js";
-import { resolveStorageRoot, globalConfigPath } from "./mentis-home.js";
+import { assertStorageRootReady, resolveStorageRoot, globalConfigPath } from "./mentis-home.js";
 import { PI_VERSION, isPiVersionSupported } from "./compatibility.js";
 
 export interface EmbeddingBatchPolicy {
@@ -180,8 +180,12 @@ export interface PiMentisConfig {
   readonly intelligence: IntelligenceConfig;
 }
 
-export function createDefaultConfig(cwd: string): PiMentisConfig {
+export function createDefaultConfig(
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): PiMentisConfig {
   void cwd;
+  const storageRoot = resolveStorageRoot({ environment });
   const availableProcessors = globalThis.navigator?.hardwareConcurrency ?? 2;
   return {
     runtime: { piVersion: PI_VERSION },
@@ -264,7 +268,7 @@ export function createDefaultConfig(cwd: string): PiMentisConfig {
       },
     },
     storage: {
-      rootDir: path.join(resolveStorageRoot().zvecRoot),
+      rootDir: path.join(storageRoot.zvecRoot),
       readOnly: false,
       lockTimeoutMs: 5_000,
       generationRetentionMs: 7 * 24 * 60 * 60 * 1_000,
@@ -542,13 +546,16 @@ function applySiliconFlowEnvironment(
 
 export async function loadConfig(
   _cwd: string,
-  filename = globalConfigPath(),
+  filename?: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): Promise<PiMentisConfig> {
-  const defaults = createDefaultConfig(_cwd);
+  const storageRoot = resolveStorageRoot({ environment });
+  if (filename === undefined) assertStorageRootReady(storageRoot);
+  const resolvedFilename = filename ?? globalConfigPath({ environment });
+  const defaults = createDefaultConfig(_cwd, environment);
   let override: unknown;
   try {
-    override = JSON.parse(await readFile(filename, "utf8")) as unknown;
+    override = JSON.parse(await readFile(resolvedFilename, "utf8")) as unknown;
   } catch (error: unknown) {
     const code =
       typeof error === "object" && error !== null && "code" in error
@@ -556,11 +563,11 @@ export async function loadConfig(
         : undefined;
     if (code === "ENOENT") {
       const resolved = validateConfig(applySiliconFlowEnvironment(defaults, environment));
-      await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
-      await writeFile(filename, JSON.stringify(resolved, null, 2), { mode: 0o600 });
+      await mkdir(path.dirname(resolvedFilename), { recursive: true, mode: 0o700 });
+      await writeFile(resolvedFilename, JSON.stringify(resolved, null, 2), { mode: 0o600 });
       return resolved;
     }
-    throw new ConfigurationError(`Unable to read Pi Mentis config ${filename}`, {
+    throw new ConfigurationError(`Unable to read Pi Mentis config ${resolvedFilename}`, {
       operation: "configuration-load",
       retryable: false,
       cause: error,

@@ -12,11 +12,11 @@ import { DeterministicEmbeddingProvider, embeddingSpace, testStorage } from "./h
 
 const roots: string[] = [];
 
-async function temporaryStore(): Promise<{ root: string; store: ZvecStore }> {
+async function temporaryStore(dimensions = 768): Promise<{ root: string; store: ZvecStore }> {
   const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-intelligence-"));
   roots.push(root);
   const store = new ZvecStore(testStorage(root));
-  const space = embeddingSpace();
+  const space = embeddingSpace(dimensions);
   await store.start({ knowledge: space, memory: space, capability: space });
   return { root, store };
 }
@@ -39,6 +39,37 @@ const scope: PiScopeContext = {
   sessionId: "session:a",
   branchId: "feature",
 };
+
+function replacementEvidence(targetId: string, oldValue: string, newValue: string) {
+  return {
+    relation: "supersede" as const,
+    targetIds: [targetId],
+    confidence: 0.99,
+    reasonCodes: ["explicit_replacement"],
+    source: "background_consolidation" as const,
+    signals: {
+      identityEvidence: { referent: "same", attribute: "same", value: "different" } as const,
+      explicitNewAssertion: true,
+      explicitRetraction: false,
+      replacementValuePresent: true,
+      compatibleValue: false,
+      incompatibleValue: true,
+      mutuallyExclusive: false,
+    },
+    incomingHints: {
+      subjectHint: "temporary service",
+      relationHint: "current value",
+      valueHint: newValue,
+    },
+    targetHints: {
+      [targetId]: {
+        subjectHint: "temporary service",
+        relationHint: "current value",
+        valueHint: oldValue,
+      },
+    },
+  };
+}
 
 describe("V2 intelligence state on real Zvec", () => {
   it("persists revisioned state and rejects stale CAS", async () => {
@@ -63,6 +94,189 @@ describe("V2 intelligence state on real Zvec", () => {
     expect((await new ZvecStateStore(reopened).get(first.id))?.value).toEqual({ phase: "queued" });
     await reopened.close();
   });
+
+  it("recovers an expired relationship lease and serializes a rapid correction chain", async () => {
+    const { root, store } = await temporaryStore(64);
+    let now = 1_000;
+    const clock = { now: () => now };
+    const provider = new DeterministicEmbeddingProvider(64);
+    const memory = createMemoryService({
+      store,
+      embedding: provider,
+      embeddingSpace: embeddingSpace(64),
+      dimensions: 64,
+      viewsEnabled: false,
+      clock,
+    });
+    const base = {
+      scope: { kind: "user" as const, id: "user" },
+      scopeContext: scope,
+      authority: EvidenceAuthority.UserCurrentInstruction,
+      provenance: { origin: "user" as const, epistemicState: "asserted" as const },
+    };
+    const old = await memory.commit({
+      ...base,
+      content: "temporary service current value is old-a",
+    });
+    now = 2_000;
+    const next = await memory.commit({
+      ...base,
+      content: "temporary service current value is new-b",
+      relationshipCandidates: [{ id: old.record!.id, source: "same_turn_recall" }],
+    });
+    expect(await memory.getRelationshipLearning?.(next.record!.id)).toMatchObject({
+      state: "pending",
+      attempts: 0,
+    });
+    expect(
+      await memory.claimRelationshipLearning?.(
+        next.record!.id,
+        { owner: "worker-before-crash", leaseMs: 1_000, recoveryReason: "normal" },
+        { scopeContext: scope },
+      ),
+    ).toMatchObject({ state: "processing", attempts: 1 });
+    await store.close();
+
+    now = 4_000;
+    const reopened = new ZvecStore(testStorage(root));
+    const space = embeddingSpace(64);
+    await reopened.start({ knowledge: space, memory: space, capability: space });
+    const recovered = createMemoryService({
+      store: reopened,
+      embedding: new DeterministicEmbeddingProvider(64),
+      embeddingSpace: space,
+      dimensions: 64,
+      viewsEnabled: false,
+      clock,
+    });
+    expect(
+      (await recovered.listRecoverableRelationshipLearning?.({ now, limit: 16 }))?.map(
+        (work) => work.incomingId,
+      ),
+    ).toContain(next.record!.id);
+    expect(
+      await recovered.claimRelationshipLearning?.(
+        next.record!.id,
+        { owner: "worker-after-restart", leaseMs: 1_000, recoveryReason: "lease_recovery" },
+        { scopeContext: scope },
+      ),
+    ).toMatchObject({ state: "processing", attempts: 2 });
+    const recoveredResult = await recovered.consolidateRelationship?.(
+      next.record!.id,
+      replacementEvidence(old.record!.id, "old-a", "new-b"),
+      { scopeContext: scope },
+    );
+    expect(recoveredResult).toMatchObject({ action: "applied", relationDecision: "supersede" });
+    await recovered.resolveRelationshipLearning?.(
+      next.record!.id,
+      recoveredResult?.operationKey === undefined ? [] : [recoveredResult.operationKey],
+      { scopeContext: scope },
+    );
+    expect(await recovered.getRelationshipLearning?.(next.record!.id)).toMatchObject({
+      state: "resolved",
+      attempts: 2,
+    });
+    expect((await recovered.get(old.record!.id, { scopeContext: scope }))?.status).toBe(
+      "superseded",
+    );
+
+    now = 5_000;
+    const third = await recovered.commit({
+      ...base,
+      content: "temporary service current value is new-c",
+      relationshipCandidates: [{ id: next.record!.id, source: "same_turn_recall" }],
+    });
+    now = 6_000;
+    const latest = await recovered.commit({
+      ...base,
+      content: "temporary service current value is new-d",
+      relationshipCandidates: [{ id: third.record!.id, source: "same_turn_recall" }],
+    });
+    expect(
+      await recovered.claimRelationshipLearning?.(
+        latest.record!.id,
+        { owner: "late-worker", leaseMs: 1_000, recoveryReason: "normal" },
+        { scopeContext: scope },
+      ),
+    ).toBeUndefined();
+    const thirdLease = await recovered.claimRelationshipLearning?.(
+      third.record!.id,
+      { owner: "ordered-worker", leaseMs: 1_000, recoveryReason: "normal" },
+      { scopeContext: scope },
+    );
+    expect(thirdLease).toMatchObject({ state: "processing" });
+    const thirdResult = await recovered.consolidateRelationship?.(
+      third.record!.id,
+      replacementEvidence(next.record!.id, "new-b", "new-c"),
+      { scopeContext: scope },
+    );
+    await recovered.resolveRelationshipLearning?.(
+      third.record!.id,
+      thirdResult?.operationKey === undefined ? [] : [thirdResult.operationKey],
+      { scopeContext: scope },
+    );
+    expect(
+      await recovered.claimRelationshipLearning?.(
+        latest.record!.id,
+        { owner: "ordered-worker", leaseMs: 1_000, recoveryReason: "retry" },
+        { scopeContext: scope },
+      ),
+    ).toMatchObject({ state: "processing" });
+    const latestResult = await recovered.consolidateRelationship?.(
+      latest.record!.id,
+      replacementEvidence(third.record!.id, "new-c", "new-d"),
+      { scopeContext: scope },
+    );
+    await recovered.resolveRelationshipLearning?.(
+      latest.record!.id,
+      latestResult?.operationKey === undefined ? [] : [latestResult.operationKey],
+      { scopeContext: scope },
+    );
+    expect((await recovered.get(latest.record!.id, { scopeContext: scope }))?.status).toBe(
+      "active",
+    );
+    expect((await recovered.get(third.record!.id, { scopeContext: scope }))?.status).toBe(
+      "superseded",
+    );
+    expect((await recovered.get(next.record!.id, { scopeContext: scope }))?.status).toBe(
+      "superseded",
+    );
+
+    now = 7_000;
+    const retryable = await recovered.commit({
+      ...base,
+      content: "temporary service current value is retry-e",
+      relationshipCandidates: [{ id: latest.record!.id, source: "same_turn_recall" }],
+    });
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const lease = await recovered.claimRelationshipLearning?.(
+        retryable.record!.id,
+        { owner: `retry-worker-${attempt}`, leaseMs: 1_000, recoveryReason: "retry" },
+        { scopeContext: scope },
+      );
+      expect(lease?.attempts).toBe(attempt);
+      const failed = await recovered.failRelationshipLearning?.(
+        retryable.record!.id,
+        new Error("pairwise provider timeout"),
+        { scopeContext: scope },
+      );
+      if (attempt < 4) {
+        expect(failed?.state).toBe("failed_retryable");
+        now = (failed?.nextRetryAt ?? now) + 1;
+      } else {
+        expect(failed?.state).toBe("failed_terminal");
+      }
+    }
+    expect(
+      (
+        await recovered.listRecoverableRelationshipLearning?.({ now: now + 60_000, limit: 16 })
+      )?.map((work) => work.incomingId),
+    ).not.toContain(retryable.record!.id);
+    expect((await recovered.get(retryable.record!.id, { scopeContext: scope }))?.status).toBe(
+      "active",
+    );
+    await reopened.close();
+  }, 120_000);
 
   it("persists relationship evolution, exact ID reads, views and current recall across restart", async () => {
     const { root, store } = await temporaryStore();

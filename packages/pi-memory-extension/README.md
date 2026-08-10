@@ -34,7 +34,9 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 
 ## 配置
 
-从 Pi 启动目录读取 `.pi-mentis/config.json`，所有字段可省略：
+默认从 `~/.pi/agent/.pi-mentis/config.json` 读取全局 profile 配置，不随启动目录或
+Workspace 变化。显式 Pi profile 使用 `<PI_CODING_AGENT_DIR>/.pi-mentis`；
+`PI_MENTIS_HOME` 可指定隔离的绝对路径。所有字段可省略：
 
 ```json
 {
@@ -52,11 +54,13 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
       "previewBytes": 4096
     }
   },
-  "storage": { "rootDir": "/Users/your-name/.pi/agent/pi-mentis/zvec" }
+  "storage": { "rootDir": "/Users/your-name/.pi/agent/.pi-mentis/zvec" }
 }
 ```
 
-API Key 只放环境变量。`storage.rootDir` 默认 `.pi-mentis/zvec`；同一目录同时只能有一个写入进程。
+API Key 只放环境变量。`storage.rootDir` 默认
+`~/.pi/agent/.pi-mentis/zvec`；同一目录同时只能有一个写入进程。发现旧
+`~/.pi/.pi-mentis` 与 canonical root 并存时会停止初始化，不会静默选择或覆盖。
 
 ## 检索与安全
 

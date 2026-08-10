@@ -49,6 +49,7 @@ export interface RememberExecutionContext {
   readonly activeUserPrompt?: string;
   /** Internal observer used to schedule slow relationship consolidation. */
   readonly onCommitted?: (result: CommitMemoryResult) => void;
+  readonly relationshipCandidates?: readonly import("./types.js").RelationshipLearningCandidate[];
   readonly signal?: AbortSignal;
 }
 
@@ -206,6 +207,9 @@ export class DefaultRememberCoordinator implements RememberCoordinator {
             ...(scopeContext.branchId === undefined ? {} : { branchId: scopeContext.branchId }),
           },
           ...(embedding === undefined ? {} : { embedding }),
+          ...(context.relationshipCandidates === undefined
+            ? {}
+            : { relationshipCandidates: context.relationshipCandidates }),
         },
         signal === undefined ? undefined : { signal },
       );

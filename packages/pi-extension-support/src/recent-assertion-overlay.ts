@@ -15,6 +15,196 @@ export interface RecentAssertionOverlayOptions {
   readonly maxEntries?: number;
 }
 
+export interface DurablePendingProjectionReader {
+  getRelationshipLearning?(incomingId: string): Promise<
+    | {
+        readonly incomingId: string;
+        readonly state: string;
+        readonly candidates: readonly { readonly id: string }[];
+      }
+    | undefined
+  >;
+  listPendingRelationshipLearning?(input?: { readonly limit?: number }): Promise<
+    readonly {
+      readonly incomingId: string;
+      readonly state: string;
+      readonly candidates: readonly { readonly id: string }[];
+    }[]
+  >;
+  get(
+    id: string,
+    options?: Readonly<Record<string, unknown>>,
+  ): Promise<
+    | {
+        readonly content: string;
+        readonly observedAt: number;
+        readonly authority?: number;
+        readonly scope?: { readonly kind?: string };
+      }
+    | undefined
+  >;
+}
+
+export interface AutomaticRecallHit {
+  readonly id: string;
+  readonly kind: "knowledge" | "memory" | "capability";
+  readonly text: string;
+  readonly score: number;
+  readonly tokenCount: number;
+  readonly authority: number;
+  readonly namespace: string;
+  readonly contentHash: string;
+  readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/** Applies the same durable pending projection to before-agent automatic recall. */
+export async function projectDurablePendingAutomaticRecall<
+  T extends { readonly hits: readonly AutomaticRecallHit[] },
+>(reader: DurablePendingProjectionReader, result: T): Promise<T> {
+  const listed = (await reader.listPendingRelationshipLearning?.({ limit: 32 })) ?? [];
+  const unresolved = listed.filter(
+    (work) =>
+      work.state === "pending" || work.state === "processing" || work.state === "failed_retryable",
+  );
+  if (unresolved.length === 0 || result.hits.length === 0) return result;
+
+  const connectedIds = new Set(result.hits.map((hit) => hit.id));
+  const relevant = new Map<string, (typeof unresolved)[number]>();
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const work of unresolved) {
+      if (relevant.has(work.incomingId)) continue;
+      if (
+        !connectedIds.has(work.incomingId) &&
+        !work.candidates.some((candidate) => connectedIds.has(candidate.id))
+      ) {
+        continue;
+      }
+      relevant.set(work.incomingId, work);
+      connectedIds.add(work.incomingId);
+      for (const candidate of work.candidates) connectedIds.add(candidate.id);
+      expanded = true;
+    }
+  }
+  if (relevant.size === 0) return result;
+
+  const candidateIds = new Set(
+    [...relevant.values()].flatMap((work) => work.candidates.map((candidate) => candidate.id)),
+  );
+  const leaves = [...relevant.values()].filter((work) => !candidateIds.has(work.incomingId));
+  const projected = await Promise.all(
+    leaves.map(async (work) => ({ work, record: await reader.get(work.incomingId) })),
+  );
+  const records = projected.filter(
+    (item): item is typeof item & { readonly record: NonNullable<typeof item.record> } =>
+      item.record !== undefined,
+  );
+  if (records.length === 0) return result;
+
+  const nonLeafIncomingIds = new Set(
+    [...relevant.keys()].filter(
+      (incomingId) => !leaves.some((leaf) => leaf.incomingId === incomingId),
+    ),
+  );
+  const shadowedIds = new Set([...candidateIds, ...nonLeafIncomingIds]);
+  const retained = result.hits.filter((hit) => !shadowedIds.has(hit.id));
+  const bestScore = Math.max(1, ...result.hits.map((hit) => hit.score));
+  const fallback = result.hits.find((hit) => hit.kind === "memory") ?? result.hits[0];
+  if (fallback === undefined) return result;
+  const provisional: AutomaticRecallHit[] = records
+    .toSorted((left, right) => right.record.observedAt - left.record.observedAt)
+    .map(({ work, record }, index) => ({
+      id: work.incomingId,
+      kind: "memory",
+      text: record.content,
+      score: bestScore + 1 - index / 100,
+      tokenCount: Math.max(1, Math.ceil(record.content.length / 4)),
+      authority: record.authority ?? fallback.authority,
+      namespace: fallback.namespace,
+      contentHash: `pending:${work.incomingId}`,
+      metadata: {
+        pendingRelationship: true,
+        provisionalLatest: true,
+        shadowedCandidateIds: work.candidates.map((candidate) => candidate.id),
+      },
+    }));
+  return { ...result, hits: [...provisional, ...retained] };
+}
+
+function publicKind(scopeKind: string | undefined): PublicRecallHit["kind"] {
+  switch (scopeKind) {
+    case "agent":
+    case "project":
+    case "repository":
+    case "task":
+    case "topic":
+    case "event":
+      return scopeKind;
+    default:
+      return "user";
+  }
+}
+
+/** Reconstructs read-your-writes projection from durable pending state after restart. */
+export async function projectDurablePendingAssertions(
+  reader: DurablePendingProjectionReader,
+  request: { readonly query?: string; readonly id?: string },
+  result: PublicRecallResult,
+): Promise<PublicRecallResult> {
+  if (reader.getRelationshipLearning === undefined) return result;
+  const overlay = new RecentAssertionOverlay({ ttlMs: Number.MAX_SAFE_INTEGER });
+  const hitIds = new Set(result.hits.map((hit) => hit.id));
+  const listed = (await reader.listPendingRelationshipLearning?.({ limit: 32 })) ?? [];
+  const direct = await Promise.all(
+    result.hits.map(async (hit) => reader.getRelationshipLearning?.(hit.id)),
+  );
+  const works = [
+    ...listed.filter(
+      (work) =>
+        hitIds.has(work.incomingId) ||
+        work.candidates.some((candidate) => hitIds.has(candidate.id)) ||
+        request.id === work.incomingId,
+    ),
+    ...direct.filter((work) => work !== undefined),
+  ];
+  const augmentedHits = [...result.hits];
+  for (const work of new Map(works.map((item) => [item.incomingId, item])).values()) {
+    if (
+      work === undefined ||
+      (work.state !== "pending" && work.state !== "processing" && work.state !== "failed_retryable")
+    ) {
+      continue;
+    }
+    const record = await reader.get(work.incomingId);
+    if (record === undefined) continue;
+    if (!hitIds.has(work.incomingId)) {
+      augmentedHits.push({
+        id: work.incomingId,
+        content: record.content,
+        kind: publicKind(record.scope?.kind),
+        status: "current",
+        match: "semantic",
+        resourceType: "memory",
+        sanitized: false,
+      });
+      hitIds.add(work.incomingId);
+    }
+    overlay.record({
+      memoryId: work.incomingId,
+      content: record.content,
+      observedAt: record.observedAt,
+      authority: "explicit_user",
+      candidateIds: work.candidates.map((candidate) => candidate.id),
+    });
+  }
+  return overlay.project(request, {
+    ...result,
+    found: augmentedHits.length > 0,
+    hits: augmentedHits,
+  });
+}
+
 /**
  * Session-local read-your-writes projection. This class never writes memory
  * records or changes persistent temporal status.

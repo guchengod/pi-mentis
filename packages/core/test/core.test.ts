@@ -22,8 +22,12 @@ import {
   findInstalledPackageRoot,
   getOrCreateRuntime,
   inferInteractionMode,
+  assertStorageRootReady,
+  detectLegacyProjectStore,
+  getStorageStatus,
   loadConfig,
   resetGlobalRuntime,
+  resolveStorageRoot,
   resolveTopicIdentity,
 } from "../src/index.js";
 
@@ -216,16 +220,23 @@ describe("Pi compatibility and tool surface", () => {
   });
 
   it("loads real SiliconFlow model configuration from environment variables", async () => {
-    const config = await loadConfig("/nonexistent/pi-mentis-config-test", undefined, {
-      SILICONFLOW_BASE_URL: "https://api.siliconflow.cn/v1",
-      SILICONFLOW_EMBEDDING_MODEL: "BAAI/bge-m3",
-      SILICONFLOW_RERANKER_MODEL: "BAAI/bge-reranker-v2-m3",
-    });
-    expect(config.inference.siliconflow).toMatchObject({
-      baseUrl: "https://api.siliconflow.cn/v1",
-      embedding: { model: "BAAI/bge-m3", dimensions: 1_024 },
-      rerank: { model: "BAAI/bge-reranker-v2-m3", maxInputTokens: 8_192 },
-    });
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-config-"));
+    try {
+      const config = await loadConfig("/nonexistent/pi-mentis-config-test", undefined, {
+        PI_MENTIS_HOME: path.join(root, "mentis"),
+        SILICONFLOW_BASE_URL: "https://api.siliconflow.cn/v1",
+        SILICONFLOW_EMBEDDING_MODEL: "BAAI/bge-m3",
+        SILICONFLOW_RERANKER_MODEL: "BAAI/bge-reranker-v2-m3",
+      });
+      expect(config.inference.siliconflow).toMatchObject({
+        baseUrl: "https://api.siliconflow.cn/v1",
+        embedding: { model: "BAAI/bge-m3", dimensions: 1_024 },
+        rerank: { model: "BAAI/bge-reranker-v2-m3", maxInputTokens: 8_192 },
+      });
+      expect(config.storage.rootDir).toBe(path.join(root, "mentis", "zvec"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("implements the exact tool truth table", () => {
@@ -236,6 +247,108 @@ describe("Pi compatibility and tool surface", () => {
       tools: ["commit_memory", "search_memory"],
       knowledgeFirst: true,
     });
+  });
+});
+
+describe("single global storage root", () => {
+  it("resolves implicit and explicit default Pi profiles to the same canonical root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-root-"));
+    try {
+      const homeDir = path.join(root, "home");
+      const defaultAgentDir = path.join(homeDir, ".pi", "agent");
+      const implicit = resolveStorageRoot({ environment: {}, homeDir });
+      const explicit = resolveStorageRoot({
+        environment: { PI_CODING_AGENT_DIR: defaultAgentDir },
+        homeDir,
+      });
+
+      expect(implicit.mentisRoot).toBe(path.join(defaultAgentDir, ".pi-mentis"));
+      expect(explicit.mentisRoot).toBe(implicit.mentisRoot);
+      expect(implicit.source).toBe("pi-default-agent-dir");
+      expect(explicit.source).toBe("pi-agent-dir");
+      expect(implicit.isDefaultProfile).toBe(true);
+      expect(explicit.isDefaultProfile).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an explicit Pi profile and PI_MENTIS_HOME isolated", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-profile-"));
+    try {
+      const homeDir = path.join(root, "home");
+      const profile = path.join(root, "profiles", "review");
+      const profileRoot = resolveStorageRoot({
+        environment: { PI_CODING_AGENT_DIR: profile },
+        homeDir,
+      });
+      const override = path.join(root, "isolated-mentis");
+      const overridden = resolveStorageRoot({
+        environment: { PI_CODING_AGENT_DIR: profile, PI_MENTIS_HOME: override },
+        homeDir,
+      });
+
+      expect(profileRoot.mentisRoot).toBe(path.join(profile, ".pi-mentis"));
+      expect(profileRoot.isDefaultProfile).toBe(false);
+      expect(overridden.mentisRoot).toBe(override);
+      expect(overridden.source).toBe("pi-mentis-env");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when a default-profile legacy root requires migration", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-legacy-"));
+    try {
+      const homeDir = path.join(root, "home");
+      const legacyRoot = path.join(homeDir, ".pi", ".pi-mentis");
+      await mkdir(legacyRoot, { recursive: true });
+      await writeFile(path.join(legacyRoot, "config.json"), "{}\n");
+
+      const migration = resolveStorageRoot({ environment: {}, homeDir });
+      expect(migration.migrationRequired).toBe(true);
+      expect(migration.splitBrainDetected).toBe(false);
+      expect(() => assertStorageRootReady(migration)).toThrowError(
+        expect.objectContaining({ code: "STORAGE_ROOT_MIGRATION_REQUIRED" }),
+      );
+
+      await mkdir(migration.mentisRoot, { recursive: true });
+      await writeFile(path.join(migration.mentisRoot, "config.json"), "{}\n");
+      const splitBrain = resolveStorageRoot({ environment: {}, homeDir });
+      expect(splitBrain.splitBrainDetected).toBe(true);
+      expect(() => assertStorageRootReady(splitBrain)).toThrowError(
+        expect.objectContaining({ code: "STORAGE_SPLIT_BRAIN" }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports but never selects a project-local legacy store", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-project-legacy-"));
+    try {
+      const homeDir = path.join(root, "home");
+      const workspace = path.join(root, "workspace");
+      const projectStore = path.join(workspace, ".pi-mentis");
+      await mkdir(path.join(projectStore, "zvec"), { recursive: true });
+      await writeFile(path.join(projectStore, "zvec", "active-index-manifest.json"), "{}\n");
+      const options = {
+        environment: { PI_MENTIS_HOME: path.join(root, "canonical") },
+        homeDir,
+      };
+
+      expect(detectLegacyProjectStore(workspace, options)).toMatchObject({
+        detected: true,
+        path: projectStore,
+      });
+      expect(getStorageStatus(workspace, undefined, options)).toMatchObject({
+        mentisRoot: path.join(root, "canonical"),
+        legacyProjectStoreDetected: true,
+        legacyProjectStorePath: projectStore,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

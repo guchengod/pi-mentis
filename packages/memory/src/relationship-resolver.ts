@@ -38,7 +38,18 @@ export class DefaultMemoryRelationshipResolver implements MemoryRelationshipReso
         };
       }
       if (explicit.source !== undefined && explicit.source !== "explicit_internal") {
-        if (!acceptsRelationshipProposal(explicit)) {
+        const proposal = {
+          relation: explicit.relation,
+          confidence: explicit.confidence,
+          ...(explicit.signals === undefined ? {} : { signals: explicit.signals }),
+          ...(explicit.incomingHints === undefined
+            ? {}
+            : { incomingHints: explicit.incomingHints }),
+          ...(explicit.targetHints?.[targetIds[0] ?? ""] === undefined
+            ? {}
+            : { targetHints: explicit.targetHints[targetIds[0] ?? ""] }),
+        };
+        if (!acceptsRelationshipProposal(proposal)) {
           return {
             relation: "coexist",
             targetIds,

@@ -9,6 +9,7 @@ import {
   ProviderPriority,
   assertPiCompatibility,
   detectInstalledPackageVersion,
+  getStorageStatus,
   getOrCreateRuntime,
   loadConfig,
   resetGlobalRuntime,
@@ -194,7 +195,11 @@ function registerKnowledgeTools(
   });
 }
 
-function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntelligenceRuntime): void {
+function registerKnowledgeCommand(
+  pi: ExtensionAPI,
+  runtime: PersistentIntelligenceRuntime,
+  currentConfig: PiMentisConfig,
+): void {
   pi.registerCommand("kb", {
     description:
       "Manage Pi Mentis knowledge: add, sync, remove, status, jobs, cancel, inspect, models, and Embedding migrations",
@@ -320,6 +325,17 @@ function registerKnowledgeCommand(pi: ExtensionAPI, runtime: PersistentIntellige
           context,
           store === undefined ? "Storage unavailable" : formatPiToolJson(store.manifest),
           store === undefined ? "error" : "info",
+        );
+        return;
+      }
+      if (action === "status") {
+        notifyWhenUiAvailable(
+          context,
+          formatPiToolJson({
+            storage: getStorageStatus(context.cwd, currentConfig.storage.rootDir),
+            runtime: runtime.snapshot(),
+          }),
+          "info",
         );
         return;
       }
@@ -456,6 +472,14 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
   let registered = false;
   pi.on("session_start", async (_event, context) => {
     tuiContext = context;
+    const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
+    if (storageStatus.legacyProjectStoreDetected) {
+      notifyWhenUiAvailable(
+        context,
+        `Pi Mentis detected and ignored a project-local legacy store at ${storageStatus.legacyProjectStorePath}. The active global-profile store is ${storageStatus.effectiveZvecRoot}.`,
+        "warning",
+      );
+    }
     let runtimeReadyError: Error | undefined;
     try {
       await runtime.ready(context.signal);
@@ -484,7 +508,7 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
           agentId: "pi-mentis-knowledge",
         }),
       );
-      registerKnowledgeCommand(pi, runtime);
+      registerKnowledgeCommand(pi, runtime, config);
       registered = true;
     }
 
