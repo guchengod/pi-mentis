@@ -5,7 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { EvidenceAuthority } from "@pi-mentis/pi-mentis-core";
-import { createMemoryService, type PiScopeContext } from "@pi-mentis/pi-mentis-memory-core";
+import {
+  createMemoryService,
+  type PiScopeContext,
+  type RelationshipLearningWork,
+} from "@pi-mentis/pi-mentis-memory-core";
 import { StateRevisionConflictError, ZvecStateStore, ZvecStore } from "@pi-mentis/pi-mentis-zvec";
 
 import { DeterministicEmbeddingProvider, embeddingSpace, testStorage } from "./helpers.js";
@@ -276,6 +280,156 @@ describe("V2 intelligence state on real Zvec", () => {
       "active",
     );
     await reopened.close();
+  }, 180_000);
+
+  it("terminalizes exhausted leases, settles dependencies, and keeps recovery idempotent", async () => {
+    const { store } = await temporaryStore(64);
+    let now = 1_000;
+    const clock = { now: () => now };
+    const memory = createMemoryService({
+      store,
+      embedding: new DeterministicEmbeddingProvider(64),
+      embeddingSpace: embeddingSpace(64),
+      dimensions: 64,
+      viewsEnabled: false,
+      clock,
+    });
+    const base = {
+      scope: { kind: "user" as const, id: "user" },
+      scopeContext: scope,
+      authority: EvidenceAuthority.UserCurrentInstruction,
+      provenance: { origin: "user" as const, epistemicState: "asserted" as const },
+    };
+    const state = new ZvecStateStore(store);
+    const namespace = "tenant:user:pi:mentis::user:user";
+    const coexist = {
+      relation: "coexist" as const,
+      targetIds: [],
+      confidence: 1,
+      reasonCodes: ["test_setup"],
+    };
+    const createRecord = async (label: string) =>
+      memory.commit({
+        ...base,
+        content: `relationship liveness ${label}`,
+        relationshipEvidence: coexist,
+      });
+    const reclaimable = (await createRecord("reclaimable")).record!;
+    const exhausted = (await createRecord("exhausted")).record!;
+    const dependent = (await createRecord("dependent")).record!;
+    const live = (await createRecord("live")).record!;
+    const blocked = (await createRecord("blocked")).record!;
+    const retryExhausted = (await createRecord("retry exhausted")).record!;
+    const writeWork = async (
+      recordId: string,
+      value: Omit<RelationshipLearningWork, "incomingId" | "namespace" | "scopeContext">,
+    ) => {
+      const id = state.id("memory-relationship-learning-v1", namespace, recordId);
+      await state.put(
+        {
+          id,
+          kind: "memory-relationship-learning-v1",
+          namespace,
+          value: { ...value, incomingId: recordId, namespace, scopeContext: scope },
+        },
+        { status: value.state, now },
+      );
+      return id;
+    };
+    const processing = (
+      attempts: number,
+    ): Omit<RelationshipLearningWork, "incomingId" | "namespace" | "scopeContext"> => ({
+      state: "processing",
+      candidates: [],
+      attempts,
+      maxAttempts: 4,
+      updatedAt: now - 2_000,
+      processingOwner: "crashed-worker",
+      processingStartedAt: now - 2_000,
+      leaseExpiresAt: now - 1,
+      operationKeys: [],
+    });
+    await writeWork(reclaimable.id, processing(3));
+    await writeWork(exhausted.id, processing(4));
+    await writeWork(dependent.id, {
+      state: "pending",
+      candidates: [{ id: exhausted.id, source: "same_turn_recall" }],
+      attempts: 0,
+      maxAttempts: 4,
+      updatedAt: now,
+      operationKeys: [],
+    });
+    await writeWork(live.id, { ...processing(1), leaseExpiresAt: now + 10_000 });
+    await writeWork(blocked.id, {
+      state: "pending",
+      candidates: [{ id: live.id, source: "same_turn_recall" }],
+      attempts: 0,
+      maxAttempts: 4,
+      updatedAt: now,
+      operationKeys: [],
+    });
+    const retryStateId = await writeWork(retryExhausted.id, {
+      state: "failed_retryable",
+      candidates: [],
+      attempts: 4,
+      maxAttempts: 4,
+      updatedAt: now - 2_000,
+      nextRetryAt: now - 1,
+      lastError: "pairwise provider timeout",
+      operationKeys: [],
+    });
+    expect(
+      await state.list<RelationshipLearningWork>({
+        kind: "memory-relationship-learning-v1",
+        status: "processing",
+      }),
+    ).toHaveLength(3);
+
+    const recoverable = await memory.listRecoverableRelationshipLearning?.({ now, limit: 32 });
+    expect(recoverable?.map((work) => work.incomingId)).toContain(reclaimable.id);
+    expect(recoverable?.map((work) => work.incomingId)).not.toContain(exhausted.id);
+    expect(recoverable?.map((work) => work.incomingId)).not.toContain(retryExhausted.id);
+    const startupPending = await memory.listPendingRelationshipLearning?.({ limit: 32 });
+    expect(startupPending?.map((work) => work.incomingId)).toContain(reclaimable.id);
+    expect(startupPending?.map((work) => work.incomingId)).not.toContain(exhausted.id);
+    expect(startupPending?.map((work) => work.incomingId)).not.toContain(retryExhausted.id);
+    expect(await memory.getRelationshipLearning?.(exhausted.id)).toMatchObject({
+      state: "failed_terminal",
+      attempts: 4,
+      lastError: "lease_expired_after_max_attempts",
+    });
+    expect(await memory.getRelationshipLearning?.(retryExhausted.id)).toMatchObject({
+      state: "failed_terminal",
+      attempts: 4,
+      lastError: "retry_exhausted",
+    });
+    expect(
+      await memory.claimRelationshipLearning?.(
+        reclaimable.id,
+        { owner: "reclaimable-recovered", leaseMs: 1_000, recoveryReason: "lease_recovery" },
+        { scopeContext: scope },
+      ),
+    ).toMatchObject({ state: "processing", attempts: 4 });
+    expect(
+      await memory.claimRelationshipLearning?.(
+        dependent.id,
+        { owner: "dependent", leaseMs: 1_000, recoveryReason: "normal" },
+        { scopeContext: scope },
+      ),
+    ).toMatchObject({ state: "processing", attempts: 1 });
+    await expect(
+      memory.claimRelationshipLearning?.(
+        blocked.id,
+        { owner: "blocked", leaseMs: 1_000, recoveryReason: "normal" },
+        { scopeContext: scope },
+      ),
+    ).resolves.toBeUndefined();
+
+    const terminal = await state.get<RelationshipLearningWork>(retryStateId);
+    const revision = terminal!.revision;
+    await memory.listRecoverableRelationshipLearning?.({ now: now + 60_000, limit: 32 });
+    expect((await state.get(retryStateId))?.revision).toBe(revision);
+    await store.close();
   }, 180_000);
 
   it("persists relationship evolution, exact ID reads, views and current recall across restart", async () => {

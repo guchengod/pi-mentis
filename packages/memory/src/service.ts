@@ -22,6 +22,7 @@ import { InMemoryTelemetry, measure } from "@pi-mentis/pi-mentis-observability";
 import {
   ZvecStateStore,
   decodeStoredPayload,
+  type StateRecord,
   type StoredVectorRecord,
   type ZvecStore,
 } from "@pi-mentis/pi-mentis-zvec";
@@ -234,14 +235,14 @@ export class DefaultMemoryService implements MemoryService {
   async getRelationshipLearning(incomingId: string): Promise<RelationshipLearningWork | undefined> {
     const record = await this.#readRecord(incomingId);
     if (record === undefined) return undefined;
-    return (
-      await this.#state.get<RelationshipLearningWork>(
-        this.#relationshipLearningStateId(
-          scopedNamespace(record.scope, record.scopeContext),
-          incomingId,
-        ),
-      )
-    )?.value;
+    const state = await this.#state.get<RelationshipLearningWork>(
+      this.#relationshipLearningStateId(
+        scopedNamespace(record.scope, record.scopeContext),
+        incomingId,
+      ),
+    );
+    if (state === undefined) return undefined;
+    return this.#terminalizeExhaustedRelationshipLearning(state, this.#clock.now());
   }
 
   async prepareRelationshipLearning(
@@ -298,32 +299,40 @@ export class DefaultMemoryService implements MemoryService {
     this.#assertBoundary(record, options.scopeContext);
     const namespace = scopedNamespace(record.scope, record.scopeContext);
     const id = this.#relationshipLearningStateId(namespace, incomingId);
+    const now = this.#clock.now();
     const existing = await this.#state.get<RelationshipLearningWork>(id);
     if (existing === undefined) return undefined;
-    const now = this.#clock.now();
-    for (const candidate of existing.value.candidates) {
-      const dependency = await this.getRelationshipLearning(candidate.id);
-      if (
-        dependency !== undefined &&
-        (dependency.state === "pending" ||
-          dependency.state === "processing" ||
-          dependency.state === "failed_retryable")
-      ) {
+    const normalized = await this.#terminalizeExhaustedRelationshipLearning(existing, now);
+    if (normalized.state === "failed_terminal" || normalized.state === "resolved") {
+      return undefined;
+    }
+    for (const candidate of normalized.candidates) {
+      // Candidates are namespace-validated when they are persisted. Resolve
+      // their durable work directly so an exhausted dependency can be settled
+      // without reopening its vector record on the claim hot path.
+      const dependencyState = await this.#state.get<RelationshipLearningWork>(
+        this.#relationshipLearningStateId(namespace, candidate.id),
+      );
+      const dependency =
+        dependencyState === undefined
+          ? undefined
+          : await this.#terminalizeExhaustedRelationshipLearning(dependencyState, now);
+      if (dependency !== undefined && this.#isRelationshipLearningUnresolved(dependency)) {
         return undefined;
       }
     }
     const recoverable =
-      existing.value.state === "pending" ||
-      (existing.value.state === "failed_retryable" && (existing.value.nextRetryAt ?? 0) <= now) ||
-      (existing.value.state === "processing" && (existing.value.leaseExpiresAt ?? 0) <= now);
-    if (!recoverable || existing.value.attempts >= existing.value.maxAttempts) return undefined;
-    const { nextRetryAt: _nextRetryAt, lastError: _lastError, ...claimable } = existing.value;
+      normalized.state === "pending" ||
+      (normalized.state === "failed_retryable" && (normalized.nextRetryAt ?? 0) <= now) ||
+      (normalized.state === "processing" && (normalized.leaseExpiresAt ?? 0) <= now);
+    if (!recoverable || normalized.attempts >= normalized.maxAttempts) return undefined;
+    const { nextRetryAt: _nextRetryAt, lastError: _lastError, ...claimable } = normalized;
     void _nextRetryAt;
     void _lastError;
     const work: RelationshipLearningWork = {
       ...claimable,
       state: "processing",
-      attempts: existing.value.attempts + 1,
+      attempts: normalized.attempts + 1,
       updatedAt: now,
       processingOwner: input.owner,
       processingStartedAt: now,
@@ -429,18 +438,12 @@ export class DefaultMemoryService implements MemoryService {
     const now = input.now ?? this.#clock.now();
     const limit = Math.max(1, Math.min(input.limit ?? 128, RELATIONSHIP_LEARNING_SCAN_LIMIT));
     await this.#repairMissingRelationshipLearningMarkers(limit);
-    const states = await Promise.all(
-      (["pending", "processing", "failed_retryable"] as const).map((status) =>
-        this.#state.list<RelationshipLearningWork>({
-          kind: RELATIONSHIP_LEARNING_KIND,
-          status,
-          limit,
-        }),
-      ),
+    const states = await this.#relationshipLearningStates(
+      ["pending", "processing", "failed_retryable"],
+      limit,
     );
-    return states
-      .flat()
-      .map((state) => state.value)
+    const normalized = await this.#normalizeRelationshipLearningStates(states, now);
+    return [...normalized]
       .filter(
         (work) =>
           work.state === "pending" ||
@@ -456,20 +459,115 @@ export class DefaultMemoryService implements MemoryService {
   ): Promise<readonly RelationshipLearningWork[]> {
     const limit = Math.max(1, Math.min(input.limit ?? 64, RELATIONSHIP_LEARNING_SCAN_LIMIT));
     await this.#repairMissingRelationshipLearningMarkers(limit);
-    const states = await Promise.all(
-      (["pending", "processing", "failed_retryable"] as const).map((status) =>
-        this.#state.list<RelationshipLearningWork>({
+    const states = await this.#relationshipLearningStates(
+      ["pending", "processing", "failed_retryable"],
+      limit,
+    );
+    const normalized = await this.#normalizeRelationshipLearningStates(states, this.#clock.now());
+    return [...normalized]
+      .filter((work) => this.#isRelationshipLearningUnresolved(work))
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, limit);
+  }
+
+  /**
+   * Durable relationship work is allowed to fail, but it must never remain an
+   * unresolved dependency after its retry budget is exhausted. This is called
+   * from scans and claims so a live runtime self-heals expired leases as well
+   * as startup reconciliation doing so after a crash.
+   */
+  async #terminalizeExhaustedRelationshipLearning(
+    state: StateRecord<RelationshipLearningWork>,
+    now: number,
+  ): Promise<RelationshipLearningWork> {
+    const reason = this.#terminalReason(state.value, now);
+    if (reason === undefined) return state.value;
+    const {
+      processingOwner: _processingOwner,
+      processingStartedAt: _processingStartedAt,
+      leaseExpiresAt: _leaseExpiresAt,
+      nextRetryAt: _nextRetryAt,
+      ...terminalizable
+    } = state.value;
+    void _processingOwner;
+    void _processingStartedAt;
+    void _leaseExpiresAt;
+    void _nextRetryAt;
+    const work: RelationshipLearningWork = {
+      ...terminalizable,
+      state: "failed_terminal",
+      updatedAt: now,
+      lastError: reason,
+    };
+    await this.#state.put(
+      {
+        id: state.id,
+        kind: RELATIONSHIP_LEARNING_KIND,
+        namespace: state.namespace,
+        value: work,
+      },
+      { status: "failed_terminal", expectedRevision: state.revision, now },
+    );
+    // Relationship-work scalar state is authoritative. Avoid rewriting the
+    // incoming vector record while a recovery scan is holding Zvec's durable
+    // work path; a stale marker is safely ignored because repair checks the
+    // scalar state before creating work.
+    return work;
+  }
+
+  #terminalReason(work: RelationshipLearningWork, now: number): string | undefined {
+    if (work.attempts < work.maxAttempts) return undefined;
+    if (
+      work.state === "processing" &&
+      (work.leaseExpiresAt === undefined || work.leaseExpiresAt <= now)
+    ) {
+      return "lease_expired_after_max_attempts";
+    }
+    if (work.state === "failed_retryable") return "retry_exhausted";
+    return undefined;
+  }
+
+  #isRelationshipLearningUnresolved(work: RelationshipLearningWork): boolean {
+    return (
+      work.state === "pending" || work.state === "processing" || work.state === "failed_retryable"
+    );
+  }
+
+  async #relationshipLearningStates(
+    statuses: readonly ("pending" | "processing" | "failed_retryable")[],
+    limit: number,
+  ): Promise<readonly StateRecord<RelationshipLearningWork>[]> {
+    // Zvec uses a single coordination path per store. Keep this bounded scan
+    // serialized because it can terminalize scalar work as it reads it.
+    const states: StateRecord<RelationshipLearningWork>[] = [];
+    for (const status of statuses) {
+      states.push(
+        ...(await this.#state.list<RelationshipLearningWork>({
           kind: RELATIONSHIP_LEARNING_KIND,
           status,
           limit,
-        }),
-      ),
-    );
-    return states
-      .flat()
-      .map((state) => state.value)
-      .sort((left, right) => right.updatedAt - left.updatedAt)
-      .slice(0, limit);
+        })),
+      );
+    }
+    return states;
+  }
+
+  async #normalizeRelationshipLearningStates(
+    states: readonly StateRecord<RelationshipLearningWork>[],
+    now: number,
+  ): Promise<readonly RelationshipLearningWork[]> {
+    const normalized: RelationshipLearningWork[] = [];
+    for (const state of states) {
+      // The recovery scan is mostly pending, live leases, and retryable work.
+      // Do not reopen the vector collection for those records: only exhausted
+      // work needs a durable scalar transition and a record-marker update.
+      if (this.#terminalReason(state.value, now) === undefined) {
+        normalized.push(state.value);
+        continue;
+      }
+      normalized.push(await this.#terminalizeExhaustedRelationshipLearning(state, now));
+    }
+    return normalized;
   }
 
   async commit(

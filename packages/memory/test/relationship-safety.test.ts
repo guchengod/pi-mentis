@@ -180,6 +180,52 @@ describe("relationship mutation safety", () => {
     ]);
   });
 
+  it("does not let work that cannot claim block a later ready item", async () => {
+    const queue = new MentisBackgroundQueue({ maxConcurrency: 1 });
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    let blockerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      blockerStarted = resolve;
+    });
+    const blocker = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    let readyFinished!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      readyFinished = resolve;
+    });
+    queue.enqueue({
+      kind: "memory.consolidate",
+      execute: async () => {
+        blockerStarted();
+        await blocker;
+      },
+    });
+    await started;
+    for (const id of ["blocked-1", "blocked-2"]) {
+      queue.enqueue({
+        kind: "memory.consolidate",
+        execute: async () => {
+          // A durable claim can legitimately return no work while an active
+          // dependency is still unresolved. It must release the queue slot.
+          order.push(id);
+        },
+      });
+    }
+    queue.enqueue({
+      kind: "memory.consolidate",
+      execute: async () => {
+        order.push("ready");
+        readyFinished();
+      },
+    });
+
+    releaseBlocker();
+    await ready;
+    expect(order).toEqual(["blocked-1", "blocked-2", "ready"]);
+  });
+
   it("accepts reinforcement without requiring a new assertion", () => {
     const proposal = {
       relation: "reinforce" as const,

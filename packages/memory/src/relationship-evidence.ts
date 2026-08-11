@@ -624,6 +624,8 @@ export class DurableRelationshipLearningCoordinator {
   #claimedCount = 0;
   #resolvedCount = 0;
   #failedCount = 0;
+  #blockedByDependencyCount = 0;
+  #lastBlockedAt: number | undefined;
   #lastWorkerActivityAt: number | undefined;
   #startupRecoveryStartedAt: number | undefined;
   #startupRecoveryCompletedAt: number | undefined;
@@ -644,7 +646,7 @@ export class DurableRelationshipLearningCoordinator {
     onResolved?: (incomingId: string) => void,
   ): void {
     if (this.#closed) return;
-    if (recoveryReason === "normal") {
+    if (recoveryReason === "normal" && !this.#freshScheduledAt.has(work.incomingId)) {
       this.#freshScheduledAt.set(work.incomingId, Date.now());
     }
     const candidates: RecalledMemoryEvidence[] = work.candidates.map((candidate) => ({
@@ -677,7 +679,17 @@ export class DurableRelationshipLearningCoordinator {
             { owner: this.#owner, leaseMs: this.#leaseMs, recoveryReason },
           );
           const latest = await this.#memory.getRelationshipLearning?.(work.incomingId);
-          if (latest !== undefined && latest.attempts > previousAttempts) this.#claimedCount += 1;
+          const claimed = latest !== undefined && latest.attempts > previousAttempts;
+          if (claimed) this.#claimedCount += 1;
+          if (
+            !claimed &&
+            (latest?.state === "pending" ||
+              latest?.state === "processing" ||
+              latest?.state === "failed_retryable")
+          ) {
+            this.#blockedByDependencyCount += 1;
+            this.#lastBlockedAt = Date.now();
+          }
           if (latest?.state === "resolved") {
             this.#resolvedCount += 1;
             this.#freshScheduledAt.delete(work.incomingId);
@@ -685,7 +697,7 @@ export class DurableRelationshipLearningCoordinator {
           } else if (latest?.state === "failed_terminal") {
             this.#freshScheduledAt.delete(work.incomingId);
           } else if (latest?.state === "pending" || latest?.state === "processing") {
-            this.#scheduleDeferred(latest, reasoner, onResolved);
+            this.#scheduleDeferred(latest, reasoner, recoveryReason, onResolved);
           } else if (latest?.state === "failed_retryable") {
             await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
           }
@@ -741,7 +753,10 @@ export class DurableRelationshipLearningCoordinator {
     readonly claimedCount: number;
     readonly resolvedCount: number;
     readonly failedCount: number;
+    readonly blockedByDependencyCount: number;
+    readonly stalled: boolean;
     readonly lastWorkerActivityAt?: number;
+    readonly lastBlockedAt?: number;
     readonly startupRecoveryStartedAt?: number;
     readonly startupRecoveryCompletedAt?: number;
   }> {
@@ -768,9 +783,16 @@ export class DurableRelationshipLearningCoordinator {
       claimedCount: this.#claimedCount,
       resolvedCount: this.#resolvedCount,
       failedCount: this.#failedCount,
+      blockedByDependencyCount: this.#blockedByDependencyCount,
+      stalled:
+        queue.queueDepth > 0 &&
+        queue.running === 0 &&
+        this.#activeControllers.size === 0 &&
+        this.#blockedByDependencyCount > 0,
       ...(this.#lastWorkerActivityAt === undefined
         ? {}
         : { lastWorkerActivityAt: this.#lastWorkerActivityAt }),
+      ...(this.#lastBlockedAt === undefined ? {} : { lastBlockedAt: this.#lastBlockedAt }),
       ...(this.#startupRecoveryStartedAt === undefined
         ? {}
         : { startupRecoveryStartedAt: this.#startupRecoveryStartedAt }),
@@ -809,6 +831,7 @@ export class DurableRelationshipLearningCoordinator {
   #scheduleDeferred(
     work: import("./types.js").RelationshipLearningWork,
     reasoner: PairwiseRelationshipReasoner,
+    recoveryReason: import("./types.js").RelationshipRecoveryReason,
     onResolved?: (incomingId: string) => void,
   ): void {
     if (this.#closed || this.#retryTimers.has(work.incomingId)) return;
@@ -818,7 +841,7 @@ export class DurableRelationshipLearningCoordinator {
         : 1_000;
     const timer = setTimeout(() => {
       this.#retryTimers.delete(work.incomingId);
-      if (!this.#closed) this.schedule(work, reasoner, "retry", onResolved);
+      if (!this.#closed) this.schedule(work, reasoner, recoveryReason, onResolved);
     }, delay);
     timer.unref?.();
     this.#retryTimers.set(work.incomingId, timer);
