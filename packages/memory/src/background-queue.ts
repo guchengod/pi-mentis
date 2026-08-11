@@ -8,12 +8,23 @@ export interface MentisBackgroundJob {
     | "experience.extract";
   readonly execute: () => Promise<void>;
   readonly coalesceKey?: string;
+  /** Fresh user-facing work preempts recovery backlog, with bounded fairness. */
+  readonly priority?: "fresh" | "normal";
 }
 
 export interface MentisBackgroundQueueOptions {
   readonly maxConcurrency?: number;
   readonly maxQueueLength?: number;
+  /** Maximum fresh jobs selected before one normal/backlog job must run. */
+  readonly freshBurstLimit?: number;
   readonly logError?: (err: unknown, job: MentisBackgroundJob) => void;
+}
+
+export interface MentisBackgroundQueueSnapshot {
+  readonly queueDepth: number;
+  readonly freshQueueDepth: number;
+  readonly recoveryQueueDepth: number;
+  readonly running: number;
 }
 
 export interface MentisBackgroundDrainOptions {
@@ -24,43 +35,58 @@ export interface MentisBackgroundDrainOptions {
 }
 
 export class MentisBackgroundQueue {
-  readonly #queue: MentisBackgroundJob[] = [];
+  readonly #freshQueue: MentisBackgroundJob[] = [];
+  readonly #normalQueue: MentisBackgroundJob[] = [];
   readonly #maxConcurrency: number;
   readonly #maxQueueLength: number;
+  readonly #freshBurstLimit: number;
   readonly #logError: (err: unknown, job: MentisBackgroundJob) => void;
   readonly #active = new Set<Promise<void>>();
   #running = 0;
+  #freshSelections = 0;
   #draining = false;
   #drainPromise: Promise<void> | undefined;
 
   constructor(options: MentisBackgroundQueueOptions = {}) {
     this.#maxConcurrency = options.maxConcurrency ?? 2;
     this.#maxQueueLength = options.maxQueueLength ?? 128;
+    this.#freshBurstLimit = Math.max(1, options.freshBurstLimit ?? 4);
     this.#logError = options.logError ?? (() => {});
   }
 
   enqueue(job: MentisBackgroundJob): void {
     if (this.#draining) return;
     if (job.coalesceKey !== undefined) {
-      const idx = this.#queue.findLastIndex((q) => q.coalesceKey === job.coalesceKey);
-      if (idx >= 0) {
-        this.#queue[idx] = job;
+      const existing = this.#findCoalesced(job.coalesceKey);
+      if (existing !== undefined) {
+        existing.queue.splice(existing.index, 1);
+        this.#queueFor(job).push(job);
         return;
       }
     }
-    if (this.#queue.length >= this.#maxQueueLength) {
-      this.#queue.shift();
+    if (this.pendingCount >= this.#maxQueueLength) {
+      if (this.#normalQueue.length > 0) this.#normalQueue.shift();
+      else this.#freshQueue.shift();
     }
-    this.#queue.push(job);
+    this.#queueFor(job).push(job);
     this.#drain();
   }
 
   get pendingCount(): number {
-    return this.#queue.length;
+    return this.#freshQueue.length + this.#normalQueue.length;
   }
 
   get runningCount(): number {
     return this.#running;
+  }
+
+  snapshot(): MentisBackgroundQueueSnapshot {
+    return {
+      queueDepth: this.pendingCount,
+      freshQueueDepth: this.#freshQueue.length,
+      recoveryQueueDepth: this.#normalQueue.length,
+      running: this.#running,
+    };
   }
 
   async drain(options: MentisBackgroundDrainOptions = {}): Promise<boolean> {
@@ -85,11 +111,27 @@ export class MentisBackgroundQueue {
   }
 
   #drain(): void {
-    while (this.#running < this.#maxConcurrency && this.#queue.length > 0 && !this.#draining) {
-      const job = this.#queue.shift();
+    while (this.#running < this.#maxConcurrency && this.pendingCount > 0 && !this.#draining) {
+      const job = this.#dequeue();
       if (job === undefined) break;
       this.#start(job);
     }
+  }
+
+  #dequeue(): MentisBackgroundJob | undefined {
+    if (
+      this.#freshQueue.length > 0 &&
+      (this.#normalQueue.length === 0 || this.#freshSelections < this.#freshBurstLimit)
+    ) {
+      this.#freshSelections += 1;
+      return this.#freshQueue.shift();
+    }
+    if (this.#normalQueue.length > 0) {
+      this.#freshSelections = 0;
+      return this.#normalQueue.shift();
+    }
+    this.#freshSelections = 0;
+    return this.#freshQueue.shift();
   }
 
   #start(job: MentisBackgroundJob): Promise<void> {
@@ -107,9 +149,24 @@ export class MentisBackgroundQueue {
   }
 
   async #drainAll(cancelPending: boolean): Promise<void> {
-    const remaining = [...this.#queue];
-    this.#queue.length = 0;
+    const remaining = [...this.#freshQueue, ...this.#normalQueue];
+    this.#freshQueue.length = 0;
+    this.#normalQueue.length = 0;
     const started = cancelPending ? [] : remaining.map((job) => this.#start(job));
     await Promise.allSettled([...this.#active, ...started]);
+  }
+
+  #queueFor(job: MentisBackgroundJob): MentisBackgroundJob[] {
+    return job.priority === "fresh" ? this.#freshQueue : this.#normalQueue;
+  }
+
+  #findCoalesced(
+    coalesceKey: string,
+  ): { readonly queue: MentisBackgroundJob[]; readonly index: number } | undefined {
+    for (const queue of [this.#freshQueue, this.#normalQueue]) {
+      const index = queue.findLastIndex((job) => job.coalesceKey === coalesceKey);
+      if (index >= 0) return { queue, index };
+    }
+    return undefined;
   }
 }

@@ -333,6 +333,7 @@ function registerKnowledgeCommand(
           context,
           formatPiToolJson({
             storage: getStorageStatus(context.cwd, currentConfig.storage.rootDir),
+            storageCoordination: await store?.coordinationStatus(),
             runtime: runtime.snapshot(),
           }),
           "info",

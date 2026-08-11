@@ -230,9 +230,13 @@ function registerIntegratedTools(
             recentAssertions.resolve(resolvedId);
           });
         }
-        return { ...result, relationshipLearning: "scheduled" as const };
+        return {
+          ...result,
+          relationshipState: "provisional" as const,
+          relationshipLearning: "scheduled" as const,
+        };
       }
-      return result;
+      return { ...result, relationshipState: "consolidated" as const };
     },
     async recall(request, signal) {
       const scopedRequest = recallGuard.scope(request);
@@ -718,6 +722,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
           );
           return {
             scheduler: scheduler.snapshot(),
+            relationshipRuntime: await durableRelationships?.snapshot(),
+            storageCoordination: await memoryStore?.store.coordinationStatus(),
             context:
               contextSnapshot === undefined
                 ? undefined

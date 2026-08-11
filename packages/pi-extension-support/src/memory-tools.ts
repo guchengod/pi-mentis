@@ -102,6 +102,8 @@ export interface PublicRememberResult {
   readonly relationDecision?:
     "reinforce" | "supersede" | "retract" | "conflict" | "coexist" | "unrelated" | "uncertain";
   readonly traceId?: string;
+  /** Distinguishes the write-fast safe relation from worker-consolidated evidence. */
+  readonly relationshipState?: "provisional" | "consolidated";
   /** The raw memory is readable; pairwise relationship learning continues off the write path. */
   readonly relationshipLearning?: "scheduled";
 }

@@ -1,4 +1,4 @@
-import { mkdir, open, stat } from "node:fs/promises";
+import { mkdir, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -39,6 +39,31 @@ import {
   type ScalarCollectionName,
 } from "./schema.js";
 
+const ROOT_ACCESS_GATES_SYMBOL = Symbol.for("@pi-mentis/pi-mentis/zvec-root-access-gates/v1");
+
+interface RootAccessGate {
+  tail: Promise<void>;
+}
+
+type RootAccessGlobal = typeof globalThis & {
+  [ROOT_ACCESS_GATES_SYMBOL]?: Map<string, RootAccessGate>;
+};
+
+async function acquireLocalRootAccess(rootDir: string): Promise<() => void> {
+  const target = globalThis as RootAccessGlobal;
+  const gates = target[ROOT_ACCESS_GATES_SYMBOL] ?? new Map<string, RootAccessGate>();
+  target[ROOT_ACCESS_GATES_SYMBOL] = gates;
+  const gate = gates.get(rootDir) ?? { tail: Promise.resolve() };
+  gates.set(rootDir, gate);
+  const previous = gate.tail;
+  let release!: () => void;
+  gate.tail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  return release;
+}
+
 export interface StoredRecord {
   readonly id: string;
   readonly kind: string;
@@ -73,6 +98,22 @@ export interface FtsSearchOptions {
   readonly query: string;
   readonly topK: number;
   readonly filter?: string;
+}
+
+export interface ZvecCoordinationStatus {
+  readonly rootDir: string;
+  readonly lockTarget: string;
+  readonly localPid: number;
+  readonly localStartedAt: number;
+  readonly waitingOperations: number;
+  readonly localActiveMode?: "read" | "write";
+  readonly lastAcquiredAt?: number;
+  readonly lastReleasedAt?: number;
+  readonly storeOwnerPid?: number;
+  readonly storeOwnerStartedAt?: number;
+  readonly storeOwnerMode?: "read" | "write";
+  readonly storeOwnerAcquiredAt?: number;
+  readonly storeOwnerActive: boolean;
 }
 
 function assertStatuses(statuses: ZVecStatus | readonly ZVecStatus[], operation: string): void {
@@ -174,8 +215,14 @@ export class ZvecStore {
   #collectionEra = 0;
   #manifest?: ActiveIndexManifest;
   #lockTarget = "";
+  #ownerTarget = "";
   #inWriteGuard = false;
-  #writeGuardGate: Promise<void> = Promise.resolve();
+  #accessGuardGate: Promise<void> = Promise.resolve();
+  readonly #startedAt = Date.now();
+  #waitingOperations = 0;
+  #activeMode: "read" | "write" | undefined;
+  #lastAcquiredAt: number | undefined;
+  #lastReleasedAt: number | undefined;
   #compromised = false;
   #compromiseError: Error | undefined;
 
@@ -211,8 +258,9 @@ export class ZvecStore {
     const handle = await open(lockTarget, "a", 0o600);
     await handle.close();
     this.#lockTarget = lockTarget;
+    this.#ownerTarget = path.join(this.#config.rootDir, ".store-owner.json");
 
-    const existing = await readActiveManifest(this.#config.rootDir);
+    const existing = await this.#withReadGuard(() => readActiveManifest(this.#config.rootDir));
     if (existing !== undefined) {
       this.#manifest = existing;
       return;
@@ -251,10 +299,9 @@ export class ZvecStore {
   }
 
   async close(): Promise<void> {
+    await this.#accessGuardGate;
     await Promise.allSettled(this.#openingCollections.values());
-    this.#openingCollections.clear();
-    for (const collection of this.#collections.values()) collection.closeSync();
-    this.#collections.clear();
+    this.#closeAllCollections();
   }
 
   async upsertScalar(
@@ -273,20 +320,22 @@ export class ZvecStore {
     ids: readonly string[],
   ): Promise<ReadonlyMap<string, Readonly<Record<string, unknown>>>> {
     if (ids.length === 0) return new Map();
-    const collection = await this.#tryScalarCollection(collectionName);
-    if (collection === undefined) return new Map();
-    const physicalIds = ids.map(physicalDocumentId);
-    const documents = collection.fetchSync({
-      ids: physicalIds,
-      outputFields: ["payload"],
-      includeVector: false,
+    return this.#withReadGuard(async () => {
+      const collection = await this.#tryScalarCollection(collectionName);
+      if (collection === undefined) return new Map();
+      const physicalIds = ids.map(physicalDocumentId);
+      const documents = collection.fetchSync({
+        ids: physicalIds,
+        outputFields: ["payload"],
+        includeVector: false,
+      });
+      const result = new Map<string, Readonly<Record<string, unknown>>>();
+      for (const [index, id] of ids.entries()) {
+        const document = documents[physicalIds[index] ?? ""];
+        if (document !== undefined) result.set(id, parsePayload(document));
+      }
+      return result;
     });
-    const result = new Map<string, Readonly<Record<string, unknown>>>();
-    for (const [index, id] of ids.entries()) {
-      const document = documents[physicalIds[index] ?? ""];
-      if (document !== undefined) result.set(id, parsePayload(document));
-    }
-    return result;
   }
 
   async filterScalar(
@@ -294,16 +343,18 @@ export class ZvecStore {
     filter: string,
     topK = 10_000,
   ): Promise<readonly ZVecDoc[]> {
-    const collection = await this.#tryScalarCollection(collectionName);
-    if (collection === undefined) return [];
-    return (
-      await collection.query({
-        filter,
-        topk: topK,
-        includeVector: false,
-        outputFields: ["payload", "kind", "namespace", "status", "created_at", "updated_at"],
-      })
-    ).map(logicalDocument);
+    return this.#withReadGuard(async () => {
+      const collection = await this.#tryScalarCollection(collectionName);
+      if (collection === undefined) return [];
+      return (
+        await collection.query({
+          filter,
+          topk: topK,
+          includeVector: false,
+          outputFields: ["payload", "kind", "namespace", "status", "created_at", "updated_at"],
+        })
+      ).map(logicalDocument);
+    });
   }
 
   async deleteScalar(collectionName: ScalarCollectionName, ids: readonly string[]): Promise<void> {
@@ -317,11 +368,12 @@ export class ZvecStore {
   async upsertVectors(
     kind: GenerationKind,
     records: readonly StoredVectorRecord[],
-    generationId = activeGenerationFor(this.manifest, kind),
+    generationId?: string,
   ): Promise<void> {
     if (records.length === 0) return;
     return this.#withWriteGuard(async () => {
-      const collection = await this.#vectorCollection(kind, generationId);
+      const targetGeneration = generationId ?? activeGenerationFor(this.manifest, kind);
+      const collection = await this.#vectorCollection(kind, targetGeneration);
       assertStatuses(collection.upsertSync(records.map(vectorInput)), "zvec-vector-upsert");
       collection.optimizeSync();
     });
@@ -330,67 +382,72 @@ export class ZvecStore {
   async deleteVectors(
     kind: GenerationKind,
     ids: readonly string[],
-    generationId = activeGenerationFor(this.manifest, kind),
+    generationId?: string,
   ): Promise<void> {
     if (ids.length === 0) return;
     return this.#withWriteGuard(async () => {
-      const collection = await this.#vectorCollection(kind, generationId);
+      const targetGeneration = generationId ?? activeGenerationFor(this.manifest, kind);
+      const collection = await this.#vectorCollection(kind, targetGeneration);
       assertStatuses(collection.deleteSync(ids.map(physicalDocumentId)), "zvec-vector-delete");
     });
   }
 
   async vectorSearch(options: VectorSearchOptions): Promise<readonly ZVecDoc[]> {
-    const generationId = options.generationId ?? activeGenerationFor(this.manifest, options.kind);
-    const collection = await this.#tryVectorCollection(options.kind, generationId);
-    if (collection === undefined) return [];
-    return (
-      await collection.query({
-        fieldName: "embedding",
-        vector: options.vector,
-        topk: options.topK,
-        includeVector: false,
-        outputFields: [
-          "payload",
-          "searchable_text",
-          "content_hash",
-          "authority",
-          "token_count",
-          "namespace",
-          "updated_at",
-        ],
-        ...(options.filter === undefined ? {} : { filter: options.filter }),
-        params: {
-          indexType: ZVecIndexType.HNSW,
-          ef: Math.max(200, options.topK * 10),
-          isUsingRefiner: true,
-        },
-      })
-    ).map(logicalDocument);
+    return this.#withReadGuard(async () => {
+      const generationId = options.generationId ?? activeGenerationFor(this.manifest, options.kind);
+      const collection = await this.#tryVectorCollection(options.kind, generationId);
+      if (collection === undefined) return [];
+      return (
+        await collection.query({
+          fieldName: "embedding",
+          vector: options.vector,
+          topk: options.topK,
+          includeVector: false,
+          outputFields: [
+            "payload",
+            "searchable_text",
+            "content_hash",
+            "authority",
+            "token_count",
+            "namespace",
+            "updated_at",
+          ],
+          ...(options.filter === undefined ? {} : { filter: options.filter }),
+          params: {
+            indexType: ZVecIndexType.HNSW,
+            ef: Math.max(200, options.topK * 10),
+            isUsingRefiner: true,
+          },
+        })
+      ).map(logicalDocument);
+    });
   }
 
   async ftsSearch(options: FtsSearchOptions): Promise<readonly ZVecDoc[]> {
-    const generationId = activeGenerationFor(this.manifest, options.kind);
-    const collection = await this.#tryVectorCollection(options.kind, generationId);
-    if (collection === undefined) return [];
-    return (
-      await collection.query({
-        fieldName: "searchable_text",
-        fts: { matchString: options.query },
-        topk: options.topK,
-        includeVector: false,
-        outputFields: [
-          "payload",
-          "searchable_text",
-          "content_hash",
-          "authority",
-          "token_count",
-          "namespace",
-          "updated_at",
-        ],
-        ...(options.filter === undefined ? {} : { filter: options.filter }),
-        params: { indexType: ZVecIndexType.FTS, defaultOperator: "AND" },
-      })
-    ).map(logicalDocument);
+    return this.#withReadGuard(async () => {
+      const generationId = activeGenerationFor(this.manifest, options.kind);
+      const collection = await this.#tryVectorCollection(options.kind, generationId);
+      if (collection === undefined) return [];
+      return (
+        await collection.query({
+          fieldName: "searchable_text",
+          fts: { matchString: options.query },
+          topk: options.topK,
+          includeVector: false,
+          outputFields: [
+            "payload",
+            "searchable_text",
+            "content_hash",
+            "authority",
+            "token_count",
+            "namespace",
+            "updated_at",
+          ],
+          ...(options.filter === undefined ? {} : { filter: options.filter }),
+          params: { indexType: ZVecIndexType.FTS, defaultOperator: "AND" },
+        })
+      ).map(logicalDocument);
+    });
   }
 
   async fetchVectors(
@@ -398,44 +455,49 @@ export class ZvecStore {
     ids: readonly string[],
   ): Promise<ReadonlyMap<string, ZVecDoc>> {
     if (ids.length === 0) return new Map();
-    const collection = await this.#tryVectorCollection(
-      kind,
-      activeGenerationFor(this.manifest, kind),
-    );
-    if (collection === undefined) return new Map();
-    const physicalIds = ids.map(physicalDocumentId);
-    const documents = collection.fetchSync({ ids: physicalIds, includeVector: true });
-    const result = new Map<string, ZVecDoc>();
-    for (const [index, id] of ids.entries()) {
-      const document = documents[physicalIds[index] ?? ""];
-      if (document !== undefined) result.set(id, logicalDocument(document));
-    }
-    return result;
+    return this.#withReadGuard(async () => {
+      const collection = await this.#tryVectorCollection(
+        kind,
+        activeGenerationFor(this.manifest, kind),
+      );
+      if (collection === undefined) return new Map();
+      const physicalIds = ids.map(physicalDocumentId);
+      const documents = collection.fetchSync({ ids: physicalIds, includeVector: true });
+      const result = new Map<string, ZVecDoc>();
+      for (const [index, id] of ids.entries()) {
+        const document = documents[physicalIds[index] ?? ""];
+        if (document !== undefined) result.set(id, logicalDocument(document));
+      }
+      return result;
+    });
   }
 
   async filterVectors(
     kind: GenerationKind,
     filter: string,
     topK = 10_000,
-    generationId = activeGenerationFor(this.manifest, kind),
+    generationId?: string,
   ): Promise<readonly ZVecDoc[]> {
-    const collection = await this.#tryVectorCollection(kind, generationId);
-    if (collection === undefined) return [];
-    return (
-      await collection.query({
-        filter,
-        topk: topK,
-        includeVector: false,
-        outputFields: [
-          "payload",
-          "source_id",
-          "document_id",
-          "content_hash",
-          "namespace",
-          "status",
-        ],
-      })
-    ).map(logicalDocument);
+    return this.#withReadGuard(async () => {
+      const targetGeneration = generationId ?? activeGenerationFor(this.manifest, kind);
+      const collection = await this.#tryVectorCollection(kind, targetGeneration);
+      if (collection === undefined) return [];
+      return (
+        await collection.query({
+          filter,
+          topk: topK,
+          includeVector: false,
+          outputFields: [
+            "payload",
+            "source_id",
+            "document_id",
+            "content_hash",
+            "namespace",
+            "status",
+          ],
+        })
+      ).map(logicalDocument);
+    });
   }
 
   async createGeneration(
@@ -561,26 +623,74 @@ export class ZvecStore {
     });
   }
 
+  async coordinationStatus(): Promise<ZvecCoordinationStatus> {
+    let owner:
+      | {
+          readonly pid?: number;
+          readonly startedAt?: number;
+          readonly mode?: "read" | "write";
+          readonly acquiredAt?: number;
+        }
+      | undefined;
+    try {
+      const parsed: unknown = JSON.parse(await readFile(this.#ownerTarget, "utf8"));
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        owner = parsed as typeof owner;
+      }
+    } catch {
+      owner = undefined;
+    }
+    const storeOwnerActive =
+      this.#lockTarget.length > 0
+        ? await lockfile.check(this.#lockTarget, { realpath: false }).catch(() => false)
+        : false;
+    return {
+      rootDir: this.#config.rootDir,
+      lockTarget: this.#lockTarget,
+      localPid: process.pid,
+      localStartedAt: this.#startedAt,
+      waitingOperations: this.#waitingOperations,
+      ...(this.#activeMode === undefined ? {} : { localActiveMode: this.#activeMode }),
+      ...(this.#lastAcquiredAt === undefined ? {} : { lastAcquiredAt: this.#lastAcquiredAt }),
+      ...(this.#lastReleasedAt === undefined ? {} : { lastReleasedAt: this.#lastReleasedAt }),
+      ...(typeof owner?.pid === "number" ? { storeOwnerPid: owner.pid } : {}),
+      ...(typeof owner?.startedAt === "number" ? { storeOwnerStartedAt: owner.startedAt } : {}),
+      ...(owner?.mode === "read" || owner?.mode === "write" ? { storeOwnerMode: owner.mode } : {}),
+      ...(typeof owner?.acquiredAt === "number" ? { storeOwnerAcquiredAt: owner.acquiredAt } : {}),
+      storeOwnerActive,
+    };
+  }
+
+  async #withReadGuard<T>(fn: () => Promise<T>): Promise<T> {
+    return this.#withStoreGuard("read", fn);
+  }
+
   async #withWriteGuard<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.#inWriteGuard) return fn();
     if (this.#config.readOnly) {
       throw new StorageBusyError("Cannot write to read-only configured store", {
         operation: "storage-write",
         retryable: false,
       });
     }
+    return this.#withStoreGuard("write", fn);
+  }
+
+  async #withStoreGuard<T>(mode: "read" | "write", fn: () => Promise<T>): Promise<T> {
     if (this.#compromised) {
       throw new StorageBusyError(
-        "Writer lease has been compromised — writes are blocked until recovery",
-        { operation: "storage-write", retryable: true },
+        "Store ownership lease has been compromised — access is blocked until recovery",
+        { operation: "storage-access", retryable: true },
       );
     }
-    const gate = this.#writeGuardGate;
+    const gate = this.#accessGuardGate;
     let releaseGate!: () => void;
-    this.#writeGuardGate = new Promise<void>((resolve) => {
+    this.#accessGuardGate = new Promise<void>((resolve) => {
       releaseGate = resolve;
     });
+    this.#waitingOperations += 1;
     await gate;
+    this.#waitingOperations -= 1;
+    const releaseLocalRoot = await acquireLocalRootAccess(this.#config.rootDir);
     try {
       const release = await lockfile.lock(this.#lockTarget, {
         realpath: false,
@@ -596,29 +706,39 @@ export class ZvecStore {
         },
       });
       try {
-        // Mark the write section BEFORE closing/refreshing: any concurrent
-        // collection open that resolves from this point on must open in
-        // read-write mode, or it will be discarded by the era check in
-        // #openCollectionOnce. (The window between closeAllCollections and
-        // the async manifest refresh used to allow read-only handles to be
-        // cached while the guard was active.)
-        this.#inWriteGuard = true;
+        this.#activeMode = mode;
+        this.#inWriteGuard = mode === "write";
+        this.#lastAcquiredAt = Date.now();
         this.#closeAllCollections();
         const existing = await readActiveManifest(this.#config.rootDir);
         if (existing !== undefined) {
           this.#manifest = existing;
         }
+        await writeFile(
+          this.#ownerTarget,
+          `${JSON.stringify({
+            pid: process.pid,
+            startedAt: this.#startedAt,
+            acquiredAt: this.#lastAcquiredAt,
+            mode,
+          })}\n`,
+          { mode: 0o600 },
+        );
         return await fn();
       } finally {
         this.#inWriteGuard = false;
+        this.#activeMode = undefined;
         this.#closeAllCollections();
+        await unlink(this.#ownerTarget).catch(() => undefined);
         try {
           await release();
         } catch {
           // Lock release failure must not propagate.
         }
+        this.#lastReleasedAt = Date.now();
       }
     } finally {
+      releaseLocalRoot();
       releaseGate();
     }
   }

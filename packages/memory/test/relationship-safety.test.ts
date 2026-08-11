@@ -64,7 +64,7 @@ describe("relationship mutation safety", () => {
     releaseRunning();
   });
 
-  it("defers relationship model work until the agent is settled", async () => {
+  it("starts relationship work without waiting for agent_settled", async () => {
     const scheduled: string[] = [];
     const target = {
       schedule(work: { readonly incomingId: string }) {
@@ -99,12 +99,85 @@ describe("relationship mutation safety", () => {
 
     deferred.schedule(work, reasoner);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(scheduled).toEqual([]);
-
-    deferred.settled();
-    await new Promise((resolve) => setTimeout(resolve, 5));
     expect(scheduled).toEqual(["new-memory"]);
     deferred.close();
+  });
+
+  it("runs startup recovery without a user turn", async () => {
+    let recoveries = 0;
+    const target = {
+      schedule() {},
+      async recover() {
+        recoveries += 1;
+        return 0;
+      },
+    };
+    const deferred = new DeferredRelationshipLearningScheduler(target, { delayMs: 0 });
+    const reasoner: PairwiseRelationshipReasoner = {
+      async judge() {
+        throw new Error("not used");
+      },
+    };
+
+    deferred.recover(reasoner);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(recoveries).toBe(1);
+    deferred.close();
+  });
+
+  it("prioritizes fresh work while giving backlog bounded service", async () => {
+    const queue = new MentisBackgroundQueue({
+      maxConcurrency: 1,
+      maxQueueLength: 32,
+      freshBurstLimit: 4,
+    });
+    const order: string[] = [];
+    let releaseBlocker!: () => void;
+    let blockerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      blockerStarted = resolve;
+    });
+    const blocker = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    queue.enqueue({
+      kind: "memory.consolidate",
+      execute: async () => {
+        blockerStarted();
+        await blocker;
+      },
+    });
+    await started;
+
+    let complete!: () => void;
+    const completed = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const enqueue = (id: string, priority: "fresh" | "normal") => {
+      queue.enqueue({
+        kind: "memory.consolidate",
+        priority,
+        execute: async () => {
+          order.push(id);
+          if (order.length === 7) complete();
+        },
+      });
+    };
+    enqueue("backlog-1", "normal");
+    enqueue("backlog-2", "normal");
+    for (let index = 1; index <= 5; index += 1) enqueue(`fresh-${index}`, "fresh");
+
+    releaseBlocker();
+    await completed;
+    expect(order).toEqual([
+      "fresh-1",
+      "fresh-2",
+      "fresh-3",
+      "fresh-4",
+      "backlog-1",
+      "fresh-5",
+      "backlog-2",
+    ]);
   });
 
   it("accepts reinforcement without requiring a new assertion", () => {

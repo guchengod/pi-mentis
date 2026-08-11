@@ -203,9 +203,13 @@ function registerMemoryTools(
             recentAssertions.resolve(resolvedId);
           });
         }
-        return { ...result, relationshipLearning: "scheduled" as const };
+        return {
+          ...result,
+          relationshipState: "provisional" as const,
+          relationshipLearning: "scheduled" as const,
+        };
       }
-      return result;
+      return { ...result, relationshipState: "consolidated" as const };
     },
     async recall(request, signal) {
       const scopedRequest = recallGuard.scope(request);
@@ -493,6 +497,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
               storage: getStorageStatus(commandCtx.cwd, config.storage.rootDir),
               runtime: runtime.snapshot(),
               scheduler: scheduler.snapshot(),
+              relationshipRuntime: await durableRelationships?.snapshot(),
+              storageCoordination: await storeHandle?.store.coordinationStatus(),
               context:
                 contextSnapshot === undefined
                   ? undefined

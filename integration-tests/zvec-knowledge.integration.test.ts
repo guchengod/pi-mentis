@@ -57,6 +57,40 @@ function scheduler(): BackgroundScheduler {
 }
 
 describe("real Zvec production loop", () => {
+  it("serializes concurrent store owners without leaking Zvec collection locks", async () => {
+    const root = await createRoot();
+    const space = embeddingSpace();
+    const initial = { knowledge: space, memory: space, capability: space };
+    const left = new ZvecStore(testStorage(root));
+    const right = new ZvecStore(testStorage(root));
+    await Promise.all([left.start(initial), right.start(initial)]);
+
+    await Promise.all(
+      Array.from({ length: 12 }, async (_, index) => {
+        const store = index % 2 === 0 ? left : right;
+        const id = `shared-${index}`;
+        await store.upsertScalar("mentis_state_v1", [
+          {
+            id,
+            kind: "coordination-test",
+            namespace: "test",
+            status: "active",
+            payload: { id, index },
+            createdAt: index,
+            updatedAt: index,
+          },
+        ]);
+        expect((await store.fetchScalar("mentis_state_v1", [id])).get(id)).toMatchObject({ id });
+      }),
+    );
+
+    expect(
+      await left.filterScalar("mentis_state_v1", 'kind = "coordination-test"', 100),
+    ).toHaveLength(12);
+    expect((await left.coordinationStatus()).storeOwnerActive).toBe(false);
+    await Promise.all([left.close(), right.close()]);
+  });
+
   it("persists Pi episodes and resolves byte-identical offloaded tool evidence after restart", async () => {
     const root = await createRoot();
     const space = embeddingSpace();

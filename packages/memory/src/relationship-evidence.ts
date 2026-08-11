@@ -489,9 +489,9 @@ export interface DeferredRelationshipLearningSchedulerOptions {
 }
 
 /**
- * Keeps remote pairwise reasoning out of the active Agent turn. Durable work is
- * already persisted before it reaches this scheduler, so cancelling an idle
- * timer on CLI shutdown never loses the relationship task.
+ * Starts durable pairwise work asynchronously without depending on an Agent
+ * turn reaching `agent_settled`. The short delay keeps the write path fast;
+ * lifecycle signals remain useful flush hints but are not correctness gates.
  */
 export class DeferredRelationshipLearningScheduler {
   readonly #target: RelationshipLearningSchedulingTarget;
@@ -513,7 +513,6 @@ export class DeferredRelationshipLearningScheduler {
       }
     | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
-  #settled = false;
   #closed = false;
 
   constructor(
@@ -555,12 +554,10 @@ export class DeferredRelationshipLearningScheduler {
   }
 
   activity(): void {
-    this.#settled = false;
-    this.#cancelTimer();
+    this.#arm();
   }
 
   settled(): void {
-    this.#settled = true;
     this.#arm();
   }
 
@@ -578,7 +575,6 @@ export class DeferredRelationshipLearningScheduler {
   #arm(): void {
     if (
       this.#closed ||
-      !this.#settled ||
       this.#timer !== undefined ||
       (this.#pending.size === 0 && this.#recovery === undefined)
     ) {
@@ -592,7 +588,7 @@ export class DeferredRelationshipLearningScheduler {
   }
 
   async #flush(): Promise<void> {
-    if (this.#closed || !this.#settled) return;
+    if (this.#closed) return;
     const recovery = this.#recovery;
     this.#recovery = undefined;
     if (recovery !== undefined) {
@@ -600,7 +596,7 @@ export class DeferredRelationshipLearningScheduler {
         .recover(recovery.reasoner, recovery.limit, recovery.onResolved)
         .catch(() => undefined);
     }
-    if (this.#closed || !this.#settled) return;
+    if (this.#closed) return;
     const pending = [...this.#pending.values()];
     this.#pending.clear();
     for (const item of pending) {
@@ -624,6 +620,13 @@ export class DurableRelationshipLearningCoordinator {
   readonly #leaseMs: number;
   readonly #retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #activeControllers = new Set<AbortController>();
+  readonly #freshScheduledAt = new Map<string, number>();
+  #claimedCount = 0;
+  #resolvedCount = 0;
+  #failedCount = 0;
+  #lastWorkerActivityAt: number | undefined;
+  #startupRecoveryStartedAt: number | undefined;
+  #startupRecoveryCompletedAt: number | undefined;
   #closed = false;
 
   constructor(options: DurableRelationshipLearningCoordinatorOptions) {
@@ -641,6 +644,9 @@ export class DurableRelationshipLearningCoordinator {
     onResolved?: (incomingId: string) => void,
   ): void {
     if (this.#closed) return;
+    if (recoveryReason === "normal") {
+      this.#freshScheduledAt.set(work.incomingId, Date.now());
+    }
     const candidates: RecalledMemoryEvidence[] = work.candidates.map((candidate) => ({
       id: candidate.id,
       content: "",
@@ -651,8 +657,10 @@ export class DurableRelationshipLearningCoordinator {
     this.#queue.enqueue({
       kind: "memory.consolidate",
       coalesceKey: `memory.consolidate:${work.incomingId}`,
+      priority: recoveryReason === "normal" ? "fresh" : "normal",
       execute: async () => {
         if (this.#closed) return;
+        this.#lastWorkerActivityAt = Date.now();
         const controller = new AbortController();
         this.#activeControllers.add(controller);
         const cancellableReasoner: PairwiseRelationshipReasoner = {
@@ -660,6 +668,7 @@ export class DurableRelationshipLearningCoordinator {
             reasoner.judge(incomingContent, candidate, controller.signal),
         };
         try {
+          const previousAttempts = work.attempts;
           await this.#consolidation.consolidate(
             work.incomingId,
             candidates,
@@ -668,15 +677,33 @@ export class DurableRelationshipLearningCoordinator {
             { owner: this.#owner, leaseMs: this.#leaseMs, recoveryReason },
           );
           const latest = await this.#memory.getRelationshipLearning?.(work.incomingId);
-          if (latest?.state === "resolved") onResolved?.(work.incomingId);
-          else if (latest?.state === "pending" || latest?.state === "processing") {
+          if (latest !== undefined && latest.attempts > previousAttempts) this.#claimedCount += 1;
+          if (latest?.state === "resolved") {
+            this.#resolvedCount += 1;
+            this.#freshScheduledAt.delete(work.incomingId);
+            onResolved?.(work.incomingId);
+          } else if (latest?.state === "failed_terminal") {
+            this.#freshScheduledAt.delete(work.incomingId);
+          } else if (latest?.state === "pending" || latest?.state === "processing") {
             this.#scheduleDeferred(latest, reasoner, onResolved);
           } else if (latest?.state === "failed_retryable") {
             await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
           }
         } catch {
-          await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
+          this.#failedCount += 1;
+          const latest = await this.#memory.getRelationshipLearning?.(work.incomingId);
+          if (latest !== undefined && latest.attempts > work.attempts) this.#claimedCount += 1;
+          if (latest?.state === "resolved" || latest?.state === "failed_terminal") {
+            this.#freshScheduledAt.delete(work.incomingId);
+            if (latest.state === "resolved") {
+              this.#resolvedCount += 1;
+              onResolved?.(work.incomingId);
+            }
+          } else {
+            await this.#scheduleRetry(work.incomingId, reasoner, onResolved);
+          }
         } finally {
+          this.#lastWorkerActivityAt = Date.now();
           this.#activeControllers.delete(controller);
         }
       },
@@ -688,6 +715,7 @@ export class DurableRelationshipLearningCoordinator {
     limit = 128,
     onResolved?: (incomingId: string) => void,
   ): Promise<number> {
+    this.#startupRecoveryStartedAt = Date.now();
     const recoverable = (await this.#memory.listPendingRelationshipLearning?.({ limit })) ?? [];
     for (const work of recoverable) {
       const recoveryReason =
@@ -698,7 +726,58 @@ export class DurableRelationshipLearningCoordinator {
             : "startup_reconciliation";
       this.schedule(work, reasoner, recoveryReason, onResolved);
     }
+    this.#startupRecoveryCompletedAt = Date.now();
     return recoverable.length;
+  }
+
+  async snapshot(now = Date.now()): Promise<{
+    readonly queueDepth: number;
+    readonly freshQueueDepth: number;
+    readonly recoveryQueueDepth: number;
+    readonly oldestPendingAge?: number;
+    readonly freshPendingAge?: number;
+    readonly workerRunning: boolean;
+    readonly workerOwner: string;
+    readonly claimedCount: number;
+    readonly resolvedCount: number;
+    readonly failedCount: number;
+    readonly lastWorkerActivityAt?: number;
+    readonly startupRecoveryStartedAt?: number;
+    readonly startupRecoveryCompletedAt?: number;
+  }> {
+    const pending = (await this.#memory.listPendingRelationshipLearning?.({ limit: 256 })) ?? [];
+    const oldestUpdatedAt = pending.reduce<number | undefined>(
+      (oldest, work) => (oldest === undefined ? work.updatedAt : Math.min(oldest, work.updatedAt)),
+      undefined,
+    );
+    const freshOldestAt = [...this.#freshScheduledAt.values()].reduce<number | undefined>(
+      (oldest, scheduledAt) => (oldest === undefined ? scheduledAt : Math.min(oldest, scheduledAt)),
+      undefined,
+    );
+    const queue = this.#queue.snapshot();
+    return {
+      queueDepth: queue.queueDepth,
+      freshQueueDepth: queue.freshQueueDepth,
+      recoveryQueueDepth: queue.recoveryQueueDepth,
+      ...(oldestUpdatedAt === undefined
+        ? {}
+        : { oldestPendingAge: Math.max(0, now - oldestUpdatedAt) }),
+      ...(freshOldestAt === undefined ? {} : { freshPendingAge: Math.max(0, now - freshOldestAt) }),
+      workerRunning: queue.running > 0 || this.#activeControllers.size > 0,
+      workerOwner: this.#owner,
+      claimedCount: this.#claimedCount,
+      resolvedCount: this.#resolvedCount,
+      failedCount: this.#failedCount,
+      ...(this.#lastWorkerActivityAt === undefined
+        ? {}
+        : { lastWorkerActivityAt: this.#lastWorkerActivityAt }),
+      ...(this.#startupRecoveryStartedAt === undefined
+        ? {}
+        : { startupRecoveryStartedAt: this.#startupRecoveryStartedAt }),
+      ...(this.#startupRecoveryCompletedAt === undefined
+        ? {}
+        : { startupRecoveryCompletedAt: this.#startupRecoveryCompletedAt }),
+    };
   }
 
   close(): void {
@@ -707,6 +786,7 @@ export class DurableRelationshipLearningCoordinator {
     this.#activeControllers.clear();
     for (const timer of this.#retryTimers.values()) clearTimeout(timer);
     this.#retryTimers.clear();
+    this.#freshScheduledAt.clear();
   }
 
   async #scheduleRetry(
