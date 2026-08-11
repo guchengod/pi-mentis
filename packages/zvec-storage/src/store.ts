@@ -692,11 +692,17 @@ export class ZvecStore {
     this.#waitingOperations -= 1;
     const releaseLocalRoot = await acquireLocalRootAccess(this.#config.rootDir);
     try {
+      // A cold Zvec open can legitimately take longer than the normal 5 s
+      // storage-operation budget. Waiting is safe because the owner metadata
+      // and stale lease still make a crashed owner recoverable after 10 s.
+      // Keep these two policies separate: extending contention wait time must
+      // not make crash recovery wait proportionally longer.
+      const lockWaitMs = Math.max(30_000, this.#config.lockTimeoutMs);
       const release = await lockfile.lock(this.#lockTarget, {
         realpath: false,
         stale: Math.max(10_000, this.#config.lockTimeoutMs * 2),
         retries: {
-          retries: Math.max(0, Math.ceil(this.#config.lockTimeoutMs / 100)),
+          retries: Math.max(0, Math.ceil(lockWaitMs / 100)),
           minTimeout: 100,
           maxTimeout: 100,
         },
