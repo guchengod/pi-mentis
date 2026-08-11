@@ -9,6 +9,7 @@ import {
   TaskPriority,
   assertPiCompatibility,
   detectInstalledPackageVersion,
+  getEmbeddingRuntimeResolution,
   getStorageStatus,
   getOrCreateRuntime,
   loadConfig,
@@ -75,6 +76,7 @@ import {
   acquireSharedZvecStore,
   resetSharedStores,
   type SharedZvecStoreHandle,
+  type ZvecStore,
 } from "@pi-mentis/pi-mentis-zvec";
 
 function embeddingSpace(config: PiMentisConfig): EmbeddingSpaceIdentity {
@@ -93,6 +95,24 @@ function spaces(
 ): Readonly<Record<"knowledge" | "memory" | "capability", EmbeddingSpaceIdentity>> {
   const identity = embeddingSpace(config);
   return { knowledge: identity, memory: identity, capability: identity };
+}
+
+function embeddingRuntimeDiagnostics(config: PiMentisConfig, store?: ZvecStore) {
+  const resolution = getEmbeddingRuntimeResolution(config);
+  return {
+    ...resolution,
+    ...(store === undefined
+      ? {}
+      : {
+          activeIndexGenerations: store.manifest.generations
+            .filter((generation) => generation.state === "active")
+            .map((generation) => ({
+              kind: generation.kind,
+              generationId: generation.generationId,
+              embeddingSpace: generation.embeddingSpace,
+            })),
+        }),
+  };
 }
 
 function fallbackProjectIdentity(cwd: string): PiProjectIdentity {
@@ -495,6 +515,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
             commandCtx,
             formatPiToolJson({
               storage: getStorageStatus(commandCtx.cwd, config.storage.rootDir),
+              embeddingRuntime: embeddingRuntimeDiagnostics(config, storeHandle?.store),
               runtime: runtime.snapshot(),
               scheduler: scheduler.snapshot(),
               relationshipRuntime: await durableRelationships?.snapshot(),

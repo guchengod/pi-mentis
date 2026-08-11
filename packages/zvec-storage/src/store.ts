@@ -24,6 +24,7 @@ import { stableHash } from "@pi-mentis/pi-mentis-core";
 
 import {
   activeGenerationFor,
+  assertActiveEmbeddingGenerationsCompatible,
   readActiveManifest,
   replaceActiveGeneration,
   writeActiveManifest,
@@ -262,6 +263,7 @@ export class ZvecStore {
 
     const existing = await this.#withReadGuard(() => readActiveManifest(this.#config.rootDir));
     if (existing !== undefined) {
+      assertActiveEmbeddingGenerationsCompatible(existing, initialSpaces);
       this.#manifest = existing;
       return;
     }

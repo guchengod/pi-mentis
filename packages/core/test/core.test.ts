@@ -25,6 +25,7 @@ import {
   assertStorageRootReady,
   detectLegacyProjectStore,
   getStorageStatus,
+  getEmbeddingRuntimeResolution,
   loadConfig,
   resetGlobalRuntime,
   resolveStorageRoot,
@@ -234,6 +235,82 @@ describe("Pi compatibility and tool surface", () => {
         rerank: { model: "BAAI/bge-reranker-v2-m3", maxInputTokens: 8_192 },
       });
       expect(config.storage.rootDir).toBe(path.join(root, "mentis", "zvec"));
+      expect(getEmbeddingRuntimeResolution(config)).toMatchObject({
+        source: "environment",
+        environmentOverrideActive: true,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps explicit embedding configuration authoritative over inherited environment", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-config-priority-"));
+    try {
+      const filename = path.join(root, "config.json");
+      await writeFile(
+        filename,
+        JSON.stringify({
+          inference: {
+            siliconflow: {
+              embedding: { model: "Qwen/Qwen3-Embedding-8B", dimensions: 4096 },
+            },
+          },
+        }),
+      );
+      const config = await loadConfig("/nonexistent/pi-mentis-config-test", filename, {
+        SILICONFLOW_EMBEDDING_MODEL: "BAAI/bge-m3",
+        SILICONFLOW_EMBEDDING_DIMENSIONS: "1024",
+      });
+      expect(config.inference.siliconflow.embedding).toMatchObject({
+        model: "Qwen/Qwen3-Embedding-8B",
+        dimensions: 4096,
+      });
+      expect(getEmbeddingRuntimeResolution(config)).toMatchObject({
+        configured: { model: "Qwen/Qwen3-Embedding-8B", dimensions: 4096 },
+        effective: { model: "Qwen/Qwen3-Embedding-8B", dimensions: 4096 },
+        source: "config",
+        environmentOverrideActive: false,
+      });
+      expect(Object.isFrozen(config.inference.siliconflow.embedding)).toBe(true);
+      await writeFile(
+        filename,
+        JSON.stringify({
+          inference: { siliconflow: { embedding: { model: "BAAI/bge-m3", dimensions: 1024 } } },
+        }),
+      );
+      // A running extension closes over this immutable effective snapshot; a
+      // config-file edit only takes effect after the next process startup.
+      expect(config.inference.siliconflow.embedding).toMatchObject({
+        model: "Qwen/Qwen3-Embedding-8B",
+        dimensions: 4096,
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an explicit BGE configuration when a different model leaks through the environment", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-mentis-config-bge-"));
+    try {
+      const filename = path.join(root, "config.json");
+      await writeFile(
+        filename,
+        JSON.stringify({
+          inference: {
+            siliconflow: { embedding: { model: "BAAI/bge-m3", dimensions: 1024 } },
+          },
+        }),
+      );
+      const config = await loadConfig("/nonexistent/pi-mentis-config-test", filename, {
+        SILICONFLOW_EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-8B",
+        SILICONFLOW_EMBEDDING_DIMENSIONS: "4096",
+      });
+      expect(config.inference.siliconflow.embedding).toMatchObject({
+        model: "BAAI/bge-m3",
+        dimensions: 1024,
+      });
+      expect(getEmbeddingRuntimeResolution(config)).toMatchObject({ source: "config" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

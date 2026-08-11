@@ -13,6 +13,7 @@ import {
   assertPiCompatibility,
   detectInstalledPackageVersion,
   findInstalledPackageRoot,
+  getEmbeddingRuntimeResolution,
   getStorageStatus,
   getOrCreateRuntime,
   loadConfig,
@@ -106,6 +107,24 @@ function generationSpaces(
 ): Readonly<Record<"knowledge" | "memory" | "capability", EmbeddingSpaceIdentity>> {
   const identity = embeddingSpace(config);
   return { knowledge: identity, memory: identity, capability: identity };
+}
+
+function embeddingRuntimeDiagnostics(config: PiMentisConfig, store?: ZvecStore) {
+  const resolution = getEmbeddingRuntimeResolution(config);
+  return {
+    ...resolution,
+    ...(store === undefined
+      ? {}
+      : {
+          activeIndexGenerations: store.manifest.generations
+            .filter((generation) => generation.state === "active")
+            .map((generation) => ({
+              kind: generation.kind,
+              generationId: generation.generationId,
+              embeddingSpace: generation.embeddingSpace,
+            })),
+        }),
+  };
 }
 
 function fallbackProjectIdentity(cwd: string): PiProjectIdentity {
@@ -348,7 +367,7 @@ function registerKbCommand(
         notifyWhenUiAvailable(
           context,
           formatPiToolJson({
-            embedding: config.inference.siliconflow.embedding,
+            embedding: embeddingRuntimeDiagnostics(config, store),
             rerank: config.inference.siliconflow.rerank,
           }),
           "info",
@@ -381,6 +400,7 @@ function registerKbCommand(
           context,
           formatPiToolJson({
             storage: getStorageStatus(context.cwd, config.storage.rootDir),
+            embeddingRuntime: embeddingRuntimeDiagnostics(config, store),
             runtime: runtimeSnapshot(),
             intelligence: await intelligenceSnapshot(),
           }),

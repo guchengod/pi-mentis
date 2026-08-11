@@ -180,6 +180,42 @@ export interface PiMentisConfig {
   readonly intelligence: IntelligenceConfig;
 }
 
+export interface EmbeddingRuntimeResolution {
+  readonly configured: Readonly<{
+    model: string;
+    dimensions: number;
+  }>;
+  readonly effective: Readonly<{
+    providerId: "siliconflow";
+    model: string;
+    dimensions: number;
+  }>;
+  /** Where the effective embedding model was selected. */
+  readonly source: "config" | "environment" | "default";
+  /** True only when an environment fallback actually selected the effective model. */
+  readonly environmentOverrideActive: boolean;
+}
+
+const embeddingRuntimeResolutions = new WeakMap<PiMentisConfig, EmbeddingRuntimeResolution>();
+
+export function getEmbeddingRuntimeResolution(config: PiMentisConfig): EmbeddingRuntimeResolution {
+  return (
+    embeddingRuntimeResolutions.get(config) ?? {
+      configured: {
+        model: config.inference.siliconflow.embedding.model,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+      },
+      effective: {
+        providerId: "siliconflow",
+        model: config.inference.siliconflow.embedding.model,
+        dimensions: config.inference.siliconflow.embedding.dimensions,
+      },
+      source: "default",
+      environmentOverrideActive: false,
+    }
+  );
+}
+
 export function createDefaultConfig(
   cwd: string,
   environment: NodeJS.ProcessEnv = process.env,
@@ -494,34 +530,73 @@ function optionalEnvironmentInteger(
   return parsed;
 }
 
-function applySiliconFlowEnvironment(
+function hasConfiguredPath(value: Record<string, unknown>, path: readonly string[]): boolean {
+  let current: unknown = value;
+  for (const segment of path) {
+    if (!isRecord(current) || !(segment in current)) return false;
+    current = current[segment];
+  }
+  return true;
+}
+
+function applySiliconFlowEnvironmentFallback(
   config: PiMentisConfig,
+  override: Record<string, unknown> | undefined,
   environment: NodeJS.ProcessEnv,
 ): PiMentisConfig {
+  const hasConfigured = (path: readonly string[]) =>
+    override !== undefined && hasConfiguredPath(override, path);
+  const configuredBaseUrl = hasConfigured(["inference", "siliconflow", "baseUrl"]);
+  const configuredEmbeddingModel = hasConfigured([
+    "inference",
+    "siliconflow",
+    "embedding",
+    "model",
+  ]);
+  const configuredEmbeddingDimensions = hasConfigured([
+    "inference",
+    "siliconflow",
+    "embedding",
+    "dimensions",
+  ]);
+  const configuredRerankModel = hasConfigured(["inference", "siliconflow", "rerank", "model"]);
+  const hasConfiguredRerankContext = hasConfigured([
+    "inference",
+    "siliconflow",
+    "rerank",
+    "maxInputTokens",
+  ]);
   const baseUrl =
-    optionalEnvironmentValue(environment, "SILICONFLOW_BASE_URL") ??
+    (configuredBaseUrl
+      ? undefined
+      : optionalEnvironmentValue(environment, "SILICONFLOW_BASE_URL")) ??
     config.inference.siliconflow.baseUrl;
-  const embeddingModel =
-    optionalEnvironmentValue(environment, "SILICONFLOW_EMBEDDING_MODEL") ??
-    config.inference.siliconflow.embedding.model;
+  const environmentEmbeddingModel = configuredEmbeddingModel
+    ? undefined
+    : optionalEnvironmentValue(environment, "SILICONFLOW_EMBEDDING_MODEL");
+  const embeddingModel = environmentEmbeddingModel ?? config.inference.siliconflow.embedding.model;
   const configuredDimensions = optionalEnvironmentInteger(
     environment,
     "SILICONFLOW_EMBEDDING_DIMENSIONS",
   );
   const embeddingDimensions =
-    configuredDimensions ?? (embeddingModel === "BAAI/bge-m3" ? 1_024 : undefined);
+    (configuredEmbeddingDimensions ? undefined : configuredDimensions) ??
+    (!configuredEmbeddingModel && environmentEmbeddingModel === "BAAI/bge-m3" ? 1_024 : undefined);
   const rerankModel =
-    optionalEnvironmentValue(
-      environment,
-      "SILICONFLOW_RERANK_MODEL",
-      "SILICONFLOW_RERANKER_MODEL",
-    ) ?? config.inference.siliconflow.rerank.model;
-  const configuredRerankContext = optionalEnvironmentInteger(
+    (configuredRerankModel
+      ? undefined
+      : optionalEnvironmentValue(
+          environment,
+          "SILICONFLOW_RERANK_MODEL",
+          "SILICONFLOW_RERANKER_MODEL",
+        )) ?? config.inference.siliconflow.rerank.model;
+  const environmentRerankContext = optionalEnvironmentInteger(
     environment,
     "SILICONFLOW_RERANK_MAX_INPUT_TOKENS",
   );
   const rerankMaxInputTokens =
-    configuredRerankContext ?? (rerankModel === "BAAI/bge-reranker-v2-m3" ? 8_192 : undefined);
+    (hasConfiguredRerankContext ? undefined : environmentRerankContext) ??
+    (!configuredRerankModel && rerankModel === "BAAI/bge-reranker-v2-m3" ? 8_192 : undefined);
   return {
     ...config,
     inference: {
@@ -544,6 +619,59 @@ function applySiliconFlowEnvironment(
   };
 }
 
+function resolveEmbeddingRuntime(
+  configured: PiMentisConfig,
+  effective: PiMentisConfig,
+  override: Record<string, unknown> | undefined,
+): EmbeddingRuntimeResolution {
+  const configuredModel = hasConfiguredPath(override ?? {}, [
+    "inference",
+    "siliconflow",
+    "embedding",
+    "model",
+  ]);
+  const model = effective.inference.siliconflow.embedding.model;
+  const dimensions = effective.inference.siliconflow.embedding.dimensions;
+  const environmentSelected =
+    !configuredModel &&
+    (model !== configured.inference.siliconflow.embedding.model ||
+      dimensions !== configured.inference.siliconflow.embedding.dimensions);
+  return {
+    configured: {
+      model: configured.inference.siliconflow.embedding.model,
+      dimensions: configured.inference.siliconflow.embedding.dimensions,
+    },
+    effective: {
+      providerId: "siliconflow",
+      model,
+      dimensions,
+    },
+    source: configuredModel ? "config" : environmentSelected ? "environment" : "default",
+    environmentOverrideActive: environmentSelected,
+  };
+}
+
+function freezeConfig<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) freezeConfig(child);
+  }
+  return value;
+}
+
+function finalizeConfig(
+  configured: PiMentisConfig,
+  override: Record<string, unknown> | undefined,
+  environment: NodeJS.ProcessEnv,
+): PiMentisConfig {
+  const effective = validateConfig(
+    applySiliconFlowEnvironmentFallback(configured, override, environment),
+  );
+  const frozen = freezeConfig(effective);
+  embeddingRuntimeResolutions.set(frozen, resolveEmbeddingRuntime(configured, frozen, override));
+  return frozen;
+}
+
 export async function loadConfig(
   _cwd: string,
   filename?: string,
@@ -562,7 +690,7 @@ export async function loadConfig(
         ? (error as { readonly code?: unknown }).code
         : undefined;
     if (code === "ENOENT") {
-      const resolved = validateConfig(applySiliconFlowEnvironment(defaults, environment));
+      const resolved = finalizeConfig(defaults, undefined, environment);
       await mkdir(path.dirname(resolvedFilename), { recursive: true, mode: 0o700 });
       await writeFile(resolvedFilename, JSON.stringify(resolved, null, 2), { mode: 0o600 });
       return resolved;
@@ -583,5 +711,5 @@ export async function loadConfig(
     defaults as unknown as Record<string, unknown>,
     override,
   ) as unknown as PiMentisConfig;
-  return validateConfig(applySiliconFlowEnvironment(merged, environment));
+  return finalizeConfig(merged, override, environment);
 }

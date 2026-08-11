@@ -9,6 +9,7 @@ import {
   ProviderPriority,
   assertPiCompatibility,
   detectInstalledPackageVersion,
+  getEmbeddingRuntimeResolution,
   getStorageStatus,
   getOrCreateRuntime,
   loadConfig,
@@ -75,6 +76,24 @@ function spaces(
 ): Readonly<Record<"knowledge" | "memory" | "capability", EmbeddingSpaceIdentity>> {
   const identity = embeddingSpace(current);
   return { knowledge: identity, memory: identity, capability: identity };
+}
+
+function embeddingRuntimeDiagnostics(current: PiMentisConfig, currentStore?: ZvecStore) {
+  const resolution = getEmbeddingRuntimeResolution(current);
+  return {
+    ...resolution,
+    ...(currentStore === undefined
+      ? {}
+      : {
+          activeIndexGenerations: currentStore.manifest.generations
+            .filter((generation) => generation.state === "active")
+            .map((generation) => ({
+              kind: generation.kind,
+              generationId: generation.generationId,
+              embeddingSpace: generation.embeddingSpace,
+            })),
+        }),
+  };
 }
 
 function sourceInput(kind: string, value: string) {
@@ -313,7 +332,7 @@ function registerKnowledgeCommand(
         notifyWhenUiAvailable(
           context,
           formatPiToolJson({
-            embedding: config.inference.siliconflow.embedding,
+            embedding: embeddingRuntimeDiagnostics(config, store),
             rerank: config.inference.siliconflow.rerank,
           }),
           "info",
@@ -333,6 +352,7 @@ function registerKnowledgeCommand(
           context,
           formatPiToolJson({
             storage: getStorageStatus(context.cwd, currentConfig.storage.rootDir),
+            embeddingRuntime: embeddingRuntimeDiagnostics(currentConfig, store),
             storageCoordination: await store?.coordinationStatus(),
             runtime: runtime.snapshot(),
           }),

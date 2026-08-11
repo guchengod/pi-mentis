@@ -126,6 +126,10 @@ export const EmbeddingMigrationError = defineError(
   "EmbeddingMigrationError",
   "EMBEDDING_MIGRATION",
 );
+export const IncompatibleEmbeddingGenerationError = defineError(
+  "IncompatibleEmbeddingGenerationError",
+  "INCOMPATIBLE_EMBEDDING_GENERATION",
+);
 
 export class UnsupportedPiVersionError extends MentisError {
   readonly currentVersion: string;

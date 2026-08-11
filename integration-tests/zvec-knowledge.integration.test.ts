@@ -91,6 +91,22 @@ describe("real Zvec production loop", () => {
     await Promise.all([left.close(), right.close()]);
   });
 
+  it("fails before opening an existing index with an incompatible embedding generation", async () => {
+    const root = await createRoot();
+    const original = embeddingSpace(768);
+    const initial = { knowledge: original, memory: original, capability: original };
+    const store = new ZvecStore(testStorage(root));
+    await store.start(initial);
+    await store.close();
+
+    const incompatible = embeddingSpace(1024);
+    const reopened = new ZvecStore(testStorage(root));
+    await expect(
+      reopened.start({ knowledge: incompatible, memory: incompatible, capability: incompatible }),
+    ).rejects.toMatchObject({ code: "INCOMPATIBLE_EMBEDDING_GENERATION" });
+    await reopened.close();
+  });
+
   it("persists Pi episodes and resolves byte-identical offloaded tool evidence after restart", async () => {
     const root = await createRoot();
     const space = embeddingSpace();

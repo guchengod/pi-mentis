@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   EmbeddingMigrationError,
+  IncompatibleEmbeddingGenerationError,
   operationId,
   type EmbeddingSpaceIdentity,
 } from "@pi-mentis/pi-mentis-core";
@@ -82,6 +83,61 @@ export function activeGenerationFor(manifest: ActiveIndexManifest, kind: Generat
   if (kind === "knowledge") return manifest.knowledgeGeneration;
   if (kind === "memory") return manifest.memoryGeneration;
   return manifest.capabilityGeneration;
+}
+
+function embeddingSpaceDifference(
+  active: EmbeddingSpaceIdentity,
+  effective: EmbeddingSpaceIdentity,
+): readonly string[] {
+  const fields = [
+    "providerId",
+    "modelId",
+    "dimensions",
+    "normalization",
+    "preprocessingVersion",
+    "inputKindVersion",
+  ] as const;
+  return fields.filter((field) => active[field] !== effective[field]);
+}
+
+/**
+ * An existing index can only be opened by the exact embedding generation that
+ * produced it. This is intentionally a startup barrier: silently opening a
+ * different generation defers failure to Zvec upsert/query and risks writes
+ * against an incompatible collection.
+ */
+export function assertActiveEmbeddingGenerationsCompatible(
+  manifest: ActiveIndexManifest,
+  effectiveSpaces: Readonly<Record<GenerationKind, EmbeddingSpaceIdentity>>,
+): void {
+  for (const kind of ["knowledge", "memory", "capability"] as const) {
+    const generationId = activeGenerationFor(manifest, kind);
+    const generation = manifest.generations.find(
+      (candidate) => candidate.kind === kind && candidate.generationId === generationId,
+    );
+    if (generation === undefined) {
+      throw new IncompatibleEmbeddingGenerationError(
+        `INCOMPATIBLE_EMBEDDING_GENERATION: active ${kind} generation ${generationId} is missing from the manifest`,
+        { operation: "embedding-generation-compatibility", retryable: false },
+      );
+    }
+    const differences = embeddingSpaceDifference(generation.embeddingSpace, effectiveSpaces[kind]);
+    if (differences.length === 0) continue;
+    throw new IncompatibleEmbeddingGenerationError(
+      `INCOMPATIBLE_EMBEDDING_GENERATION: active ${kind} generation ${generationId} does not match the effective embedding runtime (different ${differences.join(", ")}). Run an explicit embedding migration or select the generation's configured model and dimensions before writing.`,
+      {
+        operation: "embedding-generation-compatibility",
+        retryable: false,
+        details: {
+          kind,
+          generationId,
+          active: generation.embeddingSpace,
+          effective: effectiveSpaces[kind],
+          differences,
+        },
+      },
+    );
+  }
 }
 
 export function replaceActiveGeneration(
