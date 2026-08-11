@@ -200,7 +200,10 @@ export async function projectDurablePendingAssertions(
   }
   return overlay.project(request, {
     ...result,
-    found: augmentedHits.length > 0,
+    // Preserve exact entity success. ID-only Artifact/Evidence lookups return
+    // metadata without content hits, so hit cardinality cannot redefine the
+    // coordinator's entity-level `found` contract.
+    found: result.found || augmentedHits.length > 0,
     hits: augmentedHits,
   });
 }

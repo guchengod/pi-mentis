@@ -282,7 +282,12 @@ describe("query-vs-ID consistency invariant", () => {
     const context: RecallExecutionContext = { scopeContext };
 
     const result = await coordinator.recall(request, context);
-    expect(result.found).toBe(true);
+    expect(result).toMatchObject({
+      found: true,
+      contentFound: true,
+      lookupMode: "global_query",
+      diagnostics: { durationMs: 1, selectedHitCount: 1 },
+    });
     const found = result.hits.some((hit) => hit.id === recordId);
     expect(found).toBe(true);
   });

@@ -50,10 +50,17 @@ export interface PublicRecallHit {
   readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
   readonly resourceType: MentisResourceType;
   readonly sanitized: boolean;
+  readonly artifactChunkIndex?: number;
+  readonly byteStart?: number;
+  readonly byteEnd?: number;
 }
 
 export interface PublicRecallResult {
   readonly found: boolean;
+  readonly entityFound?: boolean;
+  readonly contentFound?: boolean;
+  readonly lookupMode?: "exact_id" | "anchored_query" | "global_query";
+  readonly artifactId?: string;
   readonly resourceType: MentisResourceType;
   readonly anchored: boolean;
   readonly reason?:
@@ -65,6 +72,19 @@ export interface PublicRecallResult {
     readonly plannerDegraded: boolean;
     readonly retrievalMode?: "focused" | "broad";
     readonly memoryNeed?: Readonly<{ readonly required: boolean; readonly confidence: number }>;
+    readonly durationMs?: number;
+    readonly stages?: Readonly<Record<string, number>>;
+    readonly candidateCount?: number;
+    readonly selectedHitCount?: number;
+    readonly returnedBytes?: number;
+    readonly estimatedReturnedTokens?: number;
+    readonly artifact?: Readonly<{
+      readonly artifactBytes: number;
+      readonly chunksScanned: number;
+      readonly bytesRead: number;
+      readonly returnedBytes: number;
+      readonly estimatedReturnedTokens: number;
+    }>;
   }>;
 }
 
@@ -91,6 +111,7 @@ export interface RecallCoordinator {
 
 const MAX_HITS = 5;
 const MAX_CONTENT_LENGTH = 300;
+const MAX_ARTIFACT_CONTENT_LENGTH = 1_200;
 
 // ─── Secret Sanitization ──────────────────────────────────────────
 
@@ -140,9 +161,9 @@ function projectScopeKind(scope: MemoryScope): PublicRecallHit["kind"] {
   }
 }
 
-function trimContent(text: string): string {
-  if (text.length <= MAX_CONTENT_LENGTH) return text;
-  return text.slice(0, MAX_CONTENT_LENGTH) + "...";
+function trimContent(text: string, maxLength = MAX_CONTENT_LENGTH): string {
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength) + "...";
 }
 
 function buildHits(result: SearchResult): readonly PublicRecallHit[] {
@@ -178,9 +199,16 @@ function buildSummary(hits: readonly PublicRecallHit[]): string | undefined {
 
 type NonResolvedReason = Exclude<ResolvedMentisReference["reason"], "resolved">;
 
-function referenceFailure(reason: NonResolvedReason, type: MentisResourceType): PublicRecallResult {
+function referenceFailure(
+  reason: NonResolvedReason,
+  type: MentisResourceType,
+  lookupMode: "exact_id" | "anchored_query",
+): PublicRecallResult {
   return {
     found: false,
+    entityFound: false,
+    contentFound: false,
+    lookupMode,
     resourceType: type,
     anchored: true,
     reason,
@@ -207,6 +235,9 @@ async function exactMemoryRead(
     if (record === undefined) {
       return {
         found: false,
+        entityFound: false,
+        contentFound: false,
+        lookupMode: "exact_id",
         resourceType: "unknown",
         anchored: true,
         reason: "not_found",
@@ -232,8 +263,11 @@ async function exactMemoryRead(
 
     return {
       found: true,
+      entityFound: true,
+      contentFound: true,
+      lookupMode: "exact_id",
       resourceType: "memory",
-      anchored: false,
+      anchored: true,
       summary: record.content.length > 150 ? record.content.slice(0, 150) + "..." : record.content,
       hits: [hit],
     };
@@ -257,6 +291,9 @@ async function memoryEvolutionChain(
     if (record === undefined) {
       return {
         found: false,
+        entityFound: false,
+        contentFound: false,
+        lookupMode: "anchored_query",
         resourceType: "unknown",
         anchored: true,
         reason: "not_found",
@@ -385,6 +422,9 @@ async function memoryEvolutionChain(
 
     return {
       found: true,
+      entityFound: true,
+      contentFound: true,
+      lookupMode: "anchored_query",
       resourceType: "memory",
       anchored: true,
       summary: `Memory evolution chain: ${hits.length} related records`,
@@ -404,6 +444,10 @@ function artifactSummary(artifact: ArtifactRecord): PublicRecallResult {
 
   return {
     found: true,
+    entityFound: true,
+    contentFound: false,
+    lookupMode: "exact_id",
+    artifactId: artifact.id,
     resourceType: "artifact",
     anchored: true,
     summary: JSON.stringify({
@@ -417,6 +461,19 @@ function artifactSummary(artifact: ArtifactRecord): PublicRecallResult {
       chunkCount: artifact.chunks.length,
     }),
     hits: [],
+    diagnostics: {
+      plannerDegraded: false,
+      selectedHitCount: 0,
+      returnedBytes: 0,
+      estimatedReturnedTokens: 0,
+      artifact: {
+        artifactBytes: artifact.byteLength,
+        chunksScanned: 0,
+        bytesRead: 0,
+        returnedBytes: 0,
+        estimatedReturnedTokens: 0,
+      },
+    },
   };
 }
 
@@ -438,32 +495,68 @@ async function anchoredArtifactQuery(
     if (!result.found) {
       return {
         found: false,
+        entityFound: result.entityFound,
+        contentFound: false,
+        lookupMode: "anchored_query",
+        ...(result.entityFound ? { artifactId } : {}),
         resourceType: "artifact",
         anchored: true,
         summary: result.summary ?? "No matches found in artifact",
         hits: [],
+        diagnostics: {
+          plannerDegraded: false,
+          durationMs: result.diagnostics.durationMs,
+          selectedHitCount: 0,
+          returnedBytes: 0,
+          estimatedReturnedTokens: 0,
+          artifact: result.diagnostics,
+        },
       };
     }
 
     const hits: PublicRecallHit[] = result.hits.slice(0, MAX_HITS).map((h) => ({
       id: h.artifactId,
-      content: trimContent(h.content),
+      content: trimContent(h.content, MAX_ARTIFACT_CONTENT_LENGTH),
       kind: "artifact" as const,
       status: "current" as const,
       match: h.match === "exact" ? "anchored" : "lexical",
       resourceType: "artifact" as const,
       sanitized: h.sanitized,
+      artifactChunkIndex: h.chunkIndex,
+      byteStart: h.byteStart,
+      byteEnd: h.byteEnd,
     }));
 
     return {
       found: true,
+      entityFound: true,
+      contentFound: true,
+      lookupMode: "anchored_query",
+      artifactId,
       resourceType: "artifact",
       anchored: true,
       summary: `Found ${result.hits.length} match(es) in artifact`,
       hits,
+      diagnostics: {
+        plannerDegraded: false,
+        durationMs: result.diagnostics.durationMs,
+        selectedHitCount: hits.length,
+        returnedBytes: result.diagnostics.returnedBytes,
+        estimatedReturnedTokens: result.diagnostics.estimatedReturnedTokens,
+        artifact: result.diagnostics,
+      },
     };
   } catch {
-    return { found: false, resourceType: "artifact", anchored: true, reason: "failed", hits: [] };
+    return {
+      found: false,
+      entityFound: true,
+      contentFound: false,
+      lookupMode: "anchored_query",
+      resourceType: "artifact",
+      anchored: true,
+      reason: "failed",
+      hits: [],
+    };
   }
 }
 
@@ -491,6 +584,9 @@ async function evidenceSummary(
     }
     return {
       found: true,
+      entityFound: true,
+      contentFound: false,
+      lookupMode: "exact_id",
       resourceType: "evidence",
       anchored: true,
       summary: JSON.stringify({
@@ -565,7 +661,7 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
     if (id !== undefined && query === undefined) {
       const ref = await this.#resolver.resolve(id, resolverContext(scopeContext, signal));
       if (ref.reason !== "resolved") {
-        return referenceFailure(ref.reason as NonResolvedReason, ref.type);
+        return referenceFailure(ref.reason as NonResolvedReason, ref.type, "exact_id");
       }
 
       if (ref.type === "memory") {
@@ -633,7 +729,7 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
     if (id !== undefined && query !== undefined) {
       const ref = await this.#resolver.resolve(id, resolverContext(scopeContext, signal));
       if (ref.reason !== "resolved") {
-        return referenceFailure(ref.reason as NonResolvedReason, ref.type);
+        return referenceFailure(ref.reason as NonResolvedReason, ref.type, "anchored_query");
       }
 
       if (ref.type === "artifact") {
@@ -691,10 +787,26 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           const result = addSummary(
             {
               found: hits.length > 0,
+              contentFound: hits.length > 0,
+              lookupMode: "global_query",
               resourceType: "search",
               anchored: false,
               hits,
-              diagnostics: { plannerDegraded: true },
+              diagnostics: {
+                plannerDegraded: true,
+                durationMs: memResult.diagnostics.durationMs,
+                stages: memResult.diagnostics.stages,
+                candidateCount: memResult.diagnostics.rankings?.rrf.length ?? memResult.hits.length,
+                selectedHitCount: hits.length,
+                returnedBytes: hits.reduce(
+                  (total, hit) => total + Buffer.byteLength(hit.content, "utf8"),
+                  0,
+                ),
+                estimatedReturnedTokens: Math.ceil(
+                  hits.reduce((total, hit) => total + Buffer.byteLength(hit.content, "utf8"), 0) /
+                    4,
+                ),
+              },
             },
             summary,
           );
@@ -703,7 +815,14 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         }
 
         if (retrieval === undefined) {
-          return { found: false, resourceType: "search", anchored: false, hits: [] };
+          return {
+            found: false,
+            contentFound: false,
+            lookupMode: "global_query",
+            resourceType: "search",
+            anchored: false,
+            hits: [],
+          };
         }
 
         const retrievalResult = await retrieval.search(
@@ -733,6 +852,8 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           {
             ...(signal !== undefined ? { signal } : {}),
             allowRerank: true,
+            timeoutMs: 3_000,
+            softTimeoutMs: 1_800,
           },
         );
 
@@ -742,6 +863,8 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         const result = addSummary(
           {
             found: hits.length > 0,
+            contentFound: hits.length > 0,
+            lookupMode: "global_query",
             resourceType: "search",
             anchored: false,
             hits,
@@ -750,6 +873,18 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
               : { traceId: retrievalResult.diagnostics.traceId }),
             diagnostics: {
               plannerDegraded: semanticPlan?.diagnostics?.plannerDegraded ?? true,
+              durationMs: retrievalResult.diagnostics.durationMs,
+              stages: retrievalResult.diagnostics.stages,
+              candidateCount:
+                retrievalResult.diagnostics.rankings?.rrf.length ?? retrievalResult.hits.length,
+              selectedHitCount: hits.length,
+              returnedBytes: hits.reduce(
+                (total, hit) => total + Buffer.byteLength(hit.content, "utf8"),
+                0,
+              ),
+              estimatedReturnedTokens: Math.ceil(
+                hits.reduce((total, hit) => total + Buffer.byteLength(hit.content, "utf8"), 0) / 4,
+              ),
               ...(semanticPlan === undefined
                 ? {}
                 : {
@@ -763,7 +898,14 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
         this.#turnSearchCache.set(cacheKey, result);
         return result;
       } catch {
-        return { found: false, resourceType: "search", anchored: false, hits: [] };
+        return {
+          found: false,
+          contentFound: false,
+          lookupMode: "global_query",
+          resourceType: "search",
+          anchored: false,
+          hits: [],
+        };
       }
     }
 

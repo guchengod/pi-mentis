@@ -65,7 +65,7 @@ export const SearchMemoryParameters = Type.Object(
     id: Type.Optional(
       Type.String({
         minLength: 1,
-        description: "Optional exact memory ID or anchor memory ID.",
+        description: "Optional exact Mentis memory, artifact, or evidence ID.",
       }),
     ),
   },
@@ -133,11 +133,20 @@ export interface PublicRecallHit {
   readonly provisional?: boolean;
   readonly projection?: "provisional_latest" | "shadowed_by_pending";
   readonly shadowedByPendingId?: string;
+  readonly artifactChunkIndex?: number;
+  readonly byteStart?: number;
+  readonly byteEnd?: number;
 }
 
 /** Result of a search_memory call. */
 export interface PublicRecallResult {
   readonly found: boolean;
+  /** Exact/anchored entity resolution, independent from content matching. */
+  readonly entityFound?: boolean;
+  /** Whether this lookup returned content that directly matched the request. */
+  readonly contentFound?: boolean;
+  readonly lookupMode?: "exact_id" | "anchored_query" | "global_query";
+  readonly artifactId?: string;
   readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
   readonly anchored: boolean;
   readonly reason?:
@@ -160,6 +169,22 @@ export interface PublicRecallResult {
   readonly supportLevel?: "direct" | "related" | "weak" | "none";
   readonly noDirectSupport?: boolean;
   readonly alreadySearchedThisTurn?: boolean;
+  readonly searchLimitReachedThisTurn?: boolean;
+  readonly diagnostics?: Readonly<{
+    readonly durationMs?: number;
+    readonly stages?: Readonly<Record<string, number>>;
+    readonly candidateCount?: number;
+    readonly selectedHitCount?: number;
+    readonly returnedBytes?: number;
+    readonly estimatedReturnedTokens?: number;
+    readonly artifact?: Readonly<{
+      readonly artifactBytes: number;
+      readonly chunksScanned: number;
+      readonly bytesRead: number;
+      readonly returnedBytes: number;
+      readonly estimatedReturnedTokens: number;
+    }>;
+  }>;
 }
 
 /** Public memory IDs are the exact lowercase SHA-256-shaped IDs returned by Mentis. */
@@ -256,6 +281,9 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
       'A semantic query search miss does not prove a memory was never stored. If storage existence matters and an exact ID is available, use ID lookup. Otherwise state only that the current search did not retrieve it — never claim "it was not written" solely because a query search returned no results.',
       'When consistency is "pending_relationship", prefer the hit marked projection="provisional_latest" for the user\'s immediate current-session answer, but keep the other returned hits as persistent evidence until relationship consolidation resolves. Do not claim any persistent status has already changed.',
       "When noDirectSupport is true, the retrieved memories do not directly answer the requested fact. If alreadySearchedThisTurn is also true, stop reformulating the same query and answer that current memory has insufficient information.",
+      "For exact ID lookups, entityFound reports whether the entity exists and contentFound reports whether matching content was returned. Do not treat entityFound=true as an ID lookup failure merely because contentFound=false.",
+      "An ID-only lookup resolves the entity and its metadata. To recover a specific artifact detail, keep the same id and add a focused query so Mentis searches that artifact's chunks.",
+      "Once an ID is used in a user turn, Mentis keeps subsequent recall calls in that turn anchored to the same entity. If anchored content is not found, report that scope-local miss instead of attempting a global fallback.",
     ],
     async execute(_toolCallId, toolParams, abortSignal, _onUpdate, context) {
       const query = typeof toolParams.query === "string" ? toolParams.query.trim() : undefined;
@@ -267,11 +295,14 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
         if (query === undefined) {
           return toolResult({
             found: false,
+            entityFound: false,
+            contentFound: false,
+            lookupMode: "exact_id",
             resourceType: "unknown",
-            anchored: false,
+            anchored: true,
             reason: "invalid_memory_id",
             summary:
-              "The supplied token is not a Mentis memory ID. Treat it as ordinary user content rather than an ID.",
+              "The supplied token is not a Mentis resource ID. Treat it as ordinary user content rather than an ID.",
             hits: [],
             supportLevel: "none",
             noDirectSupport: true,

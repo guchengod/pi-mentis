@@ -205,7 +205,16 @@ export class DefaultRetrievalService implements RetrievalService {
     const prepared =
       this.#semanticPlanner === undefined
         ? { plan: fallbackPlan() }
-        : await this.#semanticPlanner.prepare(query.text, { signal });
+        : await this.#semanticPlanner.prepare(query.text, { signal }).catch((error: unknown) => {
+            if (options.signal?.aborted === true) {
+              clearTimeout(timer);
+              throw options.signal.reason instanceof Error
+                ? options.signal.reason
+                : new Error("Retrieval cancelled");
+            }
+            degraded.push(`planner:${error instanceof Error ? error.name : "error"}`);
+            return { plan: fallbackPlan() };
+          });
     const queryPlan = prepared.plan;
     const queryEmbedding = prepared.queryEmbedding;
     stages["semanticPlanner"] = performance.now() - plannerStarted;
@@ -331,6 +340,9 @@ export class DefaultRetrievalService implements RetrievalService {
                 return undefined;
               });
       stages["memory"] = performance.now() - memoryStarted;
+      for (const [stage, duration] of Object.entries(memoryResult?.diagnostics.stages ?? {})) {
+        stages[`memory.${stage}`] = duration;
+      }
       if (
         knowledgeResult !== undefined &&
         memoryResult !== undefined &&
@@ -371,11 +383,13 @@ export class DefaultRetrievalService implements RetrievalService {
         memoryResult = { ...memoryResult, hits: verifiedHits };
         stages["knowledgeVerification"] = performance.now() - verificationStarted;
       }
+      const rrfStarted = performance.now();
       const fusedBeforeGate = reciprocalRankFusion([
         ...(viewHits.length === 0 ? [] : [{ weight: 1.2, hits: viewHits }]),
         ...(knowledgeResult === undefined ? [] : [{ weight: 1.1, hits: knowledgeResult.hits }]),
         ...(memoryResult === undefined ? [] : [{ weight: 1, hits: memoryResult.hits }]),
       ]);
+      stages["rrf"] = performance.now() - rrfStarted;
       const scope = query.memoryScopeContext ?? {
         tenantId: "local",
         userId: "local",
@@ -388,6 +402,7 @@ export class DefaultRetrievalService implements RetrievalService {
         ...(query.gateContext ?? {}),
         historical: query.temporalMode === "historical" || query.temporalMode === "all",
       };
+      const gateStarted = performance.now();
       const rejectedIds: string[] = [];
       const rejectionReasons: Record<string, readonly string[]> = {};
       const fused = fusedBeforeGate
@@ -433,6 +448,7 @@ export class DefaultRetrievalService implements RetrievalService {
         )
         .sort((left, right) => right.score - left.score)
         .slice(0, candidateLimit);
+      stages["gatesAuthorityFreshness"] = performance.now() - gateStarted;
       const rrfRanking = fused.map((hit) => hit.id);
       let ranked: readonly SearchHit[] = fused;
       if (this.#reranker === undefined && options.allowRerank !== false && fused.length > 1) {
@@ -458,6 +474,7 @@ export class DefaultRetrievalService implements RetrievalService {
       // duplicate/version candidates per member identity, then run the
       // diversity selection. Independent record identities are never
       // collapsed merely because their content is similar.
+      const assemblyStarted = performance.now();
       const deduped = structuralDedupe(ranked);
       const cutoff = adaptiveCutoff({ hits: deduped, mode: queryPlan.retrievalMode });
       const diversityTrace: DiversityTraceEntry[] = [];
@@ -485,6 +502,7 @@ export class DefaultRetrievalService implements RetrievalService {
       );
       const selectedIds = new Set(selectedContext.map((hit) => hit.id));
       const context = diversified.filter((hit) => selectedIds.has(hit.id));
+      stages["resultAssembly"] = performance.now() - assemblyStarted;
       const traceId = options.traceId ?? `trace:${contentHash(`${query.text}:${started}`)}`;
       options.onTrace?.(traceId);
       const namespace = [scope.tenantId, scope.userId, scope.appId, scope.agentId]

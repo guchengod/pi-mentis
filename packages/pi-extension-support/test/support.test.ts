@@ -211,6 +211,44 @@ describe("Pi extension support", () => {
     });
   });
 
+  it("does not turn an exact metadata-only entity lookup into a miss", async () => {
+    const id = "8".repeat(64);
+    const projected = await projectDurablePendingAssertions(
+      {
+        async getRelationshipLearning() {
+          return undefined;
+        },
+        async listPendingRelationshipLearning() {
+          return [];
+        },
+        async get() {
+          return undefined;
+        },
+      },
+      { id },
+      {
+        found: true,
+        entityFound: true,
+        contentFound: false,
+        lookupMode: "exact_id",
+        artifactId: id,
+        resourceType: "artifact",
+        anchored: true,
+        summary: JSON.stringify({ id, chunkCount: 11 }),
+        hits: [],
+      },
+    );
+
+    expect(projected).toMatchObject({
+      found: true,
+      entityFound: true,
+      contentFound: false,
+      lookupMode: "exact_id",
+      artifactId: id,
+      hits: [],
+    });
+  });
+
   it("projects durable pending state into automatic recall after restart", async () => {
     const projected = await projectDurablePendingAutomaticRecall(
       {
@@ -365,5 +403,94 @@ describe("Pi extension support", () => {
       alreadySearchedThisTurn: true,
     });
     expect(guard.repeated({ query: "那个实验使用的恢复步骤是什么" })).toBeUndefined();
+  });
+
+  it("keeps exact entity lookup successful when it returns metadata without content hits", () => {
+    const guard = new CurrentTurnRecallGuard();
+    const id = "a".repeat(64);
+    const result = guard.record(
+      { id },
+      {
+        found: true,
+        entityFound: true,
+        contentFound: false,
+        lookupMode: "exact_id",
+        resourceType: "artifact",
+        anchored: true,
+        summary: JSON.stringify({ id, chunkCount: 11 }),
+        hits: [],
+      },
+    );
+
+    expect(result).toMatchObject({
+      found: true,
+      entityFound: true,
+      contentFound: false,
+      lookupMode: "exact_id",
+      supportLevel: "direct",
+      noDirectSupport: false,
+    });
+  });
+
+  it("enforces an ID boundary across follow-up recalls in the same user turn", () => {
+    const guard = new CurrentTurnRecallGuard();
+    const artifactId = "b".repeat(64);
+    guard.beginTurn();
+
+    expect(guard.scope({ id: artifactId, query: "尾部标记" })).toEqual({
+      id: artifactId,
+      query: "尾部标记",
+    });
+    expect(guard.scope({ query: "换一种说法再找一次" })).toEqual({
+      id: artifactId,
+      query: "换一种说法再找一次",
+    });
+    expect(guard.scope({ id: "c".repeat(64), query: "模型尝试切换锚点" })).toEqual({
+      id: artifactId,
+      query: "模型尝试切换锚点",
+    });
+
+    guard.beginTurn();
+    expect(guard.scope({ query: "用户在新 turn 明确发起全局检索" })).toEqual({
+      query: "用户在新 turn 明确发起全局检索",
+    });
+  });
+
+  it("does not deduplicate the same query across different anchors", () => {
+    const guard = new CurrentTurnRecallGuard();
+    const firstId = "c".repeat(64);
+    const secondId = "d".repeat(64);
+    guard.record(
+      { id: firstId, query: "查找尾部标记" },
+      {
+        found: false,
+        entityFound: true,
+        contentFound: false,
+        lookupMode: "anchored_query",
+        resourceType: "artifact",
+        anchored: true,
+        hits: [],
+      },
+    );
+
+    expect(guard.repeated({ id: secondId, query: "查找尾部标记" })).toBeUndefined();
+  });
+
+  it("bounds model-driven recall loops within one turn", () => {
+    const guard = new CurrentTurnRecallGuard();
+    for (let index = 0; index < 4; index += 1) {
+      guard.record(
+        { query: `不同检索 ${index}` },
+        { found: false, resourceType: "search", anchored: false, hits: [] },
+      );
+    }
+
+    expect(guard.repeated({ query: "第五次检索" })).toMatchObject({
+      found: false,
+      lookupMode: "global_query",
+      alreadySearchedThisTurn: true,
+      searchLimitReachedThisTurn: true,
+      noDirectSupport: true,
+    });
   });
 });

@@ -1362,19 +1362,31 @@ export class DefaultMemoryService implements MemoryService {
             : `${statusFilter} AND (${query.scopes.map((scope) => `namespace = ${quoteFilter(scopedNamespace(scope, query.scopeContext))}`).join(" OR ")})`;
         const limit = Math.max(1, Math.min(100, query.limit ?? 20));
         const zvecStarted = performance.now();
+        const timedSearch = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+          const stageStarted = performance.now();
+          try {
+            return await operation();
+          } finally {
+            stages[name] = performance.now() - stageStarted;
+          }
+        };
         const results = await Promise.allSettled([
-          this.#store.vectorSearch({
-            kind: "memory",
-            vector: vector.values,
-            topK: limit * 2,
-            filter: scopeFilter,
-          }),
-          this.#store.ftsSearch({
-            kind: "memory",
-            query: query.text,
-            topK: limit * 2,
-            filter: scopeFilter,
-          }),
+          timedSearch("dense", () =>
+            this.#store.vectorSearch({
+              kind: "memory",
+              vector: vector.values,
+              topK: limit * 2,
+              filter: scopeFilter,
+            }),
+          ),
+          timedSearch("fts", () =>
+            this.#store.ftsSearch({
+              kind: "memory",
+              query: query.text,
+              topK: limit * 2,
+              filter: scopeFilter,
+            }),
+          ),
         ]);
         stages["zvec"] = performance.now() - zvecStarted;
         const fused = new Map<string, SearchHit>();

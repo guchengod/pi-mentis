@@ -235,10 +235,11 @@ function registerIntegratedTools(
       return result;
     },
     async recall(request, signal) {
-      const repeated = recallGuard.repeated(request);
+      const scopedRequest = recallGuard.scope(request);
+      const repeated = recallGuard.repeated(scopedRequest);
       if (repeated !== undefined) return repeated;
       const ctxSnapshot = getContextSnapshot();
-      const result = await recallCoord.recall(request, {
+      const result = await recallCoord.recall(scopedRequest, {
         scopeContext: getScopeContext(),
         ...(ctxSnapshot !== undefined ? { contextSnapshot: ctxSnapshot } : {}),
         ...(signal !== undefined ? { signal } : {}),
@@ -257,10 +258,10 @@ function registerIntegratedTools(
                     accessIntent: "explicit_id",
                   }),
               },
-              request,
+              scopedRequest,
               result,
             );
-      const projected = recentAssertions.project(request, durableProjected);
+      const projected = recentAssertions.project(scopedRequest, durableProjected);
       relationshipTurn.recordRecall(
         projected.hits
           .filter((hit) => hit.resourceType === "memory")
@@ -272,7 +273,7 @@ function registerIntegratedTools(
             evidenceSource: "same_turn_recall",
           })),
       );
-      return recallGuard.record(request, projected);
+      return recallGuard.record(scopedRequest, projected);
     },
   });
 }
