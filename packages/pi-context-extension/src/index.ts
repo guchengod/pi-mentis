@@ -688,7 +688,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         recentAssertions,
         recallGuard,
         deferredRelationships,
-        () => runtimeReadyError?.message,
+        () =>
+          runtimeReadyError?.message ??
+          runtime
+            .snapshot()
+            .providers.find((provider) => provider.kind === "memory" && provider.state === "failed")
+            ?.error,
       );
       registered = true;
     }

@@ -490,7 +490,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         recentAssertions,
         recallGuard,
         deferredRelationships,
-        () => runtimeReadyError?.message,
+        () =>
+          runtimeReadyError?.message ??
+          runtime
+            .snapshot()
+            .providers.find((provider) => provider.kind === "memory" && provider.state === "failed")
+            ?.error,
       );
       pi.registerCommand("mentis", {
         description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
