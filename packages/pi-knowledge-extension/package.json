@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis-knowledge",
-  "version": "0.1.48",
+  "version": "0.1.49",
   "description": "Standalone Pi Mentis knowledge extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",

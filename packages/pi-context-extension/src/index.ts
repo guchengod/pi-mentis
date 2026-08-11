@@ -159,6 +159,7 @@ function registerIntegratedTools(
   recentAssertions: RecentAssertionOverlay,
   recallGuard: CurrentTurnRecallGuard,
   relationshipScheduler: DeferredRelationshipLearningScheduler | undefined,
+  unavailableReason: () => string | undefined,
 ): void {
   const memory = services.getMemory();
   const rememberCoord =
@@ -170,7 +171,7 @@ function registerIntegratedTools(
       if (rememberCoord === undefined) {
         return {
           outcome: "unavailable" as const,
-          summary: "Memory service unavailable.",
+          summary: unavailableReason() ?? "Memory service unavailable.",
           readable: false,
         };
       }
@@ -687,6 +688,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         recentAssertions,
         recallGuard,
         deferredRelationships,
+        () => runtimeReadyError?.message,
       );
       registered = true;
     }

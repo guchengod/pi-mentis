@@ -131,6 +131,7 @@ function registerMemoryTools(
   recentAssertions: RecentAssertionOverlay,
   recallGuard: CurrentTurnRecallGuard,
   relationshipScheduler: DeferredRelationshipLearningScheduler | undefined,
+  unavailableReason: () => string | undefined,
 ): void {
   // Build coordinators and register shared tool pair.
   const memory = services.getMemory();
@@ -144,7 +145,7 @@ function registerMemoryTools(
       if (rememberCoord === undefined) {
         return {
           outcome: "unavailable" as const,
-          summary: "Memory service unavailable.",
+          summary: unavailableReason() ?? "Memory service unavailable.",
           readable: false,
         };
       }
@@ -489,6 +490,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         recentAssertions,
         recallGuard,
         deferredRelationships,
+        () => runtimeReadyError?.message,
       );
       pi.registerCommand("mentis", {
         description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
