@@ -170,3 +170,55 @@ export class MentisBackgroundQueue {
     return undefined;
   }
 }
+
+export interface MentisSerialWorkQueueOptions {
+  readonly logError?: (err: unknown) => void;
+}
+
+/**
+ * FIFO work for lifecycle capture that must preserve ordering without making the
+ * Pi event handler wait for persistence. `enqueue` is fire-and-forget; `run`
+ * joins the same sequence when a later handler needs the produced value.
+ */
+export class MentisSerialWorkQueue {
+  readonly #logError: (err: unknown) => void;
+  #tail: Promise<void> = Promise.resolve();
+
+  constructor(options: MentisSerialWorkQueueOptions = {}) {
+    this.#logError = options.logError ?? (() => {});
+  }
+
+  enqueue(execute: () => Promise<void>): void {
+    void this.run(execute).catch(() => undefined);
+  }
+
+  run<T>(execute: () => Promise<T>): Promise<T> {
+    const result = this.#tail.then(execute);
+    this.#tail = result.then(
+      () => undefined,
+      (err: unknown) => {
+        this.#logError(err);
+      },
+    );
+    return result;
+  }
+
+  async drain(timeoutMs?: number): Promise<boolean> {
+    const pending = this.#tail;
+    if (timeoutMs === undefined) {
+      await pending;
+      return true;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        pending.then(() => true),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+}

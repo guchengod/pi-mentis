@@ -33,6 +33,7 @@ import {
   DeferredRelationshipLearningScheduler,
   DurableRelationshipLearningCoordinator,
   MentisBackgroundQueue,
+  MentisSerialWorkQueue,
   PiCaptureSession,
   createExperienceLearningService,
   createPiEvidenceStore,
@@ -42,6 +43,7 @@ import {
   referencedMemoryIds,
   resolvePiProjectIdentity,
   taskIdentityId,
+  TurnContextManager,
   ScopeSemanticPlanner,
   type MemoryService,
   type PiEvidenceStore,
@@ -303,6 +305,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   }
   const scheduler = new BackgroundScheduler(config.performance.queue);
   const backgroundQueue = new MentisBackgroundQueue({ maxConcurrency: 1, maxQueueLength: 32 });
+  const captureQueue = new MentisSerialWorkQueue();
+  const turnContext = new TurnContextManager();
   const relationshipTurn = new CurrentTurnMemoryEvidence();
   const recentAssertions = new RecentAssertionOverlay();
   const recallGuard = new CurrentTurnRecallGuard();
@@ -313,6 +317,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
+  let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
+  let contextRefreshSequence = 0;
   let evidenceStore: PiEvidenceStore | undefined;
   let scopeContext: PiScopeContext = {
     tenantId: "local",
@@ -574,6 +580,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     const project = await resolvePiProjectIdentity(context.cwd).catch(() =>
       fallbackProjectIdentity(context.cwd),
     );
+    activeProjectIdentity = project;
     scopeContext = {
       tenantId: "local",
       userId: "local",
@@ -760,7 +767,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       ...(parentBranchId === undefined ? {} : { parentBranchId }),
     };
   });
-  pi.on("input", async (event) => {
+  pi.on("input", (event) => {
     deferredRelationships?.activity();
     relationshipTurn.beginTurn();
     recallGuard.beginTurn();
@@ -800,7 +807,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       }
     }
     if (event.streamingBehavior === "steer") {
-      await captureSession?.steer(event.text).catch(() => undefined);
+      if (captureSession !== undefined) {
+        const session = captureSession;
+        captureQueue.enqueue(async () => {
+          await session.steer(event.text);
+        });
+      }
       const memory = runtime.getMemory<MemoryService>();
       const invalidation = scheduler.schedule({
         id: `branch-invalidation:${branchId}:${stableHash("steering:v1", event.text)}`,
@@ -812,11 +824,13 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       void invalidation.promise.catch(() => undefined);
     }
   });
-  pi.on("before_agent_start", async (event, context) => {
+  pi.on("before_agent_start", (event, context) => {
     latestRetrievalTraceId = undefined;
-    const identity = await resolvePiProjectIdentity(context.cwd).catch(() =>
-      fallbackProjectIdentity(context.cwd),
-    );
+    turnContext.nextTurn(event.prompt);
+    const identity =
+      activeProjectIdentity.workspacePath === context.cwd
+        ? activeProjectIdentity
+        : fallbackProjectIdentity(context.cwd);
     const currentEntryId = context.sessionManager.getLeafId() ?? undefined;
     const parentEntryId =
       currentEntryId === undefined
@@ -876,18 +890,9 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     const explicitTopic = event.prompt
       .match(/(?:^|\s)(?:topic|主题)\s*[:：]\s*([^\n]{2,80})/i)?.[1]
       ?.trim();
-    let topicIds: readonly string[] = [];
-    if (explicitTopic !== undefined && contextState !== undefined) {
-      const topic = await contextState
-        .observeTopicLabel(identityNamespace, explicitTopic)
-        .catch(() => undefined);
-      if (topic?.state === "active") topicIds = [topic.topicId];
-    } else if (contextState !== undefined) {
-      const topic = await contextState
-        .inferTopic(identityNamespace, event.prompt)
-        .catch(() => undefined);
-      if (topic?.state === "active") topicIds = [topic.topicId];
-    }
+    const activeTopic = turnContext.activeTopic;
+    const topicIds =
+      activeTopic.topicId === undefined ? [] : ([activeTopic.topicId] as readonly string[]);
     const taskInput = {
       namespace: identityNamespace,
       goal: event.prompt,
@@ -898,8 +903,11 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         ? {}
         : { currentTaskId: contextSnapshot.situation.taskId }),
     };
-    const resolvedTask = await contextState?.resolveTask(taskInput).catch(() => undefined);
-    const taskId = resolvedTask?.taskId ?? taskIdentityId(taskInput);
+    const activeTask = turnContext.activeTask;
+    const taskId =
+      activeTask.taskId !== undefined && activeTask.status === "active"
+        ? activeTask.taskId
+        : taskIdentityId(taskInput);
     const fastContext = {
       runtimeKey: context.sessionManager.getSessionId(),
       identity: identityFacet,
@@ -943,17 +951,18 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         snapshotId: capabilityFingerprint,
       },
     } as const;
-    const previousSnapshot = config.intelligence.context.persistSnapshots
-      ? await contextState
-          ?.latestSnapshot(identityFacet, context.sessionManager.getSessionId())
-          .catch(() => undefined)
-      : undefined;
-    contextSnapshot =
-      contextState === undefined
-        ? contextResolver.resolve(fastContext).snapshot
-        : contextState.resolveFromPersistent(fastContext, previousSnapshot).snapshot;
+    contextSnapshot = contextResolver.resolve(fastContext).snapshot;
     if (contextState !== undefined && config.intelligence.context.persistSnapshots) {
-      await contextState.persistSnapshot(contextSnapshot).catch(() => undefined);
+      const state = contextState;
+      const snapshot = contextSnapshot;
+      backgroundQueue.enqueue({
+        kind: "snapshot.checkpoint",
+        coalesceKey: `snapshot.checkpoint:${snapshot.conversation.sessionId}`,
+        priority: "fresh",
+        execute: async () => {
+          await state.persistSnapshot(snapshot);
+        },
+      });
     }
     scopeContext = {
       ...contextSnapshot.identity,
@@ -988,17 +997,60 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       ),
       capabilitySnapshotId: contextSnapshot.capability.snapshotId,
     };
-    await captureSession
-      ?.start({
-        goal: event.prompt,
-        scope: scopeContext,
-      })
-      .catch(() => undefined);
+    const refreshSequence = ++contextRefreshSequence;
+    const refreshState = contextState;
+    const refreshPrompt = event.prompt;
+    const refreshCwd = context.cwd;
+    const refreshTaskInput = taskInput;
+    backgroundQueue.enqueue({
+      kind: "topic.refresh",
+      coalesceKey: `context.refresh:${context.sessionManager.getSessionId()}`,
+      priority: "fresh",
+      execute: async () => {
+        const refreshedIdentity = await resolvePiProjectIdentity(refreshCwd).catch(() =>
+          fallbackProjectIdentity(refreshCwd),
+        );
+        let refreshedTopicIds = topicIds;
+        if (refreshState !== undefined) {
+          const topic =
+            explicitTopic === undefined
+              ? await refreshState
+                  .inferTopic(identityNamespace, refreshPrompt)
+                  .catch(() => undefined)
+              : await refreshState
+                  .observeTopicLabel(identityNamespace, explicitTopic)
+                  .catch(() => undefined);
+          if (topic?.state === "active") refreshedTopicIds = [topic.topicId];
+          const resolvedTask = await refreshState
+            .resolveTask({ ...refreshTaskInput, topicIds: refreshedTopicIds })
+            .catch(() => undefined);
+          if (refreshSequence === contextRefreshSequence) {
+            turnContext.updateTopic(refreshedTopicIds[0], topic === undefined ? 0 : 0.85);
+            turnContext.updateTask(
+              resolvedTask?.taskId ?? taskIdentityId(refreshTaskInput),
+              "active",
+              resolvedTask === undefined ? 0.5 : 0.8,
+            );
+          }
+        }
+        if (refreshSequence === contextRefreshSequence) activeProjectIdentity = refreshedIdentity;
+      },
+    });
+    if (captureSession !== undefined) {
+      const session = captureSession;
+      const goal = event.prompt;
+      const captureScope = scopeContext;
+      captureQueue.enqueue(async () => {
+        await session.start({ goal, scope: captureScope });
+      });
+    }
   });
-  pi.on("tool_execution_start", async (event) => {
-    await captureSession
-      ?.toolStarted(event.toolCallId, event.toolName, event.args)
-      .catch(() => undefined);
+  pi.on("tool_execution_start", (event) => {
+    if (captureSession === undefined) return;
+    const session = captureSession;
+    captureQueue.enqueue(async () => {
+      await session.toolStarted(event.toolCallId, event.toolName, event.args);
+    });
   });
   pi.on("tool_result", async (event, context) => {
     const text = event.content
@@ -1008,18 +1060,24 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       )
       .map((item) => item.text)
       .join("\n");
-    const result = await captureSession
-      ?.toolResult({
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        input: event.input,
-        text,
-        details: event.details,
-        isError: event.isError,
-        cwd: context.cwd,
-        completedAt: Date.now(),
-      })
-      .catch(() => undefined);
+    const session = captureSession;
+    const result =
+      session === undefined
+        ? undefined
+        : await captureQueue
+            .run(() =>
+              session.toolResult({
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                input: event.input,
+                text,
+                details: event.details,
+                isError: event.isError,
+                cwd: context.cwd,
+                completedAt: Date.now(),
+              }),
+            )
+            .catch(() => undefined);
     if (result === undefined || result.mode === "inline") return;
     return {
       content: [
@@ -1032,19 +1090,29 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       },
     };
   });
-  pi.on("session_compact", async (event) => {
-    await captureSession
-      ?.compact(event.compactionEntry.summary, event.reason, event.willRetry)
-      .catch(() => undefined);
+  pi.on("session_compact", (event) => {
+    if (captureSession === undefined) return;
+    const session = captureSession;
+    captureQueue.enqueue(async () => {
+      await session.compact(event.compactionEntry.summary, event.reason, event.willRetry);
+    });
   });
-  pi.on("agent_settled", async () => {
-    await captureSession?.finish().catch(() => undefined);
+  pi.on("agent_settled", () => {
+    if (captureSession !== undefined) {
+      const session = captureSession;
+      captureQueue.enqueue(async () => {
+        await session.finish();
+      });
+    }
     deferredRelationships?.settled();
   });
   pi.on("session_shutdown", async (event) => {
     deferredRelationships?.close();
     durableRelationships?.close();
-    await backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true });
+    await Promise.all([
+      backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true }),
+      captureQueue.drain(),
+    ]);
     if (event.reason === "quit") {
       await runtime.dispose();
     } else {
