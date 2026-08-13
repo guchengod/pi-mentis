@@ -36,6 +36,8 @@ pi
 Workspace 变化。显式 Pi profile 使用 `<PI_CODING_AGENT_DIR>/.pi-mentis`；
 `PI_MENTIS_HOME` 可指定隔离的绝对路径。所有字段可省略：
 
+运行 `/mentis help` 或 `/kb help` 可查看当前实际配置路径和知识库命令的详细说明。
+
 ```json
 {
   "inference": {

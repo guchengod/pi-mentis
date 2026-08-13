@@ -4,13 +4,15 @@ import {
   assertPiCompatibility,
   detectInstalledPackageVersion,
   findInstalledPackageRoot,
+  globalConfigPath,
   loadConfig,
   type PiMentisConfig,
 } from "@pi-mentis/pi-mentis-core";
 import { type PiScopeContext, type ToolResultEnvelope } from "@pi-mentis/pi-mentis-memory-core";
 import {
   formatPiToolJson,
-  MENTIS_MEMORY_SYSTEM_PROMPT,
+  createMentisMemorySystemPrompt,
+  formatMentisHelp,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
   type PublicRecallResult,
@@ -105,6 +107,7 @@ function knowledgeResultMessage(action: string, result: unknown): string {
 
 export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Promise<void> {
   let config: PiMentisConfig;
+  let configPath: string;
   let piPackageRoot: string;
   try {
     const installedVersion = await detectInstalledPackageVersion(
@@ -116,6 +119,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       "@earendil-works/pi-coding-agent",
       import.meta.url,
     );
+    configPath = globalConfigPath();
     config = await loadConfig(process.cwd());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -152,6 +156,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       }
     | undefined;
   const recalledMemoryIds = new Set<string>();
+  const helpText = formatMentisHelp({ configPath, memory: true, knowledge: true });
+  const memorySystemPrompt = createMentisMemorySystemPrompt();
   const sidecar = new MentisSidecarClient({
     onCapsule: (updated) => {
       capsule = updated;
@@ -236,10 +242,52 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     },
   });
 
+  pi.registerCommand("mentis", {
+    description: "Show Pi Mentis help or current status",
+    handler: async (rawArguments, context) => {
+      const action = rawArguments.trim() || "help";
+      if (action === "help") {
+        notifyWhenUiAvailable(context, helpText, "info");
+        return;
+      }
+      if (action !== "status") {
+        notifyWhenUiAvailable(context, "Usage: /mentis help | /mentis status", "error");
+        return;
+      }
+      try {
+        await ensureSidecarSession();
+        if (clientSessionId === undefined) {
+          notifyWhenUiAvailable(
+            context,
+            sidecarError ?? "Mentis sidecar session is not ready.",
+            "error",
+          );
+          return;
+        }
+        const result = await sidecar.call(
+          "knowledge.command",
+          { clientSessionId, action: "status", arguments: [], cwd: context.cwd },
+          15_000,
+        );
+        notifyWhenUiAvailable(context, formatPiToolJson(result), "info");
+      } catch (error) {
+        notifyWhenUiAvailable(
+          context,
+          error instanceof Error ? error.message : String(error),
+          "error",
+        );
+      }
+    },
+  });
+
   pi.registerCommand("kb", {
-    description: "Manage integrated Pi Mentis knowledge through the isolated sidecar",
+    description: "Manage integrated Pi Mentis knowledge; use /kb help for details",
     handler: async (rawArguments, context) => {
       const [action = "status", ...args] = rawArguments.trim().split(/\s+/u);
+      if (action === "help") {
+        notifyWhenUiAvailable(context, helpText, "info");
+        return;
+      }
       try {
         await ensureSidecarSession();
         if (clientSessionId === undefined) {
@@ -369,7 +417,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     const systemPrompt =
       !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
         ? event.systemPrompt
-        : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`;
+        : `${event.systemPrompt}\n\n${memorySystemPrompt}`;
     if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) {
       return { systemPrompt };
     }

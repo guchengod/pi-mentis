@@ -40,6 +40,9 @@ export SILICONFLOW_API_KEY=...
 pi
 ```
 
+Inside Pi, run `/mentis help` to see the effective configuration file path and detailed usage;
+the integrated and knowledge products also accept `/kb help`.
+
 The knowledge-only product exposes `commit_knowledge` and `search_knowledge`.
 The memory-only product exposes `commit_memory` and `search_memory`. The default
 integrated product also exposes only the memory pair; its search is knowledge-first

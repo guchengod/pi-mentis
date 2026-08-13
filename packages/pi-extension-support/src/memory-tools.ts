@@ -24,9 +24,17 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-export const MENTIS_MEMORY_SYSTEM_PROMPT = `<pi-mentis-tools>
-For unknown, uncertain, historical, indexed, or context-missing information, call search_memory before guessing. Call commit_memory only when the user explicitly asks to remember, update, correct, or forget something.
+const DEFAULT_MENTIS_CONFIG_PATH = "~/.pi/.pi-mentis/config.json";
+
+export function createMentisMemorySystemPrompt(extensionPackage = "@galvinsan/pi-mentis"): string {
+  return `<pi-mentis-tools>
+These capabilities are provided by the ${extensionPackage} extension.
+For unknown, uncertain, historical, indexed, or missing context, use search_memory before guessing. Use commit_memory only when the user explicitly asks to remember, update, correct, or forget.
+Config: ${DEFAULT_MENTIS_CONFIG_PATH}; profile or PI_MENTIS_HOME can override. Help: /mentis help.
 </pi-mentis-tools>`;
+}
+
+export const MENTIS_MEMORY_SYSTEM_PROMPT = createMentisMemorySystemPrompt();
 
 // ─── Public Tool Parameters (model-visible) ────────────────────────
 

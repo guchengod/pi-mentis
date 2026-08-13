@@ -85,7 +85,11 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 /kb add ./docs
 /kb add https://zhanghandong.github.io/pi-book/
 /kb status
+/kb help
+/mentis help
 ```
+
+`/mentis help` 会显示当前实际采用的配置文件路径和完整用法；`/kb help` 是同一份帮助的快捷入口。
 
 ## 数据与安全
 

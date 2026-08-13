@@ -154,6 +154,7 @@ export {
   COMMIT_MEMORY_DESCRIPTION,
   SEARCH_MEMORY_DESCRIPTION,
   MENTIS_MEMORY_SYSTEM_PROMPT,
+  createMentisMemorySystemPrompt,
   isValidPublicMemoryId,
   registerMemoryToolPair,
   type PublicRememberResult,
@@ -161,6 +162,7 @@ export {
   type PublicRecallResult,
   type MentisToolFacade,
 } from "./memory-tools.js";
+export { formatMentisHelp, type MentisHelpOptions } from "./mentis-help.js";
 export {
   createPiPairwiseRelationshipReasoner,
   type PiPairwiseRelationshipJudgment,

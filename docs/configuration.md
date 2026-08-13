@@ -5,6 +5,10 @@ the current workspace. An explicit Pi profile reads
 `<PI_CODING_AGENT_DIR>/.pi-mentis/config.json`, while `PI_MENTIS_HOME` selects an
 intentional isolated absolute root. Omitted fields inherit safe defaults:
 
+Run `/mentis help` inside Pi to display the effective configuration path and detailed memory,
+knowledge-base, automatic-recall, Sidecar, and performance guidance. `/kb help` displays the same
+help from the knowledge command surface. After editing the file, run `/reload` or restart Pi.
+
 ```json
 {
   "inference": {

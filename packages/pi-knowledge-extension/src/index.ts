@@ -12,6 +12,7 @@ import {
   getEmbeddingRuntimeResolution,
   getStorageStatus,
   getOrCreateRuntime,
+  globalConfigPath,
   loadConfig,
   resetGlobalRuntime,
   type PersistentIntelligenceRuntime,
@@ -30,6 +31,7 @@ import {
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
   formatPiToolJson,
+  formatMentisHelp,
   normalizePiPathArgument,
   notifyWhenUiAvailable,
   PI_TOOL_OUTPUT_LIMIT_DESCRIPTION,
@@ -219,11 +221,34 @@ function registerKnowledgeCommand(
   runtime: PersistentIntelligenceRuntime,
   currentConfig: PiMentisConfig,
 ): void {
+  const helpText = formatMentisHelp({
+    configPath: globalConfigPath(),
+    memory: false,
+    knowledge: true,
+  });
+  pi.registerCommand("mentis", {
+    description: "Show Pi Mentis help or current status",
+    handler: async (rawArguments, context) => {
+      const action = rawArguments.trim() || "help";
+      if (action === "help") {
+        notifyWhenUiAvailable(context, helpText, "info");
+        return;
+      }
+      if (action === "status") {
+        notifyWhenUiAvailable(context, formatPiToolJson(runtime.snapshot()), "info");
+        return;
+      }
+      notifyWhenUiAvailable(context, "Usage: /mentis help | /mentis status", "error");
+    },
+  });
   pi.registerCommand("kb", {
-    description:
-      "Manage Pi Mentis knowledge: add, sync, remove, status, jobs, cancel, inspect, models, and Embedding migrations",
+    description: "Manage Pi Mentis knowledge; use /kb help for detailed usage",
     handler: async (rawArguments, context) => {
       const [action = "status", ...argumentsList] = rawArguments.trim().split(/\s+/);
+      if (action === "help") {
+        notifyWhenUiAvailable(context, helpText, "info");
+        return;
+      }
       const knowledge = runtime.getKnowledge<KnowledgeService>();
       if (knowledge === undefined) {
         notifyWhenUiAvailable(context, "Pi Mentis knowledge provider is unavailable", "error");

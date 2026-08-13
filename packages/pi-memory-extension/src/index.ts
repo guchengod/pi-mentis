@@ -12,6 +12,7 @@ import {
   getEmbeddingRuntimeResolution,
   getStorageStatus,
   getOrCreateRuntime,
+  globalConfigPath,
   loadConfig,
   inferInteractionMode,
   operationId,
@@ -53,7 +54,8 @@ import {
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
   formatPiToolJson,
-  MENTIS_MEMORY_SYSTEM_PROMPT,
+  createMentisMemorySystemPrompt,
+  formatMentisHelp,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
   createPiPairwiseRelationshipReasoner,
@@ -304,6 +306,9 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     });
     return;
   }
+  const configPath = globalConfigPath();
+  const helpText = formatMentisHelp({ configPath, memory: true, knowledge: false });
+  const memorySystemPrompt = createMentisMemorySystemPrompt("@galvinsan/pi-mentis-memory");
   const scheduler = new BackgroundScheduler(config.performance.queue);
   const backgroundQueue = new MentisBackgroundQueue({ maxConcurrency: 1, maxQueueLength: 32 });
   const captureQueue = new MentisSerialWorkQueue();
@@ -505,11 +510,15 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
             ?.error,
       );
       pi.registerCommand("mentis", {
-        description: "Show Pi Mentis context, temporal, view, effectiveness, and policy status",
+        description: "Show Pi Mentis help or current status",
         handler: async (rawArguments, commandCtx) => {
           const action = rawArguments.trim() || "status";
+          if (action === "help") {
+            notifyWhenUiAvailable(commandCtx, helpText, "info");
+            return;
+          }
           if (action !== "status") {
-            notifyWhenUiAvailable(commandCtx, "Usage: /mentis status", "error");
+            notifyWhenUiAvailable(commandCtx, "Usage: /mentis help | /mentis status", "error");
             return;
           }
           const memoryService = runtime.getMemory<MemoryService>();
@@ -1052,7 +1061,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       systemPrompt:
         !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
           ? event.systemPrompt
-          : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`,
+          : `${event.systemPrompt}\n\n${memorySystemPrompt}`,
     };
   });
   pi.on("tool_execution_start", (event) => {

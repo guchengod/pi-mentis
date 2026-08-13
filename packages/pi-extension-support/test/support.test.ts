@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createPiPairwiseRelationshipReasoner,
+  createMentisMemorySystemPrompt,
   CurrentTurnRecallGuard,
   formatPiToolJson,
+  formatMentisHelp,
   isValidPublicMemoryId,
   MENTIS_MEMORY_SYSTEM_PROMPT,
   normalizePiPathArgument,
@@ -20,8 +22,34 @@ describe("Pi extension support", () => {
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("search_memory");
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("commit_memory");
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("only when the user explicitly asks");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("provided by the @galvinsan/pi-mentis extension");
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).not.toContain("durable verified facts");
-    expect(MENTIS_MEMORY_SYSTEM_PROMPT.length).toBeLessThan(300);
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("~/.pi/.pi-mentis/config.json");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("/mentis help");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT.length).toBeLessThan(400);
+  });
+
+  it("attributes the prompt to the package that provides the tools", () => {
+    expect(createMentisMemorySystemPrompt("@galvinsan/pi-mentis-memory")).toContain(
+      "provided by the @galvinsan/pi-mentis-memory extension",
+    );
+  });
+
+  it("keeps machine-local paths out of the prompt and shows them only in help", () => {
+    const configPath = "/tmp/pi-profile/.pi-mentis/config.json";
+    const prompt = createMentisMemorySystemPrompt();
+    const help = formatMentisHelp({ configPath, memory: true, knowledge: true });
+
+    expect(prompt).toContain("~/.pi/.pi-mentis/config.json");
+    expect(prompt).toContain("PI_MENTIS_HOME");
+    expect(prompt).not.toContain(configPath);
+    expect(prompt).not.toContain("/Users/");
+    expect(prompt).toContain("/mentis help");
+    expect(help).toContain(`配置文件：${configPath}`);
+    expect(help).toContain("retrieval.automaticRecall=true");
+    expect(help).toContain("TUI 可能出现可感知延迟");
+    expect(help).toContain("/kb add <路径或网址>");
+    expect(help).toContain("/mentis status");
   });
 
   it("allows independent memory tool calls to execute in parallel", () => {

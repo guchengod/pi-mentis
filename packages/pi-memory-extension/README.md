@@ -38,6 +38,8 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 Workspace 变化。显式 Pi profile 使用 `<PI_CODING_AGENT_DIR>/.pi-mentis`；
 `PI_MENTIS_HOME` 可指定隔离的绝对路径。所有字段可省略：
 
+运行 `/mentis help` 可查看当前实际配置路径、记忆工具、自动召回和性能影响的详细说明。
+
 ```json
 {
   "inference": {
