@@ -7,6 +7,7 @@ Pi Mentis 是为 [Pi](https://github.com/badlogic/pi-mono) 设计的个人长期
 - 混合检索：Dense + 全文 + RRF + 可选 Rerank + MMR。
 - 本地持久化：Zvec 存储在本机，API Key 只读环境变量。
 - Pi 原生：复用 Session / Branch 语义，不维护第二套会话树。
+- 进程隔离：Pi 只加载轻量适配器和内存胶囊；Zvec、推理、捕获与维护运行在 Sidecar。
 
 > English: Pi-native personal long-term memory + knowledge base, backed by Zvec and SiliconFlow.
 
@@ -72,7 +73,9 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 - 仅存在 `~/.pi/agent/.pi-mentis` 时会兼容使用；两套目录并存时固定选择稳定的
   `~/.pi/.pi-mentis`，另一套只报告为 inactive，不会自动合并、覆盖或删除。
 - 同一存储目录只允许一个写入进程。
-- 自动召回有软/硬超时（默认 300ms / 800ms），不会无限阻塞回复。
+- 自动召回只读取进程内不可变 Memory Capsule，不访问 Zvec、网络或文件系统。
+- 完整语义检索继续由 `search_memory` 提供，并在隔离 Sidecar 中执行。
+- Sidecar 异常时 Pi 继续使用最后一份胶囊；显式记忆工具返回可诊断的 unavailable。
 - 召回内容标记为不受信任证据，不会覆盖当前用户指令。
 
 ## 链接

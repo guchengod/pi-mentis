@@ -2,14 +2,26 @@
 
 Pi Mentis is an ESM TypeScript monorepo with one-way dependencies: `core` → inference
 contracts/storage/parsers → knowledge and memory → retrieval/capabilities → three Pi
-extensions. Domain packages do not import Pi or SiliconFlow. The shared runtime uses
-`Symbol.for("@pi-mentis/pi-mentis/runtime/v1")` and arbitrates providers at priorities
-100 (standalone), 200 (integrated), and 300 (explicit override). Providers initialize
-lazily on Pi `session_start`; shadowed providers perform no I/O.
+extensions. Domain packages do not import Pi or SiliconFlow.
+
+The integrated extension uses a process-isolated architecture. Pi loads a thin adapter that owns
+only tool schemas, IPC, and an immutable in-memory Memory Capsule. A forked Mentis Sidecar is the
+sole owner of Zvec, remote embedding/Rerank, knowledge ingestion, context inference, capture,
+relationship learning, experience extraction, effectiveness traces, and maintenance. The two
+processes use a versioned request/response + notification protocol. Sidecar failure never blocks
+Pi: automatic recall keeps using the last capsule, explicit tools return `unavailable`, and the
+client restarts and reinitializes the Sidecar on the next RPC.
+
+The Sidecar builds the next immutable capsule after `agent_settled`, writes it through atomic
+rename, and publishes it to the adapter over IPC. `before_agent_start` performs bounded lexical
+selection over that already-loaded capsule. It is synchronous and performs no filesystem access,
+Zvec operation, remote request, hashing of the system prompt, or awaited IPC. Full semantic
+retrieval remains available through `search_memory` and executes entirely in the Sidecar.
 
 The Pi adapter path is `before_agent_start`/`input`/`tool_execution_start`/`tool_result`/
-`session_compact`/`agent_settled` → Mentis domain events. Conversation branch and parent provenance
-comes from Pi's native session leaf and `parentId`; the extension does not maintain a parallel tree.
+`session_compact`/`agent_settled` → versioned Sidecar messages → Mentis domain events. Conversation
+branch and parent provenance comes from Pi's native session leaf and `parentId`; the extension does
+not maintain a parallel tree.
 Tool-result classification uses only
 bytes and tool metadata in the foreground. Results above the configured threshold are stored as
 Artifacts and replaced in model context by a Pi-aware symbolic result. No LLM is called on this
@@ -43,9 +55,9 @@ deterministic generation after a crash, validates count and sample retrieval bef
 manifest switch, retains the previous generation for rollback, and garbage-collects it only after
 `storage.generationRetentionMs`.
 
-Shutdown is dependency ordered (retrieval → memory → knowledge → inference), background work gets a
-grace period and abort signal, and provider disposal is bounded to five seconds. View and durable
-knowledge jobs recover after restart; effectiveness traces are best-effort and use a bounded buffer.
+Shutdown is dependency ordered inside the Sidecar, background work gets a grace period and abort
+signal, and Pi bounds Sidecar shutdown before terminating it. View and durable knowledge jobs recover
+after restart; effectiveness traces are best-effort and use a bounded buffer.
 Memory relationship transitions are serialized per security namespace, retain both source records,
 and persist structured decision traces alongside their relationship edges.
 

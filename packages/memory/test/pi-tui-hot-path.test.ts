@@ -4,9 +4,10 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-function beforeAgentStartHandler(
+function eventHandler(
   sourceFile: ts.SourceFile,
   extensionPath: string,
+  eventName: string,
 ): ts.ArrowFunction {
   let handler: ts.ArrowFunction | undefined;
   const visit = (node: ts.Node): void => {
@@ -16,7 +17,7 @@ function beforeAgentStartHandler(
       node.expression.name.text === "on" &&
       node.arguments[0] !== undefined &&
       ts.isStringLiteral(node.arguments[0]) &&
-      node.arguments[0].text === "before_agent_start" &&
+      node.arguments[0].text === eventName &&
       node.arguments[1] !== undefined &&
       ts.isArrowFunction(node.arguments[1])
     ) {
@@ -27,8 +28,15 @@ function beforeAgentStartHandler(
   };
   visit(sourceFile);
   if (handler === undefined)
-    throw new Error(`before_agent_start handler was not found in ${extensionPath}`);
+    throw new Error(`${eventName} handler was not found in ${extensionPath}`);
   return handler;
+}
+
+function beforeAgentStartHandler(
+  sourceFile: ts.SourceFile,
+  extensionPath: string,
+): ts.ArrowFunction {
+  return eventHandler(sourceFile, extensionPath, "before_agent_start");
 }
 
 describe("Pi TUI foreground path", () => {
@@ -58,7 +66,7 @@ describe("Pi TUI foreground path", () => {
     expect(foregroundAwait).toBe(false);
   });
 
-  it("keeps integrated context persistence out of foreground recall", () => {
+  it("keeps integrated automatic recall synchronous and capsule-only", () => {
     const filename = fileURLToPath(
       new URL("../../pi-context-extension/src/index.ts", import.meta.url),
     );
@@ -71,32 +79,46 @@ describe("Pi TUI foreground path", () => {
     );
     const handler = beforeAgentStartHandler(sourceFile, filename);
     const foreground = handler.body.getText(sourceFile);
-    const nestedBodies: string[] = [];
+    let foregroundAwait = false;
     const inspect = (node: ts.Node): void => {
-      if (node !== handler && ts.isFunctionLike(node)) {
-        nestedBodies.push(node.getText(sourceFile));
-        return;
-      }
+      if (node !== handler && ts.isFunctionLike(node)) return;
+      if (ts.isAwaitExpression(node)) foregroundAwait = true;
       ts.forEachChild(node, inspect);
     };
     inspect(handler.body);
-    const foregroundOnly = nestedBodies.reduce(
-      (text, nested) => text.replace(nested, ""),
-      foreground,
-    );
 
-    for (const blockingContextCall of [
-      "projectIdentityCache.getOrResolve",
-      ".inferTopic(",
-      ".observeTopicLabel(",
-      ".resolveTask(",
-      ".latestSnapshot(",
-      ".persistSnapshot(",
-    ]) {
-      expect(foregroundOnly).not.toContain(blockingContextCall);
-    }
-    expect(foreground).toContain("sources: decision.sources");
-    expect(foreground).toContain("allowRemoteEmbedding: decision.allowRemoteEmbedding");
-    expect(foreground).toContain("AUTO_RECALL_FOREGROUND_BUDGET_MS");
+    expect(
+      handler.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false,
+    ).toBe(false);
+    expect(foregroundAwait).toBe(false);
+    expect(foreground).toContain("capsuleMessage(capsule, event.prompt)");
+    expect(foreground).not.toMatch(/runtime|zvec|retrieval\.search|embedding|rerank/iu);
+  });
+
+  it("does not await sidecar startup in Pi session_start", () => {
+    const filename = fileURLToPath(
+      new URL("../../pi-context-extension/src/index.ts", import.meta.url),
+    );
+    const sourceFile = ts.createSourceFile(
+      filename,
+      readFileSync(filename, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const handler = eventHandler(sourceFile, filename, "session_start");
+    let foregroundAwait = false;
+    const inspect = (node: ts.Node): void => {
+      if (node !== handler && ts.isFunctionLike(node)) return;
+      if (ts.isAwaitExpression(node)) foregroundAwait = true;
+      ts.forEachChild(node, inspect);
+    };
+    inspect(handler.body);
+
+    expect(
+      handler.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false,
+    ).toBe(false);
+    expect(foregroundAwait).toBe(false);
+    expect(handler.body.getText(sourceFile)).toContain("sessionReady = (async () =>");
   });
 });

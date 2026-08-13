@@ -1,16 +1,14 @@
 # Performance
 
-Foreground paths contain only query embedding, retrieval, optional Rerank, and context
-assembly. Ingest, parsing, document embedding, writes, capability sync, capture, and
-migration use bounded background scheduling with a binary priority heap, deduplication,
-backpressure, cancellation, and a single Zvec writer process lock.
+The integrated Pi foreground process contains no Zvec instance, query embedding, Rerank, capture
+persistence, or maintenance scheduler. Those operations run in the Mentis Sidecar. Ingest, parsing,
+document embedding, writes, capability sync, capture, and migration use bounded scheduling inside
+that isolated process.
 
-Pi automatic recall is a stricter foreground lane: it never performs remote embedding or
-Rerank, searches memory only through cached vectors, local FTS, and materialized views, and has
-a 50 ms hard wall-clock budget (25 ms soft budget). Explicit `search_memory` requests retain the
-full semantic retrieval path. Episode capture starts only after the automatic-recall lane yields;
-context refresh and snapshot persistence wait until the agent settles, so storage writes cannot
-delay message submission or compete with response streaming.
+Pi automatic recall is a synchronous selection over an immutable in-memory Memory Capsule. It has
+no storage lock, timer, Promise, remote request, or IPC round trip in `before_agent_start`. Explicit
+`search_memory` requests retain the full semantic retrieval path through Sidecar RPC. The Sidecar
+refreshes context, relationships, experience, views, and the next capsule after the agent settles.
 
 Performance measurement is intentionally not part of the automated test matrix. Use production
 telemetry and explicit profiling runs when changing a hot path; do not add benchmark-shaped tests to
