@@ -11,9 +11,42 @@ import {
   projectDurablePendingAssertions,
   projectDurablePendingAutomaticRecall,
   RecentAssertionOverlay,
+  registerMemoryToolPair,
 } from "../src/index.js";
 
 describe("Pi extension support", () => {
+  it("allows independent memory tool calls to execute in parallel", () => {
+    const tools: Array<{ readonly name: string; readonly executionMode?: string }> = [];
+    registerMemoryToolPair(
+      {
+        registerTool: (tool: { readonly name: string; readonly executionMode?: string }) =>
+          tools.push(tool),
+      } as never,
+      {
+        remember: async () => ({
+          outcome: "remembered",
+          summary: "saved",
+          readable: true,
+          recallable: true,
+        }),
+        recall: async () => ({
+          found: false,
+          resourceType: "unknown",
+          anchored: false,
+          summary: "none",
+          hits: [],
+          supportLevel: "none",
+          noDirectSupport: true,
+        }),
+      },
+    );
+
+    expect(tools).toMatchObject([
+      { name: "commit_memory", executionMode: "parallel" },
+      { name: "search_memory", executionMode: "parallel" },
+    ]);
+  });
+
   it("formats small tool results without a truncation notice", () => {
     expect(formatPiToolJson({ ok: true })).toBe('{\n  "ok": true\n}');
   });

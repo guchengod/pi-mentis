@@ -92,6 +92,13 @@ describe("Pi TUI foreground path", () => {
     ).toBe(false);
     expect(foregroundAwait).toBe(false);
     expect(foreground).toContain("capsuleMessage(capsule, event.prompt)");
+    expect(foreground).toContain("MENTIS_MEMORY_SYSTEM_PROMPT");
+    const supportFilename = fileURLToPath(
+      new URL("../../pi-extension-support/src/memory-tools.ts", import.meta.url),
+    );
+    expect(readFileSync(supportFilename, "utf8")).toContain(
+      "anything unknown, uncertain, absent from the current context",
+    );
     expect(foreground).not.toMatch(/runtime|zvec|retrieval\.search|embedding|rerank/iu);
   });
 

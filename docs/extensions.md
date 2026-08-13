@@ -11,6 +11,16 @@ tool registration, versioned IPC, and an immutable Memory Capsule. The standalon
 knowledge products retain their direct provider runtime for installations that intentionally choose
 one subsystem. Install exactly one extension product so only one process owns a storage root.
 
+The integrated adapter starts one supervised Sidecar asynchronously at `session_start`, shares a
+single-flight start/restart across concurrent calls, and stops it at `session_shutdown`. Unexpected
+exit automatically restores the latest session and Branch before buffered notifications resume.
+`search_memory` and independent `commit_memory` calls are parallel-capable. Knowledge additions are
+durable queued jobs whose parsing and embedding stay inside the Sidecar.
+
+Automatic recall defaults to off. Both memory-capable products add explicit Pi system guidance to
+use `search_memory` for unknown, uncertain, missing, historical, or indexed information. Enabling
+`retrieval.automaticRecall` adds capsule evidence to turns and may increase perceived TUI latency.
+
 Install one product with `pi install <package>`. The in-process shared runtime remains available to
 the standalone products and library consumers; integrated-product services are intentionally behind
 the Sidecar protocol and are not exposed as mutable in-process objects.

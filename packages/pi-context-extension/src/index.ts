@@ -10,6 +10,7 @@ import {
 import { type PiScopeContext, type ToolResultEnvelope } from "@pi-mentis/pi-mentis-memory-core";
 import {
   formatPiToolJson,
+  MENTIS_MEMORY_SYSTEM_PROMPT,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
   type PublicRecallResult,
@@ -138,6 +139,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let reasonContext: Pick<ExtensionContext, "model" | "modelRegistry"> | undefined;
   let sessionReady: Promise<void> = Promise.resolve();
   let sidecarSessionReady = false;
+  let automaticRecallWarningShown = false;
   let sessionOpen:
     | {
         readonly clientSessionId: string;
@@ -156,6 +158,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       sidecarError = message;
       if (message.includes("stopped")) sidecarSessionReady = false;
     },
+    onStateChange: (state) => {
+      sidecarSessionReady = state === "ready";
+      if (state === "ready") sidecarError = undefined;
+    },
     onScopeContext: (updated) => {
       scopeContext = updated;
     },
@@ -163,8 +169,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   const openConfiguredSession = async (): Promise<void> => {
     const input = sessionOpen;
     if (input === undefined) throw new Error("Mentis sidecar session is not configured");
-    await sidecar.start(input.cwd, piPackageRoot);
-    const opened = (await sidecar.call("session.open", input)) as SessionOpenResult;
+    const opened = (await sidecar.start(input.cwd, piPackageRoot, input)) as
+      SessionOpenResult | undefined;
+    if (opened === undefined) throw new Error("Mentis sidecar did not open the Pi session");
     scopeContext = opened.scopeContext;
     if (opened.capsule !== undefined) capsule = opened.capsule;
     sidecarSessionReady = true;
@@ -265,6 +272,14 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       sessionMode: event.reason === "fork" ? "forked" : "persistent",
     };
     sidecarSessionReady = false;
+    if (config.retrieval.automaticRecall && !automaticRecallWarningShown) {
+      automaticRecallWarningShown = true;
+      notifyWhenUiAvailable(
+        context,
+        "Pi Mentis automatic recall is enabled. It remains synchronous and local, but injected evidence increases prompt work and can add perceptible TUI latency after sending a message.",
+        "warning",
+      );
+    }
     sessionReady = (async () => {
       try {
         await openConfiguredSession();
@@ -337,8 +352,14 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         params: { clientSessionId, goal: event.prompt, scope: scopeContext },
       });
     }
-    if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) return;
-    return capsuleMessage(capsule, event.prompt);
+    const systemPrompt = event.systemPrompt.includes("<pi-mentis-tools>")
+      ? event.systemPrompt
+      : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`;
+    if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) {
+      return { systemPrompt };
+    }
+    const recalled = capsuleMessage(capsule, event.prompt);
+    return recalled === undefined ? { systemPrompt } : { ...recalled, systemPrompt };
   });
 
   pi.on("tool_execution_start", (event) => {

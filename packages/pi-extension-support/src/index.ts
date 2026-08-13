@@ -110,6 +110,7 @@ export {
   SearchMemoryParameters,
   COMMIT_MEMORY_DESCRIPTION,
   SEARCH_MEMORY_DESCRIPTION,
+  MENTIS_MEMORY_SYSTEM_PROMPT,
   isValidPublicMemoryId,
   registerMemoryToolPair,
   type PublicRememberResult,

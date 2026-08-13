@@ -271,11 +271,11 @@ export class DefaultKnowledgeService implements KnowledgeService {
       throwIfAborted(options.signal, "knowledge-ingest");
       resolvedFiles.push(resolved);
     }
-    const CONCURRENCY = 5;
+    const concurrency = Math.max(1, this.#limits.maxConcurrentParsers);
     const sourceLabel = abbreviateSource(command.source);
     let failures = 0;
-    for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += CONCURRENCY) {
-      const batch = resolvedFiles.slice(batchStart, batchStart + CONCURRENCY);
+    for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += concurrency) {
+      const batch = resolvedFiles.slice(batchStart, batchStart + concurrency);
       const results = await Promise.allSettled(
         batch.map((resolved) => this.#ingestOne(resolved, command, namespace, authority, options)),
       );
@@ -294,7 +294,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
         chunkCount += r.chunkCount;
         unchanged += r.unchanged;
       }
-      const completed = Math.min(batchStart + CONCURRENCY, resolvedFiles.length);
+      const completed = Math.min(batchStart + concurrency, resolvedFiles.length);
       const failedSuffix = failures > 0 ? ` (${failures} fail)` : "";
       await options.onProgress?.({
         operation: "knowledge-ingest",

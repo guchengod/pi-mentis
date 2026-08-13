@@ -24,6 +24,14 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
+export const MENTIS_MEMORY_SYSTEM_PROMPT = `<pi-mentis-tools>
+You have durable personal memory and, when provided by the installed Mentis product, knowledge-base retrieval through search_memory.
+- When the answer depends on anything unknown, uncertain, absent from the current context, or likely stored from earlier sessions, search_memory before guessing. This includes user preferences, previous work, project decisions, fixes, documentation, and indexed knowledge.
+- A search miss means only that the current query found no supporting record; do not claim the information was never stored.
+- Use commit_memory for explicit remember/update/forget requests and durable verified facts likely to matter later.
+- Independent search_memory and commit_memory calls may run in parallel. If a commit depends on a search result, finish the search first and issue the commit afterward.
+</pi-mentis-tools>`;
+
 // ─── Public Tool Parameters (model-visible) ────────────────────────
 
 /**
@@ -240,7 +248,7 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     label: "Remember",
     description: COMMIT_MEMORY_DESCRIPTION,
     parameters: CommitMemoryParameters,
-    executionMode: "sequential",
+    executionMode: "parallel",
     promptGuidelines: [
       "Use commit_memory for explicit remember/update/forget requests and for durable, verified information that will likely matter in future sessions.",
       "For an update, correction, or retraction, first use search_memory in the same turn to retrieve the concrete prior record, then call commit_memory with only the new natural-language assertion.",
@@ -272,7 +280,7 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     label: "Recall",
     description: SEARCH_MEMORY_DESCRIPTION,
     parameters: SearchMemoryParameters,
-    executionMode: "sequential",
+    executionMode: "parallel",
     promptGuidelines: [
       "Use search_memory when the request depends on durable context from earlier sessions that is not already available.",
       "Use it for explicit memory questions, previous work, saved preferences, project history, past decisions, fixes, or task continuation.",

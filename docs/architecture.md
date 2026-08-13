@@ -9,14 +9,26 @@ only tool schemas, IPC, and an immutable in-memory Memory Capsule. A forked Ment
 sole owner of Zvec, remote embedding/Rerank, knowledge ingestion, context inference, capture,
 relationship learning, experience extraction, effectiveness traces, and maintenance. The two
 processes use a versioned request/response + notification protocol. Sidecar failure never blocks
-Pi: automatic recall keeps using the last capsule, explicit tools return `unavailable`, and the
-client restarts and reinitializes the Sidecar on the next RPC.
+Pi. The extension starts exactly one child per loaded extension instance, asynchronously during
+`session_start`, and uses a single-flight lifecycle state machine so simultaneous tool calls cannot
+fork duplicate children or initialize the runtime twice. It keeps the Sidecar alive for the Pi
+session and closes it in dependency order during `session_shutdown`. An unexpected exit schedules
+a bounded exponential-backoff restart; the replacement reinitializes storage, reopens the latest
+session and Branch, then flushes buffered notifications. Explicit RPCs join the same restart
+promise instead of spawning another process.
 
-The Sidecar builds the next immutable capsule after `agent_settled`, writes it through atomic
+Separate Pi OS processes intentionally have separate Sidecars and coordinate through the existing
+storage writer lock. Within one Pi extension process, lifecycle states are
+`stopped → starting → ready → restarting → stopping → closed` and only one child may be active.
+
+Automatic recall is disabled by default. When enabled, the Sidecar builds the next immutable capsule after `agent_settled`, writes it through atomic
 rename, and publishes it to the adapter over IPC. `before_agent_start` performs bounded lexical
 selection over that already-loaded capsule. It is synchronous and performs no filesystem access,
 Zvec operation, remote request, hashing of the system prompt, or awaited IPC. Full semantic
-retrieval remains available through `search_memory` and executes entirely in the Sidecar.
+retrieval remains available through `search_memory` and executes entirely in the Sidecar. When
+automatic recall is disabled, capsule reads, semantic refreshes, and prompt evidence injection are
+skipped. A small system-prompt rule still tells Pi to call `search_memory` whenever required
+information is unknown, uncertain, missing from the current turn, or may be stored in Mentis.
 
 The Pi adapter path is `before_agent_start`/`input`/`tool_execution_start`/`tool_result`/
 `session_compact`/`agent_settled` → versioned Sidecar messages → Mentis domain events. Conversation
@@ -54,6 +66,12 @@ and persists critical commands before enqueue acknowledgement. Embedding migrati
 deterministic generation after a crash, validates count and sample retrieval before the atomic
 manifest switch, retains the previous generation for rollback, and garbage-collects it only after
 `storage.generationRetentionMs`.
+
+`search_memory` and `commit_memory` are parallel-capable Pi tools. Sidecar RPC dispatch is
+concurrent, and provider/store limits supply backpressure. Dependent correction flows still search
+first and commit afterward. Knowledge additions return after durable enqueue; multiple jobs run in
+the isolated scheduler, and each job uses configured file-parser concurrency without occupying the
+Pi foreground process.
 
 Shutdown is dependency ordered inside the Sidecar, background work gets a grace period and abort
 signal, and Pi bounds Sidecar shutdown before terminating it. View and durable knowledge jobs recover

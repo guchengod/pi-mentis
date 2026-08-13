@@ -235,6 +235,7 @@ describe("Pi compatibility and tool surface", () => {
         rerank: { model: "BAAI/bge-reranker-v2-m3", maxInputTokens: 8_192 },
       });
       expect(config.storage.rootDir).toBe(path.join(root, "mentis", "zvec"));
+      expect(config.retrieval.automaticRecall).toBe(false);
       expect(getEmbeddingRuntimeResolution(config)).toMatchObject({
         source: "environment",
         environmentOverrideActive: true,

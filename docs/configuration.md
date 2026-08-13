@@ -21,6 +21,9 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
       "previewBytes": 4096
     }
   },
+  "retrieval": {
+    "automaticRecall": false
+  },
   "performance": {
     "queue": { "maxQueuedTaskAgeMs": 1800000 },
     "resources": { "maxWebPages": 1000, "maxWebBytes": 536870912 }
@@ -35,6 +38,24 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
   "storage": { "rootDir": "/Users/your-name/.pi/.pi-mentis/zvec" }
 }
 ```
+
+`retrieval.automaticRecall` defaults to `false`. Pi Mentis always adds a short system-prompt
+instruction telling Pi to call `search_memory` when information is unknown, uncertain, missing
+from current context, or may exist in durable memory/knowledge. This on-demand path keeps normal
+message submission independent of retrieval.
+
+To opt in to automatic capsule injection:
+
+```json
+{
+  "retrieval": { "automaticRecall": true }
+}
+```
+
+Automatic recall does not perform storage or network I/O in `before_agent_start`, but it injects
+additional evidence into the model prompt and enables post-turn semantic capsule refresh. That
+extra prompt/background work can produce perceptible TUI latency after sending a message. The
+extension displays a warning once per process when this option is enabled.
 
 Set the credential in the environment, never the JSON file. Validation enforces Pi
 0.84.0 or newer, HTTPS (except localhost tests), 768–4096 dimensions, 8K–32K Rerank context,
@@ -51,6 +72,11 @@ user-requested jobs. The scheduler reserves 20% of queue capacity and one worker
 user-requested work when concurrency is greater than one. Critical ingest/migration commands are
 already durable before scheduling, so a rejected or interrupted in-memory schedule remains
 recoverable on the next startup.
+
+`performance.resources.maxConcurrentParsers` controls file-level concurrency inside each knowledge
+ingest job. Multiple `/kb add`, memory search, and independent memory commit requests can execute
+concurrently in the Sidecar, while provider rate limits, queue capacity, and Zvec coordination
+remain bounded.
 
 Temporal truth is a protected safety invariant: `intelligence.temporal.enabled` must remain `true`.
 Views, effectiveness tracing, and adaptive policy can be disabled independently. Disabling a derived

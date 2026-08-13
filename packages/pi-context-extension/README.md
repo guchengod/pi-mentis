@@ -50,6 +50,22 @@ export SILICONFLOW_API_KEY="your-api-key"
 `<PI_CODING_AGENT_DIR>/.pi-mentis`，`PI_MENTIS_HOME` 可指定隔离的绝对路径。
 API Key 只放环境变量，不要写入 JSON。
 
+自动召回默认关闭。普通情况下，Extension 会把一段简短规则加入 Pi 系统提示词：当信息
+未知、不确定、当前上下文缺失，或可能存在于长期记忆/知识库时，先调用 `search_memory`，
+不要猜测。
+
+如需开启自动召回，在配置文件中加入：
+
+```json
+{
+  "retrieval": { "automaticRecall": true }
+}
+```
+
+开启后，召回选择本身仍然只读取内存胶囊，不访问 Zvec 或网络；但它会增加模型提示词内容，
+并启用每轮结束后的语义胶囊刷新，因此发送消息后可能出现可感知的 TUI 延迟。Extension 会在
+每个进程首次启用时显示警告。
+
 ## 使用
 
 ```text
@@ -73,9 +89,11 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 - 仅存在 `~/.pi/agent/.pi-mentis` 时会兼容使用；两套目录并存时固定选择稳定的
   `~/.pi/.pi-mentis`，另一套只报告为 inactive，不会自动合并、覆盖或删除。
 - 同一存储目录只允许一个写入进程。
-- 自动召回只读取进程内不可变 Memory Capsule，不访问 Zvec、网络或文件系统。
+- 自动召回默认关闭；开启后只读取进程内不可变 Memory Capsule，不访问 Zvec、网络或文件系统。
 - 完整语义检索继续由 `search_memory` 提供，并在隔离 Sidecar 中执行。
-- Sidecar 异常时 Pi 继续使用最后一份胶囊；显式记忆工具返回可诊断的 unavailable。
+- 每个 Pi Extension 进程只启动一个 Sidecar；并发请求共享启动过程，不会重复拉起服务。
+- Sidecar 在 Session 启动时异步启动、Session 关闭时停止；异常退出会自动退避重启并恢复最新 Branch。
+- `search_memory`、独立的 `commit_memory` 及多个知识导入任务可在 Sidecar 中并发执行。
 - 召回内容标记为不受信任证据，不会覆盖当前用户指令。
 
 ## 链接

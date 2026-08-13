@@ -240,6 +240,7 @@ export class MentisSidecarRuntime {
   #relationshipRecoveryPending = true;
   #piPackageRoot: string | undefined;
   #closed = false;
+  #initialization: Promise<{ readonly ready: true; readonly protocolVersion: 1 }> | undefined;
 
   constructor(sendEvent: EventSender) {
     this.#sendEvent = sendEvent;
@@ -347,6 +348,20 @@ export class MentisSidecarRuntime {
     piPackageRoot: string,
   ): Promise<{ readonly ready: true; readonly protocolVersion: 1 }> {
     if (this.#memory !== undefined) return { ready: true, protocolVersion: 1 };
+    if (this.#closed) throw new Error("Mentis sidecar is closed");
+    if (this.#initialization !== undefined) return this.#initialization;
+    const initialization = this.#initialize(cwd, piPackageRoot).catch((error) => {
+      this.#initialization = undefined;
+      throw error;
+    });
+    this.#initialization = initialization;
+    return initialization;
+  }
+
+  async #initialize(
+    cwd: string,
+    piPackageRoot: string,
+  ): Promise<{ readonly ready: true; readonly protocolVersion: 1 }> {
     const config = await loadConfig(cwd);
     const scheduler = new BackgroundScheduler(config.performance.queue);
     const telemetry = new InMemoryTelemetry();
@@ -472,7 +487,10 @@ export class MentisSidecarRuntime {
       branchId: input.branchId,
       ...(input.parentBranchId === undefined ? {} : { parentBranchId: input.parentBranchId }),
     };
-    const capsule = await this.#readCapsule(scopeContext).catch(() => undefined);
+    const automaticRecall = this.#config?.retrieval.automaticRecall === true;
+    const capsule = automaticRecall
+      ? await this.#readCapsule(scopeContext).catch(() => undefined)
+      : undefined;
     this.#sessions.set(input.clientSessionId, {
       scopeContext,
       cwd: input.cwd,
@@ -484,7 +502,7 @@ export class MentisSidecarRuntime {
       recallGuard: new CurrentTurnRecallGuard(),
       recentAssertions: new RecentAssertionOverlay(),
     });
-    void this.#refreshCapsule(input.clientSessionId, "");
+    if (automaticRecall) void this.#refreshCapsule(input.clientSessionId, "");
     return { scopeContext, ...(capsule === undefined ? {} : { capsule }) };
   }
 
@@ -668,6 +686,7 @@ export class MentisSidecarRuntime {
       relationshipRuntime: await this.#relationships?.snapshot(),
       effectiveness: this.#effectiveness?.bufferStatus(),
       policy: this.#policy?.status(),
+      automaticRecall: config.retrieval.automaticRecall,
       capsule: session?.capsule,
     };
   }
@@ -883,7 +902,9 @@ export class MentisSidecarRuntime {
       this.#relationshipRecoveryPending = false;
       await this.#relationships.recover(this.#remoteReasoner(), 128).catch(() => undefined);
     }
-    await this.#refreshCapsule(clientSessionId, prompt).catch(() => undefined);
+    if (this.#config?.retrieval.automaticRecall === true) {
+      await this.#refreshCapsule(clientSessionId, prompt).catch(() => undefined);
+    }
     this.#scheduleMaintenance();
   }
 

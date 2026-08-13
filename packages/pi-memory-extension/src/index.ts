@@ -53,6 +53,7 @@ import {
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
   formatPiToolJson,
+  MENTIS_MEMORY_SYSTEM_PROMPT,
   notifyWhenUiAvailable,
   registerMemoryToolPair,
   createPiPairwiseRelationshipReasoner,
@@ -1044,6 +1045,11 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         await session.start({ goal, scope: captureScope });
       });
     }
+    return {
+      systemPrompt: event.systemPrompt.includes("<pi-mentis-tools>")
+        ? event.systemPrompt
+        : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`,
+    };
   });
   pi.on("tool_execution_start", (event) => {
     if (captureSession === undefined) return;

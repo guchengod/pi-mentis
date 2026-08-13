@@ -241,7 +241,7 @@ export function createDefaultConfig(
       },
     },
     retrieval: {
-      automaticRecall: true,
+      automaticRecall: false,
       autoRecallSoftTimeoutMs: 25,
       autoRecallHardTimeoutMs: 50,
       manualSearchTimeoutMs: 3_000,

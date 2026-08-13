@@ -8,7 +8,9 @@ without a code workspace.
 The Pi adapter derives conversation provenance from Pi's native Session tree, Branch, Steering, and
 Compaction semantics; it does not maintain a second session tree or a second compaction system. The
 integrated product keeps this adapter deliberately thin: Zvec, remote inference, capture, and
-maintenance run in an isolated Sidecar, while automatic recall reads an immutable in-memory capsule.
+maintenance run in an isolated, automatically supervised Sidecar. Automatic recall is disabled by
+default; Pi receives system guidance to call `search_memory` when durable context is unknown or
+missing. Opt-in automatic recall reads an immutable in-memory capsule.
 Domain packages remain independent of Pi event types. See [the P8–P13 roadmap](docs/pi-native-roadmap.md)
 for the corrected capability boundary and implementation status.
 
@@ -41,8 +43,9 @@ pi
 The knowledge-only product exposes `commit_knowledge` and `search_knowledge`.
 The memory-only product exposes `commit_memory` and `search_memory`. The default
 integrated product also exposes only the memory pair; its search is knowledge-first
-and its automatic recall selects explicitly untrusted evidence from the latest Sidecar-generated
-Memory Capsule without storage or network access in Pi's send path.
+and injects explicit system guidance for on-demand memory/knowledge search. Optional automatic
+recall selects explicitly untrusted evidence from the latest Sidecar-generated Memory Capsule
+without storage or network access in Pi's send path, but may add perceptible prompt latency.
 
 The integrated and memory products use classless atomic assertions: raw content is stored first,
 while exact identity, provenance, conservative relationships, and a semantic-agnostic temporal

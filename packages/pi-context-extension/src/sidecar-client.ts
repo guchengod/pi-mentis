@@ -8,6 +8,7 @@ import {
   SIDECAR_PROTOCOL_VERSION,
   type MemoryCapsule,
   type PiScopeContext,
+  type SessionOpenResult,
   type SidecarEventMessage,
   type SidecarInboundMessage,
   type SidecarMethodResult,
@@ -22,18 +23,40 @@ interface PendingRequest {
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
+type SessionOpenParams = Extract<SidecarRequest, { readonly method: "session.open" }>["params"];
+
+export type MentisSidecarLifecycleState =
+  "stopped" | "starting" | "ready" | "restarting" | "stopping" | "closed";
+
 export interface MentisSidecarClientOptions {
   readonly requestTimeoutMs?: number;
+  readonly restartBaseDelayMs?: number;
+  readonly restartMaxDelayMs?: number;
   readonly onCapsule?: (capsule: MemoryCapsule) => void;
   readonly onWarning?: (message: string) => void;
   readonly onScopeContext?: (scopeContext: PiScopeContext) => void;
+  readonly onStateChange?: (state: MentisSidecarLifecycleState) => void;
+}
+
+function sessionKey(input: SessionOpenParams | undefined): string | undefined {
+  if (input === undefined) return undefined;
+  return JSON.stringify([
+    input.clientSessionId,
+    input.cwd,
+    input.branchId,
+    input.parentBranchId ?? "",
+    input.sessionMode,
+  ]);
 }
 
 export class MentisSidecarClient {
   readonly #requestTimeoutMs: number;
+  readonly #restartBaseDelayMs: number;
+  readonly #restartMaxDelayMs: number;
   readonly #onCapsule: (capsule: MemoryCapsule) => void;
   readonly #onWarning: (message: string) => void;
   readonly #onScopeContext: (scopeContext: PiScopeContext) => void;
+  readonly #onStateChange: (state: MentisSidecarLifecycleState) => void;
   readonly #pending = new Map<string, PendingRequest>();
   readonly #notificationBacklog: SidecarNotification[] = [];
   readonly #reasonControllers = new Map<string, AbortController>();
@@ -42,16 +65,36 @@ export class MentisSidecarClient {
   #ready = false;
   #initialized = false;
   #closed = false;
+  #desiredRunning = false;
+  #restartAttempt = 0;
+  #restartTimer: ReturnType<typeof setTimeout> | undefined;
+  #running: Promise<SessionOpenResult | undefined> | undefined;
+  #state: MentisSidecarLifecycleState = "stopped";
   #initialization: { readonly cwd: string; readonly piPackageRoot: string } | undefined;
-  #initializing: Promise<void> | undefined;
-  #sessionOpen: Extract<SidecarRequest, { readonly method: "session.open" }>["params"] | undefined;
+  #sessionOpen: SessionOpenParams | undefined;
+  #activeSessionKey: string | undefined;
+  #lastSessionOpenResult: SessionOpenResult | undefined;
   #reasonContext: Pick<ExtensionContext, "model" | "modelRegistry"> | undefined;
 
   constructor(options: MentisSidecarClientOptions = {}) {
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    this.#restartBaseDelayMs = Math.max(10, options.restartBaseDelayMs ?? 250);
+    this.#restartMaxDelayMs = Math.max(
+      this.#restartBaseDelayMs,
+      options.restartMaxDelayMs ?? 5_000,
+    );
     this.#onCapsule = options.onCapsule ?? (() => undefined);
     this.#onWarning = options.onWarning ?? (() => undefined);
     this.#onScopeContext = options.onScopeContext ?? (() => undefined);
+    this.#onStateChange = options.onStateChange ?? (() => undefined);
+  }
+
+  get state(): MentisSidecarLifecycleState {
+    return this.#state;
+  }
+
+  get pid(): number | undefined {
+    return this.#child?.pid;
   }
 
   setReasonContext(context: Pick<ExtensionContext, "model" | "modelRegistry"> | undefined): void {
@@ -63,10 +106,21 @@ export class MentisSidecarClient {
     this.#reasonControllers.clear();
   }
 
-  async start(cwd: string, piPackageRoot: string): Promise<void> {
+  /**
+   * Start one Sidecar for this extension instance and open its current Pi session.
+   * Concurrent callers share the same start/restart promise, so they cannot fork duplicates.
+   */
+  async start(
+    cwd: string,
+    piPackageRoot: string,
+    sessionOpen?: SessionOpenParams,
+  ): Promise<SessionOpenResult | undefined> {
     if (this.#closed) throw new Error("Mentis sidecar client is closed");
+    this.#desiredRunning = true;
     this.#initialization = { cwd, piPackageRoot };
-    await this.#ensureInitialized();
+    if (sessionOpen !== undefined) this.#sessionOpen = sessionOpen;
+    this.#clearRestartTimer();
+    return await this.#ensureRunning();
   }
 
   async call<M extends SidecarRequest["method"]>(
@@ -75,15 +129,150 @@ export class MentisSidecarClient {
     timeoutMs = this.#requestTimeoutMs,
   ): Promise<SidecarMethodResult<M>> {
     if (this.#closed) throw new Error("Mentis sidecar client is closed");
-    if (method !== "initialize") await this.#ensureInitialized();
-    const result = await this.#request({ method, params } as SidecarRequest, timeoutMs);
     if (method === "session.open") {
-      this.#sessionOpen = params as Extract<
-        SidecarRequest,
-        { readonly method: "session.open" }
-      >["params"];
+      this.#sessionOpen = params as SessionOpenParams;
     }
-    return result as SidecarMethodResult<M>;
+    if (method !== "initialize") {
+      this.#desiredRunning = true;
+      await this.#ensureRunning();
+    }
+    if (method === "session.open") {
+      const result = await this.#ensureSessionOpen();
+      return result as SidecarMethodResult<M>;
+    }
+    return (await this.#request(
+      { method, params } as SidecarRequest,
+      timeoutMs,
+    )) as SidecarMethodResult<M>;
+  }
+
+  notify(notification: SidecarNotification): void {
+    if (this.#closed) return;
+    if (notification.method === "input.activity") this.cancelReasoning();
+    if (
+      notification.method === "session.branch" &&
+      this.#sessionOpen?.clientSessionId === notification.params.clientSessionId
+    ) {
+      this.#sessionOpen = {
+        clientSessionId: this.#sessionOpen.clientSessionId,
+        cwd: this.#sessionOpen.cwd,
+        sessionMode: this.#sessionOpen.sessionMode,
+        branchId: notification.params.branchId,
+        ...(notification.params.parentBranchId === undefined
+          ? {}
+          : { parentBranchId: notification.params.parentBranchId }),
+      };
+      if (this.#ready) this.#activeSessionKey = sessionKey(this.#sessionOpen);
+    }
+    if (this.#child === undefined || !this.#ready) {
+      this.#notificationBacklog.push(notification);
+      if (this.#notificationBacklog.length > 512) this.#notificationBacklog.shift();
+      return;
+    }
+    this.#send({
+      type: "notification",
+      protocolVersion: SIDECAR_PROTOCOL_VERSION,
+      notification,
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#desiredRunning = false;
+    this.#setState("stopping");
+    this.#clearRestartTimer();
+    this.cancelReasoning();
+    const child = this.#child;
+    if (child?.connected === true) {
+      this.#send({
+        type: "notification",
+        protocolVersion: SIDECAR_PROTOCOL_VERSION,
+        notification: { method: "shutdown", params: {} },
+      });
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1_000);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    child?.kill();
+    this.#child = undefined;
+    this.#ready = false;
+    this.#initialized = false;
+    this.#activeSessionKey = undefined;
+    this.#notificationBacklog.length = 0;
+    this.#rejectPending(new Error("Mentis sidecar closed"));
+    this.#setState("closed");
+  }
+
+  async #ensureRunning(): Promise<SessionOpenResult | undefined> {
+    const desiredSessionKey = sessionKey(this.#sessionOpen);
+    if (
+      this.#ready &&
+      this.#initialized &&
+      this.#child?.connected === true &&
+      this.#activeSessionKey === desiredSessionKey
+    ) {
+      return this.#lastSessionOpenResult;
+    }
+    if (this.#running !== undefined) {
+      await this.#running;
+      if (this.#activeSessionKey !== sessionKey(this.#sessionOpen)) {
+        return await this.#ensureRunning();
+      }
+      return this.#lastSessionOpenResult;
+    }
+    const initialization = this.#initialization;
+    if (initialization === undefined) {
+      throw new Error("Mentis sidecar initialization is unavailable");
+    }
+    this.#setState(this.#restartAttempt > 0 ? "restarting" : "starting");
+    this.#running = (async () => {
+      if (this.#child === undefined) this.#spawn();
+      if (!this.#initialized) {
+        await this.#request({ method: "initialize", params: initialization }, 30_000);
+        this.#initialized = true;
+      }
+      const opened = await this.#ensureSessionOpen();
+      this.#ready = true;
+      this.#restartAttempt = 0;
+      this.#setState("ready");
+      this.#flushNotifications();
+      return opened;
+    })().finally(() => {
+      this.#running = undefined;
+    });
+    try {
+      const opened = await this.#running;
+      if (this.#activeSessionKey !== sessionKey(this.#sessionOpen)) {
+        return await this.#ensureRunning();
+      }
+      return opened;
+    } catch (error) {
+      this.#ready = false;
+      throw error;
+    }
+  }
+
+  async #ensureSessionOpen(): Promise<SessionOpenResult | undefined> {
+    const input = this.#sessionOpen;
+    const key = sessionKey(input);
+    if (input === undefined || key === undefined) return undefined;
+    if (this.#activeSessionKey === key) return this.#lastSessionOpenResult;
+    const result = (await this.#request(
+      { method: "session.open", params: input },
+      30_000,
+    )) as SessionOpenResult;
+    if (sessionKey(this.#sessionOpen) === key) {
+      this.#activeSessionKey = key;
+      this.#lastSessionOpenResult = result;
+      this.#onScopeContext(result.scopeContext);
+      if (result.capsule !== undefined) this.#onCapsule(result.capsule);
+    }
+    return result;
   }
 
   async #request(request: SidecarRequest, timeoutMs: number): Promise<unknown> {
@@ -102,11 +291,7 @@ export class MentisSidecarClient {
         reject(new Error(`Mentis sidecar ${method} exceeded ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref?.();
-      this.#pending.set(id, {
-        resolve,
-        reject,
-        timer,
-      });
+      this.#pending.set(id, { resolve, reject, timer });
       this.#send(message, (error) => {
         if (error === undefined) return;
         const pending = this.#pending.get(id);
@@ -118,51 +303,14 @@ export class MentisSidecarClient {
     });
   }
 
-  notify(notification: SidecarNotification): void {
-    if (this.#closed) return;
-    if (notification.method === "input.activity") this.cancelReasoning();
-    if (this.#child === undefined || !this.#ready) {
-      this.#notificationBacklog.push(notification);
-      if (this.#notificationBacklog.length > 512) this.#notificationBacklog.shift();
-      return;
-    }
-    this.#send({
-      type: "notification",
-      protocolVersion: SIDECAR_PROTOCOL_VERSION,
-      notification,
-    });
-  }
-
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.cancelReasoning();
-    if (this.#child?.connected === true) {
-      this.#send({
-        type: "notification",
-        protocolVersion: SIDECAR_PROTOCOL_VERSION,
-        notification: { method: "shutdown", params: {} },
-      });
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 1_000);
-        this.#child?.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
-    }
-    this.#child?.kill();
-    this.#child = undefined;
-    this.#rejectPending(new Error("Mentis sidecar closed"));
-  }
-
   #spawn(): void {
+    if (this.#child !== undefined) return;
     const entry = fileURLToPath(new URL("./sidecar.js", import.meta.url));
     const child = fork(entry, [], {
       stdio: ["ignore", "ignore", "ignore", "ipc"],
       env: { ...process.env, PI_MENTIS_SIDECAR: "1" },
       // Pi may run with loader/debug/input flags that are valid only for its
-      // own entrypoint. The sidecar is a compiled standalone program.
+      // own entrypoint. The Sidecar is a compiled standalone program.
       execArgv: [],
       serialization: "advanced",
     });
@@ -176,12 +324,48 @@ export class MentisSidecarClient {
       this.#child = undefined;
       this.#ready = false;
       this.#initialized = false;
-      this.#initializing = undefined;
+      this.#activeSessionKey = undefined;
+      this.#lastSessionOpenResult = undefined;
       this.#rejectPending(
         new Error(`Mentis sidecar exited (${code ?? "signal"}${signal ? `:${signal}` : ""})`),
       );
-      if (!this.#closed) this.#onWarning("Mentis sidecar stopped; it will restart on demand.");
+      if (!this.#closed && this.#desiredRunning) {
+        this.#onWarning("Mentis sidecar stopped unexpectedly; automatic restart is scheduled.");
+        this.#scheduleRestart();
+      }
     });
+  }
+
+  #scheduleRestart(): void {
+    if (this.#closed || !this.#desiredRunning || this.#restartTimer !== undefined) return;
+    this.#restartAttempt++;
+    this.#setState("restarting");
+    const delay = Math.min(
+      this.#restartMaxDelayMs,
+      this.#restartBaseDelayMs * 2 ** Math.min(6, this.#restartAttempt - 1),
+    );
+    this.#restartTimer = setTimeout(() => {
+      this.#restartTimer = undefined;
+      void this.#ensureRunning().catch((error) => {
+        if (this.#closed || !this.#desiredRunning) return;
+        this.#onWarning(
+          `Mentis sidecar restart failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        this.#scheduleRestart();
+      });
+    }, delay);
+    this.#restartTimer.unref?.();
+  }
+
+  #clearRestartTimer(): void {
+    if (this.#restartTimer !== undefined) clearTimeout(this.#restartTimer);
+    this.#restartTimer = undefined;
+  }
+
+  #flushNotifications(): void {
+    if (!this.#ready) return;
+    const queued = this.#notificationBacklog.splice(0);
+    for (const notification of queued) this.notify(notification);
   }
 
   #send(message: SidecarOutboundMessage, onError?: (error?: Error) => void): void {
@@ -190,7 +374,11 @@ export class MentisSidecarClient {
       onError?.(new Error("Mentis sidecar is not connected"));
       return;
     }
-    child.send(message, (error) => onError?.(error ?? undefined));
+    try {
+      child.send(message, (error) => onError?.(error ?? undefined));
+    } catch (error) {
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
   }
 
   #handle(message: SidecarInboundMessage): void {
@@ -211,12 +399,7 @@ export class MentisSidecarClient {
   }
 
   #handleEvent(message: SidecarEventMessage): void {
-    if (message.event.name === "ready") {
-      this.#ready = true;
-      const queued = this.#notificationBacklog.splice(0);
-      for (const notification of queued) this.notify(notification);
-      return;
-    }
+    if (message.event.name === "ready") return;
     if (message.event.name === "capsule.updated") {
       this.#onCapsule(message.event.capsule);
       return;
@@ -276,24 +459,9 @@ export class MentisSidecarClient {
     this.#pending.clear();
   }
 
-  async #ensureInitialized(): Promise<void> {
-    if (this.#initialized) return;
-    if (this.#initializing !== undefined) return this.#initializing;
-    const initialization = this.#initialization;
-    if (initialization === undefined) {
-      throw new Error("Mentis sidecar initialization is unavailable");
-    }
-    if (this.#child === undefined) this.#spawn();
-    this.#initializing = this.#request({ method: "initialize", params: initialization }, 30_000)
-      .then(async () => {
-        this.#initialized = true;
-        if (this.#sessionOpen !== undefined) {
-          await this.#request({ method: "session.open", params: this.#sessionOpen }, 30_000);
-        }
-      })
-      .finally(() => {
-        this.#initializing = undefined;
-      });
-    return this.#initializing;
+  #setState(state: MentisSidecarLifecycleState): void {
+    if (this.#state === state) return;
+    this.#state = state;
+    this.#onStateChange(state);
   }
 }
