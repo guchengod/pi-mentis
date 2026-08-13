@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 
@@ -11,6 +11,16 @@ const extensionDirs = ["pi-memory-extension", "pi-knowledge-extension", "pi-cont
 await assertExtensionVersions();
 await rm(output, { recursive: true, force: true });
 await mkdir(output, { recursive: true });
+
+const sidecarBundle = await readFile(
+  path.join(root, "packages/pi-context-extension/dist/sidecar.js"),
+  "utf8",
+);
+if (/(?:from\s+|import\()["']@earendil-works\/pi-coding-agent["']/u.test(sidecarBundle)) {
+  throw new Error(
+    "Integrated Sidecar bundle has a runtime Pi host import and will fail in an isolated npm install",
+  );
+}
 
 for (const directory of extensionDirs) {
   await new Promise((resolve, reject) => {

@@ -19,6 +19,8 @@ describe("Pi extension support", () => {
   it("keeps the conditional memory tool instruction compact", () => {
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("search_memory");
     expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("commit_memory");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("only when the user explicitly asks");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).not.toContain("durable verified facts");
     expect(MENTIS_MEMORY_SYSTEM_PROMPT.length).toBeLessThan(300);
   });
 
@@ -249,6 +251,42 @@ describe("Pi extension support", () => {
         { id: "old", status: "current" },
       ],
     });
+  });
+
+  it("recalls a relevant durable pending write before semantic retrieval catches up", async () => {
+    const reader = {
+      async getRelationshipLearning() {
+        return undefined;
+      },
+      async listPendingRelationshipLearning() {
+        return [{ incomingId: "new", state: "pending", candidates: [] }];
+      },
+      async get(id: string) {
+        return id === "new"
+          ? { content: "这个测试项目的昵称是晴舟。", observedAt: 2_000, scope: { kind: "user" } }
+          : undefined;
+      },
+    };
+    const empty = {
+      found: false,
+      contentFound: false,
+      lookupMode: "global_query" as const,
+      resourceType: "search" as const,
+      anchored: false,
+      hits: [],
+    };
+
+    await expect(
+      projectDurablePendingAssertions(reader, { query: "测试项目叫什么名字" }, empty),
+    ).resolves.toMatchObject({
+      found: true,
+      contentFound: true,
+      consistency: "pending_relationship",
+      hits: [{ id: "new", projection: "provisional_latest" }],
+    });
+    await expect(
+      projectDurablePendingAssertions(reader, { query: "默认端口是多少" }, empty),
+    ).resolves.toMatchObject({ found: false, contentFound: false, hits: [] });
   });
 
   it("does not turn an exact metadata-only entity lookup into a miss", async () => {

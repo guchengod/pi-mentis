@@ -241,6 +241,7 @@ describe("real Zvec production loop", () => {
     expect(provider.calls).toBe(callsAfterFirst);
     const search = await knowledge.search({ text: "canary deployment", namespace: "test" });
     expect(search.hits[0]?.text).toContain("canary deployment");
+    expect(search.hits[0]?.metadata?.["retrievalSignals"]).toContain("fts");
 
     const target = embeddingSpace(1024);
     const migration = await migrateKnowledgeEmbedding(

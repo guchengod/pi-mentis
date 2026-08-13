@@ -36,7 +36,7 @@ import {
 import { gateSearchHit, type GateRuntimeContext } from "./gates.js";
 import { EffectivenessService, type TaskOutcomeObservation } from "./effectiveness.js";
 import { AdaptivePolicyService } from "./policy.js";
-import { adaptiveCutoff } from "./adaptive-cutoff.js";
+import { adaptiveCutoff, preserveLexicalEvidenceFloor } from "./adaptive-cutoff.js";
 import { SemanticQueryPlanner, type MemoryQueryPlan } from "./semantic-query-planner.js";
 
 export interface RetrievalQuery {
@@ -228,6 +228,19 @@ export class DefaultRetrievalService implements RetrievalService {
     const queryEmbedding = prepared.queryEmbedding;
     stages["semanticPlanner"] = performance.now() - plannerStarted;
     if (queryPlan.diagnostics?.plannerDegraded === true) degraded.push("planner:degraded");
+    if (signal.aborted) {
+      clearTimeout(timer);
+      return {
+        hits: [],
+        diagnostics: {
+          durationMs: performance.now() - started,
+          timedOut: true,
+          degraded,
+          stages,
+          semanticQueryPlan: queryPlan,
+        },
+      };
+    }
     const sourceSet = new Set(query.sources ?? ["knowledge", "memory"]);
     const activePolicy = this.#policy?.forRequest(
       `${query.text}:${query.memoryScopeContext?.sessionId ?? "session"}`,
@@ -491,7 +504,10 @@ export class DefaultRetrievalService implements RetrievalService {
       // collapsed merely because their content is similar.
       const assemblyStarted = performance.now();
       const deduped = structuralDedupe(ranked);
-      const cutoff = adaptiveCutoff({ hits: deduped, mode: queryPlan.retrievalMode });
+      const cutoff = adaptiveCutoff({
+        hits: preserveLexicalEvidenceFloor(deduped),
+        mode: queryPlan.retrievalMode,
+      });
       const diversityTrace: DiversityTraceEntry[] = [];
       const diversified = maximalMarginalRelevanceWithTrace(
         cutoff,

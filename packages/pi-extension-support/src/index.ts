@@ -1,12 +1,55 @@
-import {
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  formatSize,
-  truncateHead,
-} from "@earendil-works/pi-coding-agent";
+const DEFAULT_MAX_BYTES = 50 * 1_024;
+const DEFAULT_MAX_LINES = 2_000;
 
 const TRUNCATION_NOTICE_MAX_BYTES = 1_024;
 const TRUNCATION_NOTICE_LINES = 2;
+
+function formatSize(bytes: number): string {
+  if (bytes < 1_024) return `${bytes}B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)}KB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)}MB`;
+}
+
+function truncateHead(
+  content: string,
+  options: { readonly maxBytes: number; readonly maxLines: number },
+) {
+  const totalBytes = Buffer.byteLength(content, "utf8");
+  const lines =
+    content === ""
+      ? []
+      : content.endsWith("\n")
+        ? content.slice(0, -1).split("\n")
+        : content.split("\n");
+  const totalLines = lines.length;
+  if (totalLines <= options.maxLines && totalBytes <= options.maxBytes) {
+    return {
+      content,
+      truncated: false,
+      totalLines,
+      totalBytes,
+      outputLines: totalLines,
+      outputBytes: totalBytes,
+    };
+  }
+  const output: string[] = [];
+  let bytes = 0;
+  for (let index = 0; index < lines.length && index < options.maxLines; index++) {
+    const lineBytes = Buffer.byteLength(lines[index] ?? "", "utf8") + (index > 0 ? 1 : 0);
+    if (bytes + lineBytes > options.maxBytes) break;
+    output.push(lines[index] ?? "");
+    bytes += lineBytes;
+  }
+  const truncated = output.join("\n");
+  return {
+    content: truncated,
+    truncated: true,
+    totalLines,
+    totalBytes,
+    outputLines: output.length,
+    outputBytes: Buffer.byteLength(truncated, "utf8"),
+  };
+}
 
 export const PI_TOOL_OUTPUT_LIMIT_DESCRIPTION =
   "Output is limited to 50KB or 2000 lines. Narrow the query or lower the limit if a truncation notice is returned.";

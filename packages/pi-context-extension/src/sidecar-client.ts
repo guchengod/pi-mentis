@@ -306,8 +306,9 @@ export class MentisSidecarClient {
   #spawn(): void {
     if (this.#child !== undefined) return;
     const entry = fileURLToPath(new URL("./sidecar.js", import.meta.url));
+    let stderr = "";
     const child = fork(entry, [], {
-      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
       env: { ...process.env, PI_MENTIS_SIDECAR: "1" },
       // Pi may run with loader/debug/input flags that are valid only for its
       // own entrypoint. The Sidecar is a compiled standalone program.
@@ -317,6 +318,10 @@ export class MentisSidecarClient {
     this.#child = child;
     this.#ready = false;
     this.#initialized = false;
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (stderr.length < 4_096) stderr = `${stderr}${chunk}`.slice(0, 4_096);
+    });
     child.on("message", (value) => this.#handle(value as SidecarInboundMessage));
     child.on("error", (error) => this.#onWarning(`Mentis sidecar error: ${error.message}`));
     child.on("exit", (code, signal) => {
@@ -326,8 +331,13 @@ export class MentisSidecarClient {
       this.#initialized = false;
       this.#activeSessionKey = undefined;
       this.#lastSessionOpenResult = undefined;
+      const diagnostic = stderr.trim().replaceAll(/\s+/gu, " ").slice(0, 800);
       this.#rejectPending(
-        new Error(`Mentis sidecar exited (${code ?? "signal"}${signal ? `:${signal}` : ""})`),
+        new Error(
+          `Mentis sidecar exited (${code ?? "signal"}${signal ? `:${signal}` : ""})${
+            diagnostic === "" ? "" : `: ${diagnostic}`
+          }`,
+        ),
       );
       if (!this.#closed && this.#desiredRunning) {
         this.#onWarning("Mentis sidecar stopped unexpectedly; automatic restart is scheduled.");

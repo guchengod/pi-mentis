@@ -148,4 +148,26 @@ describe("Pi TUI foreground path", () => {
     expect(foreground).toContain('"capture.toolResultSpool"');
     expect(foreground).not.toContain('"capture.toolResult",');
   });
+
+  it("keeps the standalone Sidecar free of Pi runtime imports", () => {
+    const filename = fileURLToPath(
+      new URL("../../pi-extension-support/src/index.ts", import.meta.url),
+    );
+    const sourceFile = ts.createSourceFile(
+      filename,
+      readFileSync(filename, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const runtimeImports = sourceFile.statements.filter(
+      (statement): statement is ts.ImportDeclaration =>
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteral(statement.moduleSpecifier) &&
+        statement.moduleSpecifier.text === "@earendil-works/pi-coding-agent" &&
+        statement.importClause?.isTypeOnly !== true,
+    );
+
+    expect(runtimeImports).toHaveLength(0);
+  });
 });

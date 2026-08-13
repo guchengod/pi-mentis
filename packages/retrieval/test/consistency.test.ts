@@ -292,6 +292,60 @@ describe("query-vs-ID consistency invariant", () => {
     expect(found).toBe(true);
   });
 
+  it("query recall searches integrated knowledge and identifies knowledge hits", async () => {
+    const observedSources: Array<RetrievalQuery["sources"]> = [];
+    const retrieval = {
+      async search(query: RetrievalQuery): Promise<SearchResult> {
+        observedSources.push(query.sources);
+        return {
+          hits: [
+            {
+              id: "knowledge-performance",
+              kind: "knowledge",
+              text: "Knowledge ingestion uses bounded scheduling.",
+              score: 1,
+              tokenCount: 7,
+              authority: EvidenceAuthority.IndexedKnowledge,
+              namespace: "docs",
+              contentHash: "knowledge-performance-hash",
+              metadata: { retrievalSignals: ["fts"] },
+            },
+          ],
+          diagnostics: {
+            durationMs: 1,
+            timedOut: false,
+            degraded: [],
+            stages: {},
+            rankings: {
+              rrf: ["knowledge-performance"],
+              rerank: ["knowledge-performance"],
+              mmr: ["knowledge-performance"],
+            },
+          },
+        };
+      },
+    } as RetrievalService;
+    const coordinator = new DefaultRecallCoordinator({
+      getMemory: () => undefined,
+      getRetrieval: () => retrieval,
+      getEvidence: () => undefined,
+    });
+
+    const result = await coordinator.recall(
+      { query: "How are knowledge jobs scheduled?" },
+      { scopeContext: makeScopeContext() },
+    );
+
+    expect(observedSources).toEqual([["knowledge", "memory"]]);
+    expect(result.hits).toMatchObject([
+      {
+        id: "knowledge-performance",
+        kind: "knowledge",
+        resourceType: "knowledge",
+      },
+    ]);
+  });
+
   it("user-scoped record is always findable via query (control)", async () => {
     const content2 = uniqueContent();
     const token2 = extractUniqueToken(content2);

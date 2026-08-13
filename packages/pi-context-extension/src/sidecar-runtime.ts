@@ -588,27 +588,44 @@ export class MentisSidecarRuntime {
     const scopedRequest = session?.recallGuard.scope(input.request) ?? input.request;
     const repeated = session?.recallGuard.repeated(scopedRequest);
     if (repeated !== undefined) return repeated;
+    const memory = this.#memory;
+    const pendingReader =
+      memory === undefined
+        ? undefined
+        : {
+            getRelationshipLearning: async (id: string) => memory.getRelationshipLearning?.(id),
+            listPendingRelationshipLearning: (query?: { readonly limit?: number }) =>
+              memory.listPendingRelationshipLearning?.(query) ?? Promise.resolve([]),
+            get: (id: string) =>
+              memory.get(id, { scopeContext: sessionScope, accessIntent: "explicit_id" }),
+          };
+    if (
+      pendingReader !== undefined &&
+      scopedRequest.query !== undefined &&
+      scopedRequest.id === undefined
+    ) {
+      const pending = await projectDurablePendingAssertions(pendingReader, scopedRequest, {
+        found: false,
+        contentFound: false,
+        lookupMode: "global_query",
+        resourceType: "search",
+        anchored: false,
+        hits: [],
+      });
+      if (pending.hits.length > 0) {
+        return session?.recallGuard.record(scopedRequest, pending) ?? pending;
+      }
+    }
     const result = await this.#recall.recall(scopedRequest, {
       scopeContext: sessionScope,
       ...(session?.contextSnapshot === undefined
         ? {}
         : { contextSnapshot: session.contextSnapshot }),
     });
-    const memory = this.#memory;
     const durableProjected =
-      memory === undefined
+      pendingReader === undefined
         ? result
-        : await projectDurablePendingAssertions(
-            {
-              getRelationshipLearning: async (id) => memory.getRelationshipLearning?.(id),
-              listPendingRelationshipLearning: (query) =>
-                memory.listPendingRelationshipLearning?.(query) ?? Promise.resolve([]),
-              get: (id) =>
-                memory.get(id, { scopeContext: sessionScope, accessIntent: "explicit_id" }),
-            },
-            scopedRequest,
-            result,
-          );
+        : await projectDurablePendingAssertions(pendingReader, scopedRequest, result);
     const projected =
       session?.recentAssertions.project(scopedRequest, durableProjected) ?? durableProjected;
     if (session !== undefined) {

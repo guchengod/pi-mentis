@@ -6,6 +6,7 @@ import {
   decideRecall,
   isExplicitAnchoredIdRecall,
   maximalMarginalRelevance,
+  preserveLexicalEvidenceFloor,
   reciprocalRankFusion,
   selectContext,
 } from "../src/index.js";
@@ -72,6 +73,22 @@ describe("retrieval algorithms", () => {
     ).toEqual(["a", "c", "b"]);
     expect(maximalMarginalRelevance([hit("a", "knowledge")], 0)).toEqual([]);
     expect(maximalMarginalRelevance([], 3)).toEqual([]);
+  });
+
+  it("does not discard a direct local text hit just because it came from one rank list", () => {
+    const lexical = {
+      ...hit("local-text", "memory", 1 / 61),
+      metadata: { retrievalSignals: ["fts"] },
+    };
+    const dense = {
+      ...hit("dense-only", "memory", 1 / 61),
+      metadata: { retrievalSignals: ["dense"] },
+    };
+
+    expect(preserveLexicalEvidenceFloor([lexical, dense])).toMatchObject([
+      { id: "local-text", score: 0.04 },
+      { id: "dense-only", score: 1 / 61 },
+    ]);
   });
 
   it("calculates exact authority/freshness decay and token budgets", () => {

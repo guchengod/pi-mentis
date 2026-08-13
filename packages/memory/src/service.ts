@@ -1494,12 +1494,9 @@ export class DefaultMemoryService implements MemoryService {
         stages["zvec"] = performance.now() - zvecStarted;
         const fused = new Map<string, SearchHit>();
         for (const [sourceIndex, result] of results.entries()) {
+          const retrievalSignal = denseVector === undefined || sourceIndex > 0 ? "fts" : "dense";
           if (result.status === "rejected") {
-            degraded.push(
-              denseVector === undefined || sourceIndex > 0
-                ? "fts-unavailable"
-                : "dense-unavailable",
-            );
+            degraded.push(retrievalSignal === "fts" ? "fts-unavailable" : "dense-unavailable");
             continue;
           }
           for (const [rank, stored] of result.value.entries()) {
@@ -1514,6 +1511,7 @@ export class DefaultMemoryService implements MemoryService {
             if (boundaryKey(record.scopeContext) !== boundaryKey(expected)) continue;
             const rawFields = fields(stored);
             const previous = fused.get(stored.id);
+            const previousSignals = previous?.metadata?.["retrievalSignals"];
             fused.set(stored.id, {
               id: stored.id,
               kind: "memory",
@@ -1532,7 +1530,17 @@ export class DefaultMemoryService implements MemoryService {
                 typeof rawFields["content_hash"] === "string"
                   ? rawFields["content_hash"]
                   : contentHash(record.content),
-              metadata: record as unknown as Readonly<Record<string, unknown>>,
+              metadata: {
+                ...(record as unknown as Readonly<Record<string, unknown>>),
+                retrievalSignals: [
+                  ...new Set([
+                    ...(Array.isArray(previousSignals)
+                      ? previousSignals.filter((item): item is string => typeof item === "string")
+                      : []),
+                    retrievalSignal,
+                  ]),
+                ],
+              },
             });
           }
         }

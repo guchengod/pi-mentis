@@ -774,6 +774,12 @@ export class DefaultKnowledgeService implements KnowledgeService {
             const authority = numericField(fields, "authority", EvidenceAuthority.UserKnowledge);
             const reciprocal = (sourceIndex === 0 ? 1 : 1) / (60 + rank + 1);
             const existing = fused.get(document.id);
+            const retrievalSignal = sourceIndex === 0 ? "dense" : "fts";
+            const existingSignals = existing?.metadata?.["retrievalSignals"];
+            const retrievalSignals = [
+              ...(Array.isArray(existingSignals) ? existingSignals : []),
+              retrievalSignal,
+            ].filter((signal, index, signals) => signals.indexOf(signal) === index);
             const hit: SearchHit = {
               id: document.id,
               kind: "knowledge",
@@ -783,7 +789,7 @@ export class DefaultKnowledgeService implements KnowledgeService {
               authority: authority as SearchHit["authority"],
               namespace: stringField(fields, "namespace", "user"),
               contentHash: stringField(fields, "content_hash", contentHash(text)),
-              metadata: payload,
+              metadata: { ...payload, retrievalSignals },
             };
             fused.set(document.id, hit);
           }

@@ -48,7 +48,7 @@ export interface PublicRecallHit {
     | "artifact";
   readonly status: "current" | "historical" | "conflicted";
   readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
-  readonly resourceType: MentisResourceType;
+  readonly resourceType: MentisResourceType | "knowledge";
   readonly sanitized: boolean;
   readonly artifactChunkIndex?: number;
   readonly byteStart?: number;
@@ -175,7 +175,7 @@ function buildHits(result: SearchResult): readonly PublicRecallHit[] {
       kind: mapKind(hit.kind, hit.namespace),
       status: "current",
       match: "semantic",
-      resourceType: "memory" as const,
+      resourceType: hit.kind === "knowledge" ? ("knowledge" as const) : ("memory" as const),
       sanitized: wasSanitized,
     };
   });
@@ -825,37 +825,47 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           };
         }
 
-        const retrievalResult = await retrieval.search(
-          {
-            text: query,
-            limit: 20,
-            sources: ["memory"],
-            memoryScopes: [
-              ...(scopeContext.repositoryId === undefined
-                ? []
-                : [{ kind: "repository" as const, id: scopeContext.repositoryId }]),
-              ...(scopeContext.projectId === undefined
-                ? []
-                : [{ kind: "project" as const, id: scopeContext.projectId }]),
-              ...(scopeContext.taskId === undefined
-                ? []
-                : [{ kind: "task" as const, id: scopeContext.taskId }]),
-              { kind: "user" as const, id: scopeContext.userId },
-              ...(scopeContext.topicIds ?? []).map((topicId) => ({
-                kind: "topic" as const,
-                id: topicId,
-              })),
-            ],
-            memoryScopeContext: scopeContext,
-            ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),
-          },
-          {
-            ...(signal !== undefined ? { signal } : {}),
-            allowRerank: true,
-            timeoutMs: 3_000,
-            softTimeoutMs: 1_800,
-          },
-        );
+        const retrievalQuery = {
+          text: query,
+          limit: 20,
+          sources: ["knowledge", "memory"] as const,
+          memoryScopes: [
+            ...(scopeContext.repositoryId === undefined
+              ? []
+              : [{ kind: "repository" as const, id: scopeContext.repositoryId }]),
+            ...(scopeContext.projectId === undefined
+              ? []
+              : [{ kind: "project" as const, id: scopeContext.projectId }]),
+            ...(scopeContext.taskId === undefined
+              ? []
+              : [{ kind: "task" as const, id: scopeContext.taskId }]),
+            { kind: "user" as const, id: scopeContext.userId },
+            ...(scopeContext.topicIds ?? []).map((topicId) => ({
+              kind: "topic" as const,
+              id: topicId,
+            })),
+          ],
+          memoryScopeContext: scopeContext,
+          ...(contextSnapshot !== undefined ? { contextSnapshot } : {}),
+        };
+        const localResult = await retrieval.search(retrievalQuery, {
+          ...(signal !== undefined ? { signal } : {}),
+          allowRemoteEmbedding: false,
+          allowRerank: false,
+          timeoutMs: 750,
+        });
+        const hasLocalTextEvidence = localResult.hits.some((hit) => {
+          const signals = hit.metadata?.["retrievalSignals"];
+          return Array.isArray(signals) && signals.includes("fts");
+        });
+        const retrievalResult = hasLocalTextEvidence
+          ? localResult
+          : await retrieval.search(retrievalQuery, {
+              ...(signal !== undefined ? { signal } : {}),
+              allowRerank: true,
+              timeoutMs: 3_000,
+              softTimeoutMs: 1_800,
+            });
 
         const hits = buildHits(retrievalResult);
         const summary = buildSummary(hits);

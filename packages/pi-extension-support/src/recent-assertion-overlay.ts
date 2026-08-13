@@ -146,6 +146,27 @@ function publicKind(scopeKind: string | undefined): PublicRecallHit["kind"] {
   }
 }
 
+function normalizedBigrams(value: string): ReadonlySet<string> {
+  const normalized = value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replaceAll(/[\p{P}\p{S}\s]+/gu, "");
+  if (normalized.length <= 2) return new Set(normalized === "" ? [] : [normalized]);
+  return new Set(
+    Array.from({ length: normalized.length - 1 }, (_, index) => normalized.slice(index, index + 2)),
+  );
+}
+
+function queryMatchesPending(query: string | undefined, content: string): boolean {
+  if (query === undefined) return false;
+  const queryFeatures = normalizedBigrams(query);
+  const contentFeatures = normalizedBigrams(content);
+  if (queryFeatures.size === 0 || contentFeatures.size === 0) return false;
+  let shared = 0;
+  for (const feature of queryFeatures) if (contentFeatures.has(feature)) shared++;
+  return shared / queryFeatures.size >= 0.35;
+}
+
 /** Reconstructs read-your-writes projection from durable pending state after restart. */
 export async function projectDurablePendingAssertions(
   reader: DurablePendingProjectionReader,
@@ -156,6 +177,15 @@ export async function projectDurablePendingAssertions(
   const overlay = new RecentAssertionOverlay({ ttlMs: Number.MAX_SAFE_INTEGER });
   const hitIds = new Set(result.hits.map((hit) => hit.id));
   const listed = (await reader.listPendingRelationshipLearning?.({ limit: 32 })) ?? [];
+  const listedRecords = new Map(
+    (
+      await Promise.all(
+        listed.map(async (work) => [work.incomingId, await reader.get(work.incomingId)] as const),
+      )
+    ).filter(
+      (item): item is readonly [string, NonNullable<(typeof item)[1]>] => item[1] !== undefined,
+    ),
+  );
   const direct = await Promise.all(
     result.hits.map(async (hit) => reader.getRelationshipLearning?.(hit.id)),
   );
@@ -164,7 +194,8 @@ export async function projectDurablePendingAssertions(
       (work) =>
         hitIds.has(work.incomingId) ||
         work.candidates.some((candidate) => hitIds.has(candidate.id)) ||
-        request.id === work.incomingId,
+        request.id === work.incomingId ||
+        queryMatchesPending(request.query, listedRecords.get(work.incomingId)?.content ?? ""),
     ),
     ...direct.filter((work) => work !== undefined),
   ];
@@ -176,7 +207,7 @@ export async function projectDurablePendingAssertions(
     ) {
       continue;
     }
-    const record = await reader.get(work.incomingId);
+    const record = listedRecords.get(work.incomingId) ?? (await reader.get(work.incomingId));
     if (record === undefined) continue;
     if (!hitIds.has(work.incomingId)) {
       augmentedHits.push({
@@ -204,6 +235,7 @@ export async function projectDurablePendingAssertions(
     // metadata without content hits, so hit cardinality cannot redefine the
     // coordinator's entity-level `found` contract.
     found: result.found || augmentedHits.length > 0,
+    contentFound: result.contentFound === true || augmentedHits.length > 0,
     hits: augmentedHits,
   });
 }

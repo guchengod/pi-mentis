@@ -25,7 +25,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 export const MENTIS_MEMORY_SYSTEM_PROMPT = `<pi-mentis-tools>
-For unknown, uncertain, historical, indexed, or context-missing information, call search_memory before guessing; use commit_memory only for explicit requests or durable verified facts.
+For unknown, uncertain, historical, indexed, or context-missing information, call search_memory before guessing. Call commit_memory only when the user explicitly asks to remember, update, correct, or forget something.
 </pi-mentis-tools>`;
 
 // ─── Public Tool Parameters (model-visible) ────────────────────────
@@ -133,7 +133,7 @@ export interface PublicRecallHit {
 
   readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
 
-  readonly resourceType: "memory" | "artifact" | "evidence" | "search" | "unknown";
+  readonly resourceType: "memory" | "knowledge" | "artifact" | "evidence" | "search" | "unknown";
   readonly sanitized: boolean;
   /** Session-only projection metadata. Persistent status remains authoritative. */
   readonly provisional?: boolean;
@@ -246,10 +246,11 @@ export function registerMemoryToolPair(extensionApi: ExtensionAPI, facade: Menti
     parameters: CommitMemoryParameters,
     executionMode: "parallel",
     promptGuidelines: [
-      "Use commit_memory for explicit remember/update/forget requests and for durable, verified information that will likely matter in future sessions.",
+      "Use commit_memory only when the user explicitly asks to remember, update, correct, reinforce, or forget something.",
       "For an update, correction, or retraction, first use search_memory in the same turn to retrieve the concrete prior record, then call commit_memory with only the new natural-language assertion.",
       "Suitable memories include stable user preferences (nicknames, aliases, response styles), project conventions (package manager, build commands, test commands, database), architectural decisions, and verified reusable solutions.",
       "Do not persist guesses, transient task details, routine outputs, temporary paths, or timestamps unless explicitly requested.",
+      "Do not persist the current question, search misses, planned next steps, your own analysis, or notes about needing to inspect files or use another tool.",
       "Never submit raw passwords, tokens, API keys, cookies, private keys, or other secrets.",
       "The system first preserves correction and retraction statements as raw memories. Background pairwise reasoning prioritizes concrete records recalled in this turn and may review one strong semantic candidate; similarity alone never changes state, and uncertain relationships safely coexist.",
       'An outcome of "remembered" / "reinforced" / "updated" means the information is a normal, recallable memory. An outcome of "pending_review" means the information was SAVED as a review candidate (conflicted) but is NOT yet available to normal recall — do not tell the user it has been remembered as usable memory; report it as pending review.',

@@ -8,6 +8,18 @@ export interface AdaptiveCutoffInput<T extends SearchHit = SearchHit> {
   readonly absoluteFloor?: number;
 }
 
+export function preserveLexicalEvidenceFloor<T extends SearchHit>(
+  hits: readonly T[],
+  floor = 0.04,
+): readonly T[] {
+  return hits.map((hit) => {
+    const signals = hit.metadata?.["retrievalSignals"];
+    return Array.isArray(signals) && signals.includes("fts") && hit.score < floor
+      ? { ...hit, score: floor }
+      : hit;
+  });
+}
+
 export function adaptiveCutoff<T extends SearchHit>(input: AdaptiveCutoffInput<T>): readonly T[] {
   if (input.hits.length === 0) return [];
   const ordered = [...input.hits].sort((left, right) => right.score - left.score);
