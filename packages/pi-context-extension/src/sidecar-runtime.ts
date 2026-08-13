@@ -1,5 +1,5 @@
 import { stat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { arch, homedir, platform } from "node:os";
+import { arch, homedir, platform, setPriority } from "node:os";
 import path from "node:path";
 
 import {
@@ -75,6 +75,7 @@ import {
   type SidecarNotification,
   type SidecarRequest,
 } from "./sidecar-protocol.js";
+import { consumeToolResultSpool } from "./tool-result-spool.js";
 
 type EventSender = (event: SidecarEventMessage["event"]) => void;
 
@@ -255,6 +256,8 @@ export class MentisSidecarRuntime {
     if (request.method === "memory.recall") return this.#recallMemory(request.params);
     if (request.method === "capture.toolResult")
       return this.#captureToolResult(request.params.clientSessionId, request.params.envelope);
+    if (request.method === "capture.toolResultSpool")
+      return this.#captureToolResultSpool(request.params);
     if (request.method === "knowledge.command") return this.#knowledgeCommand(request.params);
     if (request.method === "status") return this.#status(request.params.clientSessionId);
     if (request.method === "shutdown") {
@@ -324,6 +327,15 @@ export class MentisSidecarRuntime {
       });
       return;
     }
+    if (notification.method === "capture.toolResults") {
+      this.#enqueueSession(session, async () => {
+        const capture = this.#captureFor(session);
+        for (const envelope of notification.params.envelopes) {
+          await capture.toolResult(envelope);
+        }
+      });
+      return;
+    }
     if (notification.method === "capture.compact") {
       this.#enqueueSession(session, () =>
         this.#captureFor(session).compact(
@@ -363,6 +375,16 @@ export class MentisSidecarRuntime {
     piPackageRoot: string,
   ): Promise<{ readonly ready: true; readonly protocolVersion: 1 }> {
     const config = await loadConfig(cwd);
+    try {
+      setPriority(process.pid, config.performance.sidecar.cpuNice);
+    } catch (error) {
+      this.#sendEvent({
+        name: "warning",
+        message: `Mentis sidecar could not lower CPU priority: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    }
     const scheduler = new BackgroundScheduler(config.performance.queue);
     const telemetry = new InMemoryTelemetry();
     const embedding = new SiliconFlowEmbeddingProvider(config.inference.siliconflow);
@@ -383,6 +405,7 @@ export class MentisSidecarRuntime {
       defaultNamespace: config.knowledge.defaultNamespace,
       queryCacheEntries: config.inference.embedding.queryCacheEntries,
       queryCacheTtlMs: config.inference.embedding.queryCacheTtlMs,
+      jobConcurrency: config.performance.sidecar.knowledgeJobConcurrency,
     });
     const memory = createMemoryService({
       store: storeHandle.store,
@@ -615,6 +638,15 @@ export class MentisSidecarRuntime {
       }
     });
     return result;
+  }
+
+  async #captureToolResultSpool(
+    input: Extract<SidecarRequest, { method: "capture.toolResultSpool" }>["params"],
+  ) {
+    const config = this.#config;
+    if (config === undefined) throw new Error("Sidecar is not initialized");
+    const text = await consumeToolResultSpool(config.storage.rootDir, input.spoolId);
+    return this.#captureToolResult(input.clientSessionId, { ...input.envelope, text });
   }
 
   async #knowledgeCommand(
@@ -1181,7 +1213,7 @@ export class MentisSidecarRuntime {
         },
       });
       void job.promise.catch(() => undefined);
-    }, 2_000);
+    }, config.performance.sidecar.maintenanceDelayMs);
     timer.unref?.();
   }
 

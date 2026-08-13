@@ -25,8 +25,17 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
     "automaticRecall": false
   },
   "performance": {
+    "sidecar": {
+      "cpuNice": 10,
+      "knowledgeJobConcurrency": 2,
+      "maintenanceDelayMs": 5000
+    },
     "queue": { "maxQueuedTaskAgeMs": 1800000 },
-    "resources": { "maxWebPages": 1000, "maxWebBytes": 536870912 }
+    "resources": {
+      "maxConcurrentParsers": 2,
+      "maxWebPages": 1000,
+      "maxWebBytes": 536870912
+    }
   },
   "intelligence": {
     "context": { "persistSnapshots": true, "capabilityMaxAgeMs": 60000 },
@@ -39,10 +48,11 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
 }
 ```
 
-`retrieval.automaticRecall` defaults to `false`. Pi Mentis always adds a short system-prompt
-instruction telling Pi to call `search_memory` when information is unknown, uncertain, missing
-from current context, or may exist in durable memory/knowledge. This on-demand path keeps normal
-message submission independent of retrieval.
+`retrieval.automaticRecall` defaults to `false`. When `search_memory` is active for the turn, Pi
+Mentis adds a compact system-prompt instruction telling Pi to search when information is unknown,
+uncertain, historical, indexed, or missing from current context. The instruction is omitted when
+the tool is not selected. This on-demand path keeps normal message submission independent of
+retrieval and avoids spending prompt tokens on an unavailable tool.
 
 To opt in to automatic capsule injection:
 
@@ -73,10 +83,14 @@ user-requested work when concurrency is greater than one. Critical ingest/migrat
 already durable before scheduling, so a rejected or interrupted in-memory schedule remains
 recoverable on the next startup.
 
-`performance.resources.maxConcurrentParsers` controls file-level concurrency inside each knowledge
-ingest job. Multiple `/kb add`, memory search, and independent memory commit requests can execute
-concurrently in the Sidecar, while provider rate limits, queue capacity, and Zvec coordination
-remain bounded.
+`performance.sidecar.cpuNice` best-effort applies the OS process priority after Sidecar
+initialization (`10` is lower priority than Pi on Unix-like systems).
+`performance.sidecar.knowledgeJobConcurrency` limits the total number of active knowledge ingest
+jobs, while `performance.resources.maxConcurrentParsers` limits file parsing across all of those
+jobs rather than separately inside each job. `performance.sidecar.maintenanceDelayMs` keeps
+disk/CPU-heavy maintenance out of the immediate post-turn window. Multiple `/kb add`, memory
+search, and independent memory commit requests can still execute concurrently, while provider
+rate limits, queue capacity, parser capacity, and Zvec coordination remain bounded.
 
 Temporal truth is a protected safety invariant: `intelligence.temporal.enabled` must remain `true`.
 Views, effectiveness tracing, and adaptive policy can be disabled independently. Disabling a derived
@@ -86,5 +100,8 @@ the last valid state readable.
 
 Tool results up to `inlineMaxBytes` remain unchanged. Results through `truncateMaxBytes` return a
 preview plus an Artifact reference; larger results return only a structured symbolic result and the
-reference. This byte-size policy is structural and does not classify memory semantics. The original text is stored below the private
-storage root in all offloaded cases.
+reference. Inline capture notifications are batched until the agent settles (or the bounded batch
+fills). Larger result bodies are transferred through a private mode-0600 spool file, so Node IPC
+does not structured-clone a second large string; the Sidecar consumes and deletes the file. This
+byte-size policy is structural and does not classify memory semantics. The original text is stored
+below the private storage root in all offloaded cases.

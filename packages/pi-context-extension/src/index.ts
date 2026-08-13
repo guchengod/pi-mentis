@@ -20,6 +20,7 @@ import {
 import { emptyCapsule, selectCapsuleEntries } from "./capsule.js";
 import { MentisSidecarClient } from "./sidecar-client.js";
 import type { MemoryCapsule, SessionOpenResult } from "./sidecar-protocol.js";
+import { createToolResultSpool, removeToolResultSpool } from "./tool-result-spool.js";
 
 function unavailableRemember(reason: string): PublicRememberResult {
   return {
@@ -140,6 +141,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let sessionReady: Promise<void> = Promise.resolve();
   let sidecarSessionReady = false;
   let automaticRecallWarningShown = false;
+  const pendingInlineToolResults: ToolResultEnvelope[] = [];
   let sessionOpen:
     | {
         readonly clientSessionId: string;
@@ -180,6 +182,14 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   const ensureSidecarSession = async (): Promise<void> => {
     await sessionReady;
     if (!sidecarSessionReady) await openConfiguredSession();
+  };
+  const flushInlineToolResults = (): void => {
+    if (clientSessionId === undefined || pendingInlineToolResults.length === 0) return;
+    const envelopes = pendingInlineToolResults.splice(0);
+    sidecar.notify({
+      method: "capture.toolResults",
+      params: { clientSessionId, envelopes },
+    });
   };
 
   registerMemoryToolPair(pi, {
@@ -257,6 +267,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.on("session_start", (event, context) => {
+    flushInlineToolResults();
     clientSessionId = context.sessionManager.getSessionId();
     branchId = context.sessionManager.getLeafId() ?? "root";
     parentBranchId =
@@ -352,9 +363,13 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         params: { clientSessionId, goal: event.prompt, scope: scopeContext },
       });
     }
-    const systemPrompt = event.systemPrompt.includes("<pi-mentis-tools>")
-      ? event.systemPrompt
-      : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`;
+    const searchMemoryActive = (event.systemPromptOptions.selectedTools ?? []).includes(
+      "search_memory",
+    );
+    const systemPrompt =
+      !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
+        ? event.systemPrompt
+        : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`;
     if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) {
       return { systemPrompt };
     }
@@ -377,13 +392,11 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
 
   pi.on("tool_result", async (event, context) => {
     if (clientSessionId === undefined || !config.memory.captureEnabled) return;
-    const text = event.content
-      .filter(
-        (item): item is Extract<(typeof event.content)[number], { type: "text" }> =>
-          item.type === "text",
-      )
-      .map((item) => item.text)
-      .join("\n");
+    const textParts: string[] = [];
+    for (const item of event.content) {
+      if (item.type === "text") textParts.push(item.text);
+    }
+    const text = textParts.join("\n");
     const envelope: ToolResultEnvelope = {
       toolCallId: event.toolCallId,
       toolName: event.toolName,
@@ -396,16 +409,35 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     };
     const mode = toolResultMode(Buffer.byteLength(text, "utf8"), config.memory.offload);
     if (mode === "inline") {
-      sidecar.notify({
-        method: "capture.toolResult",
-        params: { clientSessionId, envelope },
-      });
+      pendingInlineToolResults.push(envelope);
+      if (pendingInlineToolResults.length >= config.memory.turnEventLimit) {
+        flushInlineToolResults();
+      }
       return;
     }
+    flushInlineToolResults();
+    let spool: { readonly spoolId: string } | undefined;
     try {
+      spool = await createToolResultSpool(config.storage.rootDir, text);
       const result = await sidecar.call(
-        "capture.toolResult",
-        { clientSessionId, envelope },
+        "capture.toolResultSpool",
+        {
+          clientSessionId,
+          spoolId: spool.spoolId,
+          envelope: {
+            toolCallId: envelope.toolCallId,
+            toolName: envelope.toolName,
+            input: envelope.input,
+            ...(envelope.details === undefined ? {} : { details: envelope.details }),
+            ...(envelope.captureIntegrity === undefined
+              ? {}
+              : { captureIntegrity: envelope.captureIntegrity }),
+            isError: envelope.isError,
+            cwd: envelope.cwd,
+            ...(envelope.startedAt === undefined ? {} : { startedAt: envelope.startedAt }),
+            completedAt: envelope.completedAt,
+          },
+        },
         30_000,
       );
       if (result === undefined || result.mode === "inline") return;
@@ -422,6 +454,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     } catch {
       // Preserve the original Pi tool result if the sidecar cannot offload it.
       return;
+    } finally {
+      if (spool !== undefined) {
+        await removeToolResultSpool(config.storage.rootDir, spool.spoolId).catch(() => undefined);
+      }
     }
   });
 
@@ -440,6 +476,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
 
   pi.on("agent_settled", () => {
     if (clientSessionId === undefined) return;
+    flushInlineToolResults();
     sidecar.setReasonContext(reasonContext);
     sidecar.notify({
       method: "agent.settled",
@@ -448,6 +485,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.on("session_shutdown", async () => {
+    flushInlineToolResults();
     if (clientSessionId !== undefined) {
       sidecar.notify({ method: "session.close", params: { clientSessionId } });
     }

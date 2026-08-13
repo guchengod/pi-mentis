@@ -12,6 +12,8 @@ import type {
 
 export const SIDECAR_PROTOCOL_VERSION = 1 as const;
 
+export type ToolResultEnvelopeMetadata = Omit<ToolResultEnvelope, "text">;
+
 export interface MemoryCapsuleEntry {
   readonly id: string;
   readonly text: string;
@@ -72,6 +74,14 @@ export type SidecarRequest =
       };
     }
   | {
+      readonly method: "capture.toolResultSpool";
+      readonly params: {
+        readonly clientSessionId: string;
+        readonly envelope: ToolResultEnvelopeMetadata;
+        readonly spoolId: string;
+      };
+    }
+  | {
       readonly method: "knowledge.command";
       readonly params: {
         readonly clientSessionId: string;
@@ -118,6 +128,13 @@ export type SidecarNotification =
       readonly params: {
         readonly clientSessionId: string;
         readonly envelope: ToolResultEnvelope;
+      };
+    }
+  | {
+      readonly method: "capture.toolResults";
+      readonly params: {
+        readonly clientSessionId: string;
+        readonly envelopes: readonly ToolResultEnvelope[];
       };
     }
   | {
@@ -217,6 +234,6 @@ export type SidecarMethodResult<M extends SidecarRequest["method"]> = M extends 
       ? PublicRememberResult
       : M extends "memory.recall"
         ? PublicRecallResult
-        : M extends "capture.toolResult"
+        : M extends "capture.toolResult" | "capture.toolResultSpool"
           ? OffloadedToolResult | undefined
           : unknown;

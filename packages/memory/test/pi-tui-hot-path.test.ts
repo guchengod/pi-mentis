@@ -97,7 +97,7 @@ describe("Pi TUI foreground path", () => {
       new URL("../../pi-extension-support/src/memory-tools.ts", import.meta.url),
     );
     expect(readFileSync(supportFilename, "utf8")).toContain(
-      "anything unknown, uncertain, absent from the current context",
+      "unknown, uncertain, historical, indexed, or context-missing",
     );
     expect(foreground).not.toMatch(/runtime|zvec|retrieval\.search|embedding|rerank/iu);
   });
@@ -127,5 +127,25 @@ describe("Pi TUI foreground path", () => {
     ).toBe(false);
     expect(foregroundAwait).toBe(false);
     expect(handler.body.getText(sourceFile)).toContain("sessionReady = (async () =>");
+  });
+
+  it("batches inline tool results and spools large result bodies outside IPC", () => {
+    const filename = fileURLToPath(
+      new URL("../../pi-context-extension/src/index.ts", import.meta.url),
+    );
+    const sourceFile = ts.createSourceFile(
+      filename,
+      readFileSync(filename, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const handler = eventHandler(sourceFile, filename, "tool_result");
+    const foreground = handler.body.getText(sourceFile);
+
+    expect(foreground).toContain("pendingInlineToolResults.push(envelope)");
+    expect(foreground).toContain("createToolResultSpool(config.storage.rootDir, text)");
+    expect(foreground).toContain('"capture.toolResultSpool"');
+    expect(foreground).not.toContain('"capture.toolResult",');
   });
 });

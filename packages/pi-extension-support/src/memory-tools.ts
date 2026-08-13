@@ -25,11 +25,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 export const MENTIS_MEMORY_SYSTEM_PROMPT = `<pi-mentis-tools>
-You have durable personal memory and, when provided by the installed Mentis product, knowledge-base retrieval through search_memory.
-- When the answer depends on anything unknown, uncertain, absent from the current context, or likely stored from earlier sessions, search_memory before guessing. This includes user preferences, previous work, project decisions, fixes, documentation, and indexed knowledge.
-- A search miss means only that the current query found no supporting record; do not claim the information was never stored.
-- Use commit_memory for explicit remember/update/forget requests and durable verified facts likely to matter later.
-- Independent search_memory and commit_memory calls may run in parallel. If a commit depends on a search result, finish the search first and issue the commit afterward.
+For unknown, uncertain, historical, indexed, or context-missing information, call search_memory before guessing; use commit_memory only for explicit requests or durable verified facts.
 </pi-mentis-tools>`;
 
 // ─── Public Tool Parameters (model-visible) ────────────────────────

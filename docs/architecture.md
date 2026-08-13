@@ -27,8 +27,9 @@ selection over that already-loaded capsule. It is synchronous and performs no fi
 Zvec operation, remote request, hashing of the system prompt, or awaited IPC. Full semantic
 retrieval remains available through `search_memory` and executes entirely in the Sidecar. When
 automatic recall is disabled, capsule reads, semantic refreshes, and prompt evidence injection are
-skipped. A small system-prompt rule still tells Pi to call `search_memory` whenever required
-information is unknown, uncertain, missing from the current turn, or may be stored in Mentis.
+skipped. When `search_memory` is selected, a compact system-prompt rule tells Pi to search whenever
+required information is unknown, uncertain, missing from the current turn, or may be stored in
+Mentis; no rule is injected when that tool is unavailable.
 
 The Pi adapter path is `before_agent_start`/`input`/`tool_execution_start`/`tool_result`/
 `session_compact`/`agent_settled` → versioned Sidecar messages → Mentis domain events. Conversation
@@ -36,8 +37,11 @@ branch and parent provenance comes from Pi's native session leaf and `parentId`;
 not maintain a parallel tree.
 Tool-result classification uses only
 bytes and tool metadata in the foreground. Results above the configured threshold are stored as
-Artifacts and replaced in model context by a Pi-aware symbolic result. No LLM is called on this
-fast path. Artifact publication is an atomic pending/persisting/ready protocol over a manifest and
+Artifacts and replaced in model context by a Pi-aware symbolic result. Inline capture envelopes are
+batched and flushed in order at agent settle. Large text bodies use a private file handoff, so only
+metadata is structured-cloned by IPC; the Sidecar validates the opaque ID and consumes the file
+once. No LLM is called on this fast path. Artifact publication is an atomic
+pending/persisting/ready protocol over a manifest and
 1 MiB hashed chunks. `search_memory` can search an evidence chain or read a scope-checked UTF-8-safe
 byte range without loading the entire Artifact. Every replacement records conservative original,
 retained, and offloaded token counts.
@@ -70,8 +74,9 @@ manifest switch, retains the previous generation for rollback, and garbage-colle
 `search_memory` and `commit_memory` are parallel-capable Pi tools. Sidecar RPC dispatch is
 concurrent, and provider/store limits supply backpressure. Dependent correction flows still search
 first and commit afterward. Knowledge additions return after durable enqueue; multiple jobs run in
-the isolated scheduler, and each job uses configured file-parser concurrency without occupying the
-Pi foreground process.
+the isolated scheduler behind a global job semaphore and share one file-parser semaphore without
+occupying the Pi foreground process. Sidecar CPU priority and maintenance delay are configurable so
+background indexing cannot aggressively compete with the TUI immediately after a turn.
 
 Shutdown is dependency ordered inside the Sidecar, background work gets a grace period and abort
 signal, and Pi bounds Sidecar shutdown before terminating it. View and durable knowledge jobs recover

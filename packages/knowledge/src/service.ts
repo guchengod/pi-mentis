@@ -1,5 +1,6 @@
 import {
   type BackgroundScheduler,
+  AsyncSemaphore,
   EvidenceAuthority,
   ForegroundExecutor,
   TaskPriority,
@@ -153,6 +154,7 @@ export interface CreateKnowledgeServiceOptions {
   readonly defaultNamespace?: string;
   readonly queryCacheEntries?: number;
   readonly queryCacheTtlMs?: number;
+  readonly jobConcurrency?: number;
   readonly clock?: Clock;
 }
 
@@ -228,6 +230,8 @@ export class DefaultKnowledgeService implements KnowledgeService {
   readonly #defaultNamespace: string;
   readonly #queryCache: BoundedTtlCache<EmbeddingVector>;
   readonly #foreground = new ForegroundExecutor();
+  readonly #jobSemaphore: AsyncSemaphore;
+  readonly #fileSemaphore: AsyncSemaphore;
   readonly #workerId = `knowledge-worker:${operationId("operation")}`;
   readonly #clock: Clock;
   #recoveryPerformed = false;
@@ -247,12 +251,26 @@ export class DefaultKnowledgeService implements KnowledgeService {
       options.queryCacheEntries ?? 512,
       options.queryCacheTtlMs ?? 300_000,
     );
+    this.#jobSemaphore = new AsyncSemaphore(options.jobConcurrency ?? 2);
+    this.#fileSemaphore = new AsyncSemaphore(this.#limits.maxConcurrentParsers);
     this.#clock = options.clock ?? systemClock;
   }
 
   async ingest(
     command: IngestKnowledgeCommand,
     options: OperationOptions = {},
+  ): Promise<IngestKnowledgeResult> {
+    const release = await this.#jobSemaphore.acquire(options.signal);
+    try {
+      return await this.#ingest(command, options);
+    } finally {
+      release();
+    }
+  }
+
+  async #ingest(
+    command: IngestKnowledgeCommand,
+    options: OperationOptions,
   ): Promise<IngestKnowledgeResult> {
     const logicalNamespace = command.namespace ?? this.#defaultNamespace;
     const namespace = secureNamespace(logicalNamespace, command.scopeContext);
@@ -277,7 +295,9 @@ export class DefaultKnowledgeService implements KnowledgeService {
     for (let batchStart = 0; batchStart < resolvedFiles.length; batchStart += concurrency) {
       const batch = resolvedFiles.slice(batchStart, batchStart + concurrency);
       const results = await Promise.allSettled(
-        batch.map((resolved) => this.#ingestOne(resolved, command, namespace, authority, options)),
+        batch.map((resolved) =>
+          this.#ingestOneBounded(resolved, command, namespace, authority, options),
+        ),
       );
       for (const result of results) {
         if (result.status === "rejected") {
@@ -305,6 +325,21 @@ export class DefaultKnowledgeService implements KnowledgeService {
       });
     }
     return { sourceIds, documentIds, chunkCount, unchanged, diagnostics };
+  }
+
+  async #ingestOneBounded(
+    resolved: ResolvedParserInput,
+    command: IngestKnowledgeCommand,
+    namespace: string,
+    authority: EvidenceAuthority,
+    options: OperationOptions,
+  ): Promise<IngestKnowledgeResult> {
+    const release = await this.#fileSemaphore.acquire(options.signal);
+    try {
+      return await this.#ingestOne(resolved, command, namespace, authority, options);
+    } finally {
+      release();
+    }
   }
 
   async #ingestOne(

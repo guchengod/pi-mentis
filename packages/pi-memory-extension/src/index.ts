@@ -1045,10 +1045,14 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         await session.start({ goal, scope: captureScope });
       });
     }
+    const searchMemoryActive = (event.systemPromptOptions.selectedTools ?? []).includes(
+      "search_memory",
+    );
     return {
-      systemPrompt: event.systemPrompt.includes("<pi-mentis-tools>")
-        ? event.systemPrompt
-        : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`,
+      systemPrompt:
+        !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
+          ? event.systemPrompt
+          : `${event.systemPrompt}\n\n${MENTIS_MEMORY_SYSTEM_PROMPT}`,
     };
   });
   pi.on("tool_execution_start", (event) => {

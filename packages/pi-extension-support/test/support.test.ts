@@ -6,6 +6,7 @@ import {
   CurrentTurnRecallGuard,
   formatPiToolJson,
   isValidPublicMemoryId,
+  MENTIS_MEMORY_SYSTEM_PROMPT,
   normalizePiPathArgument,
   notifyWhenUiAvailable,
   projectDurablePendingAssertions,
@@ -15,6 +16,12 @@ import {
 } from "../src/index.js";
 
 describe("Pi extension support", () => {
+  it("keeps the conditional memory tool instruction compact", () => {
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("search_memory");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT).toContain("commit_memory");
+    expect(MENTIS_MEMORY_SYSTEM_PROMPT.length).toBeLessThan(300);
+  });
+
   it("allows independent memory tool calls to execute in parallel", () => {
     const tools: Array<{ readonly name: string; readonly executionMode?: string }> = [];
     registerMemoryToolPair(

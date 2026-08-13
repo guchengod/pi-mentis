@@ -128,6 +128,14 @@ export interface PerformanceConfig {
   readonly cpuWorkers: number;
   readonly ioConcurrency: number;
   readonly providerConcurrency: number;
+  readonly sidecar: {
+    /** Unix nice value applied best-effort to the isolated Sidecar process. */
+    readonly cpuNice: number;
+    /** Maximum durable knowledge-ingest jobs executing at once. */
+    readonly knowledgeJobConcurrency: number;
+    /** Quiet delay before disk/CPU-heavy maintenance begins after a settled turn. */
+    readonly maintenanceDelayMs: number;
+  };
   readonly queue: {
     readonly maxQueuedTasks: number;
     readonly maxQueuedBytes: number;
@@ -318,6 +326,11 @@ export function createDefaultConfig(
       cpuWorkers: Math.max(1, Math.min(4, availableProcessors - 1)),
       ioConcurrency: 8,
       providerConcurrency: 2,
+      sidecar: {
+        cpuNice: 10,
+        knowledgeJobConcurrency: 2,
+        maintenanceDelayMs: 5_000,
+      },
       queue: {
         maxQueuedTasks: 2_000,
         maxQueuedBytes: 128 * 1024 * 1024,
@@ -334,7 +347,7 @@ export function createDefaultConfig(
         maxArchiveEntries: 10_000,
         maxExpandedBytes: 2 * 1024 * 1024 * 1024,
         maxDocumentTokens: 2_000_000,
-        maxConcurrentParsers: 4,
+        maxConcurrentParsers: 2,
         maxPendingEmbeddingTokens: 2_000_000,
         maxPendingRerankTokens: 1_000_000,
         maxRerankDocuments: 100,
@@ -443,6 +456,19 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
     1e9,
   );
   requireRange("memory.offload.previewBytes", config.memory.offload.previewBytes, 128, 1e7);
+  requireRange("performance.sidecar.cpuNice", config.performance.sidecar.cpuNice, -20, 19);
+  requireRange(
+    "performance.sidecar.knowledgeJobConcurrency",
+    config.performance.sidecar.knowledgeJobConcurrency,
+    1,
+    32,
+  );
+  requireRange(
+    "performance.sidecar.maintenanceDelayMs",
+    config.performance.sidecar.maintenanceDelayMs,
+    250,
+    300_000,
+  );
   requireRange(
     "performance.queue.maxQueuedTaskAgeMs",
     config.performance.queue.maxQueuedTaskAgeMs,
