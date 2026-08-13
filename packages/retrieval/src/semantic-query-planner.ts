@@ -33,6 +33,10 @@ export interface SemanticQueryPlannerOptions {
   readonly dimensions: number;
 }
 
+export interface SemanticQueryPreparationOptions extends InferenceOperationOptions {
+  readonly allowRemoteEmbedding?: boolean;
+}
+
 /**
  * V2 prepares one reusable query vector and deliberately makes no semantic
  * class prediction. Relevance is decided by retrieval, rerank, gates, MMR and
@@ -53,8 +57,19 @@ export class SemanticQueryPlanner {
 
   async prepare(
     query: string,
-    options: InferenceOperationOptions = {},
+    options: SemanticQueryPreparationOptions = {},
   ): Promise<PreparedSemanticQuery> {
+    if (options.allowRemoteEmbedding === false) {
+      return {
+        plan: {
+          temporalIntent: "any",
+          retrievalMode: "broad",
+          confidence: 1,
+          memoryNeed: { required: true, confidence: 1 },
+          diagnostics: { sourceDependencySignal: "local_only_retrieval" },
+        },
+      };
+    }
     try {
       const response = await this.#embedding.embed(
         {

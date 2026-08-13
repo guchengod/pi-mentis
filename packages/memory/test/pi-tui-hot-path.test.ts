@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-function beforeAgentStartHandler(sourceFile: ts.SourceFile): ts.ArrowFunction {
+function beforeAgentStartHandler(
+  sourceFile: ts.SourceFile,
+  extensionPath: string,
+): ts.ArrowFunction {
   let handler: ts.ArrowFunction | undefined;
   const visit = (node: ts.Node): void => {
     if (
@@ -23,7 +26,8 @@ function beforeAgentStartHandler(sourceFile: ts.SourceFile): ts.ArrowFunction {
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  if (handler === undefined) throw new Error("before_agent_start handler was not found");
+  if (handler === undefined)
+    throw new Error(`before_agent_start handler was not found in ${extensionPath}`);
   return handler;
 }
 
@@ -39,7 +43,7 @@ describe("Pi TUI foreground path", () => {
       true,
       ts.ScriptKind.TS,
     );
-    const handler = beforeAgentStartHandler(sourceFile);
+    const handler = beforeAgentStartHandler(sourceFile, filename);
     let foregroundAwait = false;
     const inspect = (node: ts.Node): void => {
       if (node !== handler && ts.isFunctionLike(node)) return;
@@ -52,5 +56,47 @@ describe("Pi TUI foreground path", () => {
       handler.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false,
     ).toBe(false);
     expect(foregroundAwait).toBe(false);
+  });
+
+  it("keeps integrated context persistence out of foreground recall", () => {
+    const filename = fileURLToPath(
+      new URL("../../pi-context-extension/src/index.ts", import.meta.url),
+    );
+    const sourceFile = ts.createSourceFile(
+      filename,
+      readFileSync(filename, "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const handler = beforeAgentStartHandler(sourceFile, filename);
+    const foreground = handler.body.getText(sourceFile);
+    const nestedBodies: string[] = [];
+    const inspect = (node: ts.Node): void => {
+      if (node !== handler && ts.isFunctionLike(node)) {
+        nestedBodies.push(node.getText(sourceFile));
+        return;
+      }
+      ts.forEachChild(node, inspect);
+    };
+    inspect(handler.body);
+    const foregroundOnly = nestedBodies.reduce(
+      (text, nested) => text.replace(nested, ""),
+      foreground,
+    );
+
+    for (const blockingContextCall of [
+      "projectIdentityCache.getOrResolve",
+      ".inferTopic(",
+      ".observeTopicLabel(",
+      ".resolveTask(",
+      ".latestSnapshot(",
+      ".persistSnapshot(",
+    ]) {
+      expect(foregroundOnly).not.toContain(blockingContextCall);
+    }
+    expect(foreground).toContain("sources: decision.sources");
+    expect(foreground).toContain("allowRemoteEmbedding: decision.allowRemoteEmbedding");
+    expect(foreground).toContain("AUTO_RECALL_FOREGROUND_BUDGET_MS");
   });
 });

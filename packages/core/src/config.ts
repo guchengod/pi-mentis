@@ -242,8 +242,8 @@ export function createDefaultConfig(
     },
     retrieval: {
       automaticRecall: true,
-      autoRecallSoftTimeoutMs: 300,
-      autoRecallHardTimeoutMs: 800,
+      autoRecallSoftTimeoutMs: 25,
+      autoRecallHardTimeoutMs: 50,
       manualSearchTimeoutMs: 3_000,
       maxManualSearchTimeoutMs: 10_000,
       contextTokens: 1_600,

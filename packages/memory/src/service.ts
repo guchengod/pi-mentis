@@ -1425,7 +1425,7 @@ export class DefaultMemoryService implements MemoryService {
         const stages: Record<string, number> = {};
         const degraded: string[] = [];
         if (vector !== undefined && vector.values.length !== this.#dimensions) vector = undefined;
-        if (vector === undefined) {
+        if (vector === undefined && options.allowRemoteEmbedding !== false) {
           const safe = toRemoteSafe(query.text);
           if (safe.policy === "drop" || safe.policy === "local_only") {
             return {
@@ -1468,15 +1468,20 @@ export class DefaultMemoryService implements MemoryService {
             stages[name] = performance.now() - stageStarted;
           }
         };
+        const denseVector = vector;
         const results = await Promise.allSettled([
-          timedSearch("dense", () =>
-            this.#store.vectorSearch({
-              kind: "memory",
-              vector: vector.values,
-              topK: limit * 2,
-              filter: scopeFilter,
-            }),
-          ),
+          ...(denseVector === undefined
+            ? []
+            : [
+                timedSearch("dense", () =>
+                  this.#store.vectorSearch({
+                    kind: "memory",
+                    vector: denseVector.values,
+                    topK: limit * 2,
+                    filter: scopeFilter,
+                  }),
+                ),
+              ]),
           timedSearch("fts", () =>
             this.#store.ftsSearch({
               kind: "memory",
@@ -1490,7 +1495,11 @@ export class DefaultMemoryService implements MemoryService {
         const fused = new Map<string, SearchHit>();
         for (const [sourceIndex, result] of results.entries()) {
           if (result.status === "rejected") {
-            degraded.push(sourceIndex === 0 ? "dense-unavailable" : "fts-unavailable");
+            degraded.push(
+              denseVector === undefined || sourceIndex > 0
+                ? "fts-unavailable"
+                : "dense-unavailable",
+            );
             continue;
           }
           for (const [rank, stored] of result.value.entries()) {

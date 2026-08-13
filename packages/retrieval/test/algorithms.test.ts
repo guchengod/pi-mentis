@@ -122,7 +122,12 @@ describe("retrieval algorithms", () => {
         remainingContextTokens: 4000,
         isCommand: false,
       }),
-    ).toMatchObject({ shouldRecall: true, sources: ["memory"], allowRerank: false });
+    ).toMatchObject({
+      shouldRecall: true,
+      sources: ["memory"],
+      allowRemoteEmbedding: false,
+      allowRerank: false,
+    });
   });
 
   it("recognizes anchored Memory ID requests without treating arbitrary hashes as IDs", () => {

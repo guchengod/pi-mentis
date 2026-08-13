@@ -46,4 +46,20 @@ describe("classless query planning", () => {
     });
     expect(prepared.plan).not.toHaveProperty("predicateCandidates");
   });
+
+  it("keeps automatic local-only recall off the remote embedding path", async () => {
+    const embedding = new CountingEmbedding();
+    const planner = new SemanticQueryPlanner({ embedding, modelId: "test", dimensions: 8 });
+
+    const prepared = await planner.prepare("记忆里的默认端口是什么？", {
+      allowRemoteEmbedding: false,
+    });
+
+    expect(embedding.calls).toBe(0);
+    expect(prepared.queryEmbedding).toBeUndefined();
+    expect(prepared.plan).toMatchObject({
+      memoryNeed: { required: true },
+      diagnostics: { sourceDependencySignal: "local_only_retrieval" },
+    });
+  });
 });

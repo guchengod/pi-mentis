@@ -78,7 +78,9 @@ export function decideRecall(signals: RecallSignals): RecallDecision {
     shouldRecall: true,
     sources: ["memory"],
     budgetTokens: Math.max(0, Math.min(1_600, signals.remainingContextTokens)),
-    allowRemoteEmbedding: signals.remainingContextTokens >= 500,
+    // Automatic recall must never put a remote request in Pi's send path.
+    // Explicit search_memory calls retain the full semantic retrieval lane.
+    allowRemoteEmbedding: false,
     allowRerank: false,
     reason: "classless-fast-recall",
   };

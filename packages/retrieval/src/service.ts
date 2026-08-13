@@ -59,6 +59,8 @@ export interface RetrievalOptions {
   readonly allowRerank?: boolean;
   readonly rerankRequired?: boolean;
   readonly softTimeoutMs?: number;
+  /** Prevent remote query embedding; cached dense vectors and local FTS remain available. */
+  readonly allowRemoteEmbedding?: boolean;
   readonly onTrace?: (traceId: string) => void;
 }
 
@@ -205,16 +207,23 @@ export class DefaultRetrievalService implements RetrievalService {
     const prepared =
       this.#semanticPlanner === undefined
         ? { plan: fallbackPlan() }
-        : await this.#semanticPlanner.prepare(query.text, { signal }).catch((error: unknown) => {
-            if (options.signal?.aborted === true) {
-              clearTimeout(timer);
-              throw options.signal.reason instanceof Error
-                ? options.signal.reason
-                : new Error("Retrieval cancelled");
-            }
-            degraded.push(`planner:${error instanceof Error ? error.name : "error"}`);
-            return { plan: fallbackPlan() };
-          });
+        : await this.#semanticPlanner
+            .prepare(query.text, {
+              signal,
+              ...(options.allowRemoteEmbedding === undefined
+                ? {}
+                : { allowRemoteEmbedding: options.allowRemoteEmbedding }),
+            })
+            .catch((error: unknown) => {
+              if (options.signal?.aborted === true) {
+                clearTimeout(timer);
+                throw options.signal.reason instanceof Error
+                  ? options.signal.reason
+                  : new Error("Retrieval cancelled");
+              }
+              degraded.push(`planner:${error instanceof Error ? error.name : "error"}`);
+              return { plan: fallbackPlan() };
+            });
     const queryPlan = prepared.plan;
     const queryEmbedding = prepared.queryEmbedding;
     stages["semanticPlanner"] = performance.now() - plannerStarted;
@@ -333,7 +342,13 @@ export class DefaultRetrievalService implements RetrievalService {
                           : {}),
                   limit: candidateLimit,
                 },
-                { signal, timeoutMs },
+                {
+                  signal,
+                  timeoutMs,
+                  ...(options.allowRemoteEmbedding === undefined
+                    ? {}
+                    : { allowRemoteEmbedding: options.allowRemoteEmbedding }),
+                },
               )
               .catch((error: unknown) => {
                 degraded.push(`memory:${error instanceof Error ? error.name : "error"}`);

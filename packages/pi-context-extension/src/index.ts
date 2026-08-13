@@ -54,7 +54,7 @@ import {
   ProjectIdentityCache,
   TurnContextManager,
   MentisBackgroundQueue,
-  PerformanceTrace,
+  MentisSerialWorkQueue,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
@@ -129,6 +129,28 @@ function embeddingRuntimeDiagnostics(config: PiMentisConfig, store?: ZvecStore) 
 
 function fallbackProjectIdentity(cwd: string): PiProjectIdentity {
   return { workspacePath: cwd, manifestTypes: [] };
+}
+
+/** Maximum Pi message-send delay attributable to implicit local recall. */
+const AUTO_RECALL_FOREGROUND_BUDGET_MS = 50;
+const AUTO_RECALL_SOFT_BUDGET_MS = 25;
+
+async function raceWithTimeout<T, F>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  fallback: F,
+): Promise<T | F> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<F>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), Math.max(0, timeoutMs));
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function knowledgeCommandSource(target: string) {
@@ -452,6 +474,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
+  let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
+  let contextRefreshSequence = 0;
+  let pendingContextWork: (() => void) | undefined;
   let evidenceStore: PiEvidenceStore | undefined;
   let scopeContext: PiScopeContext = {
     tenantId: "local",
@@ -475,6 +500,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     maxConcurrency: 2,
     maxQueueLength: 64,
   });
+  const captureQueue = new MentisSerialWorkQueue();
   let durableRelationships: DurableRelationshipLearningCoordinator | undefined;
   let deferredRelationships: DeferredRelationshipLearningScheduler | undefined;
   let scopePlanner: ScopeSemanticPlanner | undefined;
@@ -783,6 +809,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         const fallback = fallbackProjectIdentity(context.cwd);
         return { identity: fallback, cacheHit: false };
       });
+    activeProjectIdentity = project;
     scopeContext = {
       tenantId: "local",
       userId: "local",
@@ -1019,7 +1046,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       ...(parentBranchId === undefined ? {} : { parentBranchId }),
     };
   });
-  pi.on("input", async (event) => {
+  pi.on("input", (event) => {
     startupIdleWork.activity();
     deferredRelationships?.activity();
     relationshipTurn.beginTurn();
@@ -1060,7 +1087,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       }
     }
     if (event.streamingBehavior === "steer") {
-      await captureSession?.steer(event.text).catch(() => undefined);
+      if (captureSession !== undefined) {
+        const session = captureSession;
+        captureQueue.enqueue(async () => {
+          await session.steer(event.text);
+        });
+      }
       const memory = runtime.getMemory<MemoryService>();
       const invalidation = scheduler.schedule({
         id: `branch-invalidation:${branchId}:${stableHash("steering:v1", event.text)}`,
@@ -1072,10 +1104,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       void invalidation.promise.catch(() => undefined);
     }
   });
-  pi.on("tool_execution_start", async (event) => {
-    await captureSession
-      ?.toolStarted(event.toolCallId, event.toolName, event.args)
-      .catch(() => undefined);
+  pi.on("tool_execution_start", (event) => {
+    if (captureSession === undefined) return;
+    const session = captureSession;
+    captureQueue.enqueue(async () => {
+      await session.toolStarted(event.toolCallId, event.toolName, event.args);
+    });
   });
   pi.on("tool_result", async (event, context) => {
     const text = event.content
@@ -1085,18 +1119,24 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       )
       .map((item) => item.text)
       .join("\n");
-    const result = await captureSession
-      ?.toolResult({
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        input: event.input,
-        text,
-        details: event.details,
-        isError: event.isError,
-        cwd: context.cwd,
-        completedAt: Date.now(),
-      })
-      .catch(() => undefined);
+    const session = captureSession;
+    const result =
+      session === undefined
+        ? undefined
+        : await captureQueue
+            .run(() =>
+              session.toolResult({
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+                input: event.input,
+                text,
+                details: event.details,
+                isError: event.isError,
+                cwd: context.cwd,
+                completedAt: Date.now(),
+              }),
+            )
+            .catch(() => undefined);
     if (result === undefined || result.mode === "inline") return;
     return {
       content: [
@@ -1109,28 +1149,33 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       },
     };
   });
-  pi.on("session_compact", async (event) => {
-    await captureSession
-      ?.compact(event.compactionEntry.summary, event.reason, event.willRetry)
-      .catch(() => undefined);
+  pi.on("session_compact", (event) => {
+    if (captureSession === undefined) return;
+    const session = captureSession;
+    captureQueue.enqueue(async () => {
+      await session.compact(event.compactionEntry.summary, event.reason, event.willRetry);
+    });
   });
-  pi.on("agent_settled", async () => {
-    await captureSession?.finish().catch(() => undefined);
+  pi.on("agent_settled", () => {
+    if (captureSession !== undefined) {
+      const session = captureSession;
+      captureQueue.enqueue(async () => {
+        await session.finish();
+      });
+    }
+    const contextWork = pendingContextWork;
+    pendingContextWork = undefined;
+    contextWork?.();
     startupIdleWork.settled();
     deferredRelationships?.settled();
   });
   pi.on("before_agent_start", async (event, context) => {
-    const trace = new PerformanceTrace();
-    trace.start();
     latestRetrievalTraceId = undefined;
-
-    const { identity, cacheHit: projectCacheHit } = await projectIdentityCache
-      .getOrResolve(context.cwd)
-      .catch(async () => {
-        const fallback = fallbackProjectIdentity(context.cwd);
-        return { identity: fallback, cacheHit: false };
-      });
-    trace.mark("projectIdentity");
+    turnContext.nextTurn(event.prompt);
+    const identity =
+      activeProjectIdentity.workspacePath === context.cwd
+        ? activeProjectIdentity
+        : fallbackProjectIdentity(context.cwd);
     const currentEntryId = context.sessionManager.getLeafId() ?? undefined;
     const parentEntryId =
       currentEntryId === undefined
@@ -1190,30 +1235,9 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     const explicitTopic = event.prompt
       .match(/(?:^|\s)(?:topic|主题)\s*[:：]\s*([^\n]{2,80})/i)?.[1]
       ?.trim();
-    let topicIds: readonly string[] = [];
-    let topicReused = false;
-    if (explicitTopic !== undefined && contextState !== undefined) {
-      const topic = await contextState
-        .observeTopicLabel(identityNamespace, explicitTopic)
-        .catch(() => undefined);
-      if (topic?.state === "active") topicIds = [topic.topicId];
-    } else if (contextState !== undefined) {
-      const activeTopic = turnContext.activeTopic;
-      const shouldRefresh = turnContext.shouldRefreshTopic();
-      if (!shouldRefresh && activeTopic.topicId !== undefined) {
-        topicIds = [activeTopic.topicId];
-        topicReused = true;
-      } else {
-        const topic = await contextState
-          .inferTopic(identityNamespace, event.prompt)
-          .catch(() => undefined);
-        if (topic?.state === "active") {
-          topicIds = [topic.topicId];
-          turnContext.updateTopic(topic.topicId, 0.85);
-        }
-      }
-    }
-    trace.mark("topic");
+    const activeTopic = turnContext.activeTopic;
+    const topicIds =
+      activeTopic.topicId === undefined ? [] : ([activeTopic.topicId] as readonly string[]);
     const taskInput = {
       namespace: identityNamespace,
       goal: event.prompt,
@@ -1224,25 +1248,11 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ? {}
         : { currentTaskId: contextSnapshot.situation.taskId }),
     };
-    let resolvedTask: { taskId?: string } | undefined;
-    let taskReused = false;
     const activeTask = turnContext.activeTask;
-    const shouldRefreshTask = turnContext.shouldRefreshTask();
-    if (
-      !shouldRefreshTask &&
-      activeTask.taskId !== undefined &&
-      activeTask.status !== "completed"
-    ) {
-      resolvedTask = { taskId: activeTask.taskId };
-      taskReused = true;
-    } else {
-      resolvedTask = await contextState?.resolveTask(taskInput).catch(() => undefined);
-      if (resolvedTask?.taskId !== undefined) {
-        turnContext.updateTask(resolvedTask.taskId, "active", 0.8);
-      }
-    }
-    trace.mark("task");
-    const taskId = resolvedTask?.taskId ?? taskIdentityId(taskInput);
+    const taskId =
+      activeTask.taskId !== undefined && activeTask.status === "active"
+        ? activeTask.taskId
+        : taskIdentityId(taskInput);
     const fastContext = {
       runtimeKey: context.sessionManager.getSessionId(),
       identity: identityFacet,
@@ -1286,28 +1296,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         snapshotId: capabilityFingerprint,
       },
     } as const;
-    const previousSnapshot = config.intelligence.context.persistSnapshots
-      ? await contextState
-          ?.latestSnapshot(identityFacet, context.sessionManager.getSessionId())
-          .catch(() => undefined)
-      : undefined;
-    trace.mark("snapshotRead");
-    contextSnapshot =
-      contextState === undefined
-        ? contextResolver.resolve(fastContext).snapshot
-        : contextState.resolveFromPersistent(fastContext, previousSnapshot).snapshot;
-    if (contextState !== undefined && config.intelligence.context.persistSnapshots) {
-      const state = contextState;
-      const snap = contextSnapshot;
-      backgroundQueue.enqueue({
-        kind: "snapshot.checkpoint",
-        coalesceKey: "snapshot.checkpoint",
-        execute: async () => {
-          await state.persistSnapshot(snap).catch(() => undefined);
-        },
-      });
-    }
-    trace.mark("snapshotWrite");
+    contextSnapshot = contextResolver.resolve(fastContext).snapshot;
     scopeContext = {
       ...contextSnapshot.identity,
       sessionId: contextSnapshot.conversation.sessionId,
@@ -1341,100 +1330,174 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       ),
       capabilitySnapshotId: contextSnapshot.capability.snapshotId,
     };
-    if (captureSession !== undefined) {
-      const session = captureSession;
-      backgroundQueue.enqueue({
-        kind: "capture.persist",
-        coalesceKey: "capture.persist",
-        execute: async () => {
-          await session.start({ goal: event.prompt, scope: scopeContext }).catch(() => undefined);
-        },
-      });
-    }
-    trace.mark("capture");
-    if (!config.retrieval.automaticRecall) {
-      trace.snapshot({ projectCacheHit, topicReused, taskReused });
-      return;
-    }
-    if (isExplicitAnchoredIdRecall(event.prompt)) {
-      trace.snapshot({ projectCacheHit, topicReused, taskReused });
-      return;
-    }
-    const decision = decideRecall({
-      prompt: event.prompt,
-      queryCacheHit: false,
-      embeddingCacheHit: false,
-      remainingContextTokens: config.retrieval.contextTokens,
-      isCommand: event.prompt.startsWith("/"),
-    });
-    if (!decision.shouldRecall) return;
-    const retrieval = runtime.getRetrieval<RetrievalService>();
-    if (retrieval === undefined) return;
+    const turnScopeContext = scopeContext;
+    const turnSnapshot = contextSnapshot;
+    const refreshSequence = ++contextRefreshSequence;
+    const refreshState = contextState;
+    const refreshPrompt = event.prompt;
+    const refreshCwd = context.cwd;
+    const refreshTaskInput = taskInput;
+    const scheduleDeferredTurnWork = (): void => {
+      const snapshot = turnSnapshot;
+      pendingContextWork = () => {
+        if (
+          refreshState !== undefined &&
+          snapshot !== undefined &&
+          config.intelligence.context.persistSnapshots
+        ) {
+          backgroundQueue.enqueue({
+            kind: "snapshot.checkpoint",
+            coalesceKey: `snapshot.checkpoint:${snapshot.conversation.sessionId}`,
+            priority: "fresh",
+            execute: async () => {
+              await refreshState.persistSnapshot(snapshot);
+            },
+          });
+        }
+        backgroundQueue.enqueue({
+          kind: "topic.refresh",
+          coalesceKey: `context.refresh:${context.sessionManager.getSessionId()}`,
+          priority: "fresh",
+          execute: async () => {
+            const { identity: refreshedIdentity } = await projectIdentityCache
+              .getOrResolve(refreshCwd)
+              .catch(() => ({ identity: fallbackProjectIdentity(refreshCwd), cacheHit: false }));
+            let refreshedTopicIds = topicIds;
+            if (refreshState !== undefined) {
+              const topic =
+                explicitTopic === undefined
+                  ? await refreshState
+                      .inferTopic(identityNamespace, refreshPrompt)
+                      .catch(() => undefined)
+                  : await refreshState
+                      .observeTopicLabel(identityNamespace, explicitTopic)
+                      .catch(() => undefined);
+              if (topic?.state === "active") refreshedTopicIds = [topic.topicId];
+              const resolvedTask = await refreshState
+                .resolveTask({ ...refreshTaskInput, topicIds: refreshedTopicIds })
+                .catch(() => undefined);
+              if (refreshSequence === contextRefreshSequence) {
+                turnContext.updateTopic(refreshedTopicIds[0], topic === undefined ? 0 : 0.85);
+                turnContext.updateTask(
+                  resolvedTask?.taskId ?? taskIdentityId(refreshTaskInput),
+                  "active",
+                  resolvedTask === undefined ? 0.5 : 0.8,
+                );
+              }
+            }
+            if (refreshSequence === contextRefreshSequence)
+              activeProjectIdentity = refreshedIdentity;
+          },
+        });
+      };
+      if (captureSession !== undefined) {
+        const session = captureSession;
+        const goal = event.prompt;
+        const captureScope = turnScopeContext;
+        captureQueue.enqueue(async () => {
+          await session.start({ goal, scope: captureScope });
+        });
+      }
+    };
     try {
-      const result = await retrieval.search(
-        {
-          text: event.prompt,
-          limit: 20,
-          contextTokens: decision.budgetTokens,
-          memoryScopes: [
-            ...(scopeContext.repositoryId === undefined
-              ? []
-              : [{ kind: "repository" as const, id: scopeContext.repositoryId }]),
-            ...(scopeContext.projectId === undefined
-              ? []
-              : [{ kind: "project" as const, id: scopeContext.projectId }]),
-            ...(scopeContext.taskId === undefined
-              ? []
-              : [{ kind: "task" as const, id: scopeContext.taskId }]),
-            ...(scopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
-            { kind: "user", id: scopeContext.userId },
-          ],
-          memoryScopeContext: scopeContext,
-          contextSnapshot,
-          gateContext: {
-            manifestTypes: contextSnapshot.workspace?.manifestTypes ?? [],
-            availableTools: tools,
-            ...(contextSnapshot.environment?.os === undefined
-              ? {}
-              : { os: contextSnapshot.environment.os }),
-            ...(contextSnapshot.environment?.architecture === undefined
-              ? {}
-              : { architecture: contextSnapshot.environment.architecture }),
-            ...(contextSnapshot.environment?.runtime === undefined
-              ? {}
-              : { runtime: contextSnapshot.environment.runtime }),
-            ...(contextSnapshot.environment?.runtimeVersion === undefined
-              ? {}
-              : { runtimeVersion: contextSnapshot.environment.runtimeVersion }),
-            ...(contextSnapshot.environment?.packageManager === undefined
-              ? {}
-              : { packageManager: contextSnapshot.environment.packageManager }),
+      if (!config.retrieval.automaticRecall) return;
+      if (isExplicitAnchoredIdRecall(event.prompt)) return;
+      const decision = decideRecall({
+        prompt: event.prompt,
+        queryCacheHit: false,
+        embeddingCacheHit: false,
+        remainingContextTokens: config.retrieval.contextTokens,
+        isCommand: event.prompt.startsWith("/"),
+      });
+      if (!decision.shouldRecall) return;
+      const retrieval = runtime.getRetrieval<RetrievalService>();
+      if (retrieval === undefined) return;
+      const recallStartedAt = performance.now();
+      const result = await raceWithTimeout(
+        retrieval.search(
+          {
+            text: event.prompt,
+            sources: decision.sources,
+            limit: 20,
+            contextTokens: decision.budgetTokens,
+            memoryScopes: [
+              ...(turnScopeContext.repositoryId === undefined
+                ? []
+                : [{ kind: "repository" as const, id: turnScopeContext.repositoryId }]),
+              ...(turnScopeContext.projectId === undefined
+                ? []
+                : [{ kind: "project" as const, id: turnScopeContext.projectId }]),
+              ...(turnScopeContext.taskId === undefined
+                ? []
+                : [{ kind: "task" as const, id: turnScopeContext.taskId }]),
+              ...(turnScopeContext.topicIds ?? []).map((id) => ({ kind: "topic" as const, id })),
+              { kind: "user", id: turnScopeContext.userId },
+            ],
+            memoryScopeContext: turnScopeContext,
+            contextSnapshot: turnSnapshot,
+            gateContext: {
+              manifestTypes: turnSnapshot.workspace?.manifestTypes ?? [],
+              availableTools: tools,
+              ...(turnSnapshot.environment?.os === undefined
+                ? {}
+                : { os: turnSnapshot.environment.os }),
+              ...(turnSnapshot.environment?.architecture === undefined
+                ? {}
+                : { architecture: turnSnapshot.environment.architecture }),
+              ...(turnSnapshot.environment?.runtime === undefined
+                ? {}
+                : { runtime: turnSnapshot.environment.runtime }),
+              ...(turnSnapshot.environment?.runtimeVersion === undefined
+                ? {}
+                : { runtimeVersion: turnSnapshot.environment.runtimeVersion }),
+              ...(turnSnapshot.environment?.packageManager === undefined
+                ? {}
+                : { packageManager: turnSnapshot.environment.packageManager }),
+            },
           },
-        },
-        {
-          timeoutMs: config.retrieval.autoRecallHardTimeoutMs,
-          softTimeoutMs: config.retrieval.autoRecallSoftTimeoutMs,
-          allowRerank: decision.allowRerank,
-          rerankRequired: false,
-          onTrace: (traceId) => {
-            latestRetrievalTraceId = traceId;
+          {
+            timeoutMs: Math.min(
+              config.retrieval.autoRecallHardTimeoutMs,
+              AUTO_RECALL_FOREGROUND_BUDGET_MS,
+            ),
+            softTimeoutMs: Math.min(
+              config.retrieval.autoRecallSoftTimeoutMs,
+              AUTO_RECALL_SOFT_BUDGET_MS,
+            ),
+            allowRemoteEmbedding: decision.allowRemoteEmbedding,
+            allowRerank: decision.allowRerank,
+            rerankRequired: false,
+            onTrace: (traceId) => {
+              latestRetrievalTraceId = traceId;
+            },
           },
-        },
+        ),
+        AUTO_RECALL_FOREGROUND_BUDGET_MS,
+        undefined,
       );
+      if (result === undefined) return;
       const memory = runtime.getMemory<MemoryService>();
+      const projectionBudgetMs = Math.max(
+        0,
+        AUTO_RECALL_FOREGROUND_BUDGET_MS - (performance.now() - recallStartedAt),
+      );
       const projected =
-        memory === undefined
+        memory === undefined || projectionBudgetMs === 0
           ? result
-          : await projectDurablePendingAutomaticRecall(
-              {
-                listPendingRelationshipLearning: (input) =>
-                  memory.listPendingRelationshipLearning?.(input) ?? Promise.resolve([]),
-                get: (id) =>
-                  memory.get(id, {
-                    scopeContext,
-                    accessIntent: "explicit_id",
-                  }),
-              },
+          : await raceWithTimeout(
+              projectDurablePendingAutomaticRecall(
+                {
+                  listPendingRelationshipLearning: (input) =>
+                    memory.listPendingRelationshipLearning?.(input) ?? Promise.resolve([]),
+                  get: (id) =>
+                    memory.get(id, {
+                      scopeContext: turnScopeContext,
+                      accessIntent: "explicit_id",
+                    }),
+                },
+                result,
+              ),
+              projectionBudgetMs,
               result,
             );
       if (projected.hits.length === 0) return;
@@ -1454,13 +1517,21 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       };
     } catch {
       return;
+    } finally {
+      scheduleDeferredTurnWork();
     }
   });
   pi.on("session_shutdown", async (event) => {
     startupIdleWork.cancel();
     deferredRelationships?.close();
     durableRelationships?.close();
-    await backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true });
+    const contextWork = pendingContextWork;
+    pendingContextWork = undefined;
+    contextWork?.();
+    await Promise.all([
+      backgroundQueue.drain({ timeoutMs: 1_000, cancelPending: true }),
+      captureQueue.drain(),
+    ]);
     // Pi reloads the extension for reload, new, resume, and fork — the
     // factory runs again so we must reset the global runtime. Only "quit"
     // keeps the same process; just dispose there.

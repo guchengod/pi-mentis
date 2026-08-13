@@ -435,6 +435,12 @@ export interface MemoryQuery {
 
 export interface MemorySearchOptions extends OperationOptions {
   readonly timeoutMs?: number;
+  /**
+   * When false, reuse an existing query vector if available and otherwise run
+   * the local FTS lane only. Automatic recall uses this to keep network calls
+   * out of Pi's message-send path; explicit search keeps the default behavior.
+   */
+  readonly allowRemoteEmbedding?: boolean;
 }
 
 export interface MemoryGetOptions extends OperationOptions {
