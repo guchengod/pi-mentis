@@ -104,8 +104,11 @@ the last valid state readable.
 
 Tool results up to `inlineMaxBytes` remain unchanged. Results through `truncateMaxBytes` return a
 preview plus an Artifact reference; larger results return only a structured symbolic result and the
-reference. Inline capture notifications are batched until the agent settles (or the bounded batch
-fills). Larger result bodies are transferred through a private mode-0600 spool file, so Node IPC
-does not structured-clone a second large string; the Sidecar consumes and deletes the file. This
-byte-size policy is structural and does not classify memory semantics. The original text is stored
-below the private storage root in all offloaded cases.
+reference. A complete `read` selection is the exception: Mentis gives the model the complete result
+once (up to 256 KiB), alongside its Artifact ID; when Pi truncates the result, Mentis reconstructs
+the originally requested line range first. Later detail lookup can use `search_memory` with that ID
+and focused keywords, rather than repeatedly reading chunks. Inline capture notifications are
+batched until the agent settles (or the bounded batch fills). Larger result bodies are transferred
+through a private mode-0600 spool file, so Node IPC does not structured-clone a second large string;
+the Sidecar consumes and deletes the file. This byte-size policy is structural and does not classify
+memory semantics. The original text is stored below the private storage root in all offloaded cases.

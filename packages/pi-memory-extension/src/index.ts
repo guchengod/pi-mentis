@@ -31,17 +31,22 @@ import {
   ContextStateService,
   DefaultRememberCoordinator,
   CurrentTurnMemoryEvidence,
+  canReturnFullRead,
+  compactReadReference,
   DeferredRelationshipLearningScheduler,
   DurableRelationshipLearningCoordinator,
   MentisBackgroundQueue,
   MentisSerialWorkQueue,
   PiCaptureSession,
+  fullReadResult,
   createExperienceLearningService,
   createPiEvidenceStore,
   createTaskGraphService,
   createMemoryService,
   deriveExperienceObservation,
   referencedMemoryIds,
+  readRequestKey,
+  recoverFullToolResult,
   resolvePiProjectIdentity,
   taskIdentityId,
   TurnContextManager,
@@ -323,6 +328,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
+  const completedLargeReads = new Set<string>();
   let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
   let contextRefreshSequence = 0;
   let evidenceStore: PiEvidenceStore | undefined;
@@ -435,6 +441,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let registered = false;
 
   pi.on("session_start", async (event, context) => {
+    completedLargeReads.clear();
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
     const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
     if (storageStatus.inactiveAlternateStore !== undefined) {
@@ -1080,27 +1087,32 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       .map((item) => item.text)
       .join("\n");
     const session = captureSession;
-    const result =
-      session === undefined
-        ? undefined
-        : await captureQueue
-            .run(() =>
-              session.toolResult({
-                toolCallId: event.toolCallId,
-                toolName: event.toolName,
-                input: event.input,
-                text,
-                details: event.details,
-                isError: event.isError,
-                cwd: context.cwd,
-                completedAt: Date.now(),
-              }),
-            )
-            .catch(() => undefined);
+    if (session === undefined) return;
+    const envelope = await recoverFullToolResult({
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: event.input,
+      text,
+      details: event.details,
+      isError: event.isError,
+      cwd: context.cwd,
+      completedAt: Date.now(),
+    });
+    const result = await captureQueue
+      .run(() => session.toolResult(envelope))
+      .catch(() => undefined);
     if (result === undefined || result.mode === "inline") return;
+    const readKey = readRequestKey(envelope);
+    const isFullRead = canReturnFullRead(envelope, result);
+    const resultText = !isFullRead
+      ? result.modelText
+      : readKey !== undefined && completedLargeReads.has(readKey)
+        ? compactReadReference(envelope, result)
+        : fullReadResult(envelope, result);
+    if (isFullRead && readKey !== undefined) completedLargeReads.add(readKey);
     return {
       content: [
-        { type: "text" as const, text: result.modelText },
+        { type: "text" as const, text: resultText },
         ...event.content.filter((item) => item.type === "image"),
       ],
       details: {

@@ -5,6 +5,7 @@ export * from "./evidence.js";
 export * from "./experience.js";
 export * from "./legacy-memory-adapter.js";
 export * from "./learning.js";
+export * from "./large-read.js";
 export * from "./maintenance-intent.js";
 export * from "./offload.js";
 export * from "./performance-trace.js";

@@ -62,6 +62,32 @@ describe("Pi tool result capture", () => {
     });
   });
 
+  it("recovers a complete truncated read result without requiring continuation calls", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-mentis-read-capture-"));
+    const inputPath = path.join(directory, "SKILL.md");
+    const lines = Array.from({ length: 2_400 }, (_, index) => `line ${index + 1}`);
+    const complete = lines.join("\n");
+    try {
+      await writeFile(inputPath, complete);
+      const recovered = await recoverFullToolResult({
+        ...envelope("line 1\n\n[Showing lines 1-1 of 2400. Use offset=2 to continue.]", {
+          truncation: { truncated: true, totalBytes: Buffer.byteLength(complete) },
+        }),
+        toolName: "read",
+        input: { path: inputPath },
+      });
+
+      expect(recovered.text).toBe(complete);
+      expect(recovered.captureIntegrity).toMatchObject({
+        complete: true,
+        lossy: false,
+        sourceReportedBytes: Buffer.byteLength(complete),
+      });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("persists recovered capture integrity with the artifact", async () => {
     const written: Array<Record<string, unknown>> = [];
     const artifact = {

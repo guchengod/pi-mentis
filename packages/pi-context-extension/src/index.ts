@@ -8,7 +8,15 @@ import {
   loadConfig,
   type PiMentisConfig,
 } from "@pi-mentis/pi-mentis-core";
-import { type PiScopeContext, type ToolResultEnvelope } from "@pi-mentis/pi-mentis-memory-core";
+import {
+  canReturnFullRead,
+  compactReadReference,
+  fullReadResult,
+  readRequestKey,
+  recoverFullToolResult,
+  type PiScopeContext,
+  type ToolResultEnvelope,
+} from "@pi-mentis/pi-mentis-memory-core";
 import {
   formatPiToolJson,
   createMentisMemorySystemPrompt,
@@ -146,6 +154,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let sidecarSessionReady = false;
   let automaticRecallWarningShown = false;
   const pendingInlineToolResults: ToolResultEnvelope[] = [];
+  const completedLargeReads = new Set<string>();
   let sessionOpen:
     | {
         readonly clientSessionId: string;
@@ -316,6 +325,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
 
   pi.on("session_start", (event, context) => {
     flushInlineToolResults();
+    completedLargeReads.clear();
     clientSessionId = context.sessionManager.getSessionId();
     branchId = context.sessionManager.getLeafId() ?? "root";
     parentBranchId =
@@ -455,9 +465,13 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       cwd: context.cwd,
       completedAt: Date.now(),
     };
-    const mode = toolResultMode(Buffer.byteLength(text, "utf8"), config.memory.offload);
+    const recoveredEnvelope = await recoverFullToolResult(envelope);
+    const mode = toolResultMode(
+      Buffer.byteLength(recoveredEnvelope.text, "utf8"),
+      config.memory.offload,
+    );
     if (mode === "inline") {
-      pendingInlineToolResults.push(envelope);
+      pendingInlineToolResults.push(recoveredEnvelope);
       if (pendingInlineToolResults.length >= config.memory.turnEventLimit) {
         flushInlineToolResults();
       }
@@ -466,32 +480,44 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     flushInlineToolResults();
     let spool: { readonly spoolId: string } | undefined;
     try {
-      spool = await createToolResultSpool(config.storage.rootDir, text);
+      spool = await createToolResultSpool(config.storage.rootDir, recoveredEnvelope.text);
       const result = await sidecar.call(
         "capture.toolResultSpool",
         {
           clientSessionId,
           spoolId: spool.spoolId,
           envelope: {
-            toolCallId: envelope.toolCallId,
-            toolName: envelope.toolName,
-            input: envelope.input,
-            ...(envelope.details === undefined ? {} : { details: envelope.details }),
-            ...(envelope.captureIntegrity === undefined
+            toolCallId: recoveredEnvelope.toolCallId,
+            toolName: recoveredEnvelope.toolName,
+            input: recoveredEnvelope.input,
+            ...(recoveredEnvelope.details === undefined
               ? {}
-              : { captureIntegrity: envelope.captureIntegrity }),
-            isError: envelope.isError,
-            cwd: envelope.cwd,
-            ...(envelope.startedAt === undefined ? {} : { startedAt: envelope.startedAt }),
-            completedAt: envelope.completedAt,
+              : { details: recoveredEnvelope.details }),
+            ...(recoveredEnvelope.captureIntegrity === undefined
+              ? {}
+              : { captureIntegrity: recoveredEnvelope.captureIntegrity }),
+            isError: recoveredEnvelope.isError,
+            cwd: recoveredEnvelope.cwd,
+            ...(recoveredEnvelope.startedAt === undefined
+              ? {}
+              : { startedAt: recoveredEnvelope.startedAt }),
+            completedAt: recoveredEnvelope.completedAt,
           },
         },
         30_000,
       );
       if (result === undefined || result.mode === "inline") return;
+      const readKey = readRequestKey(recoveredEnvelope);
+      const isFullRead = canReturnFullRead(recoveredEnvelope, result);
+      const resultText = !isFullRead
+        ? result.modelText
+        : readKey !== undefined && completedLargeReads.has(readKey)
+          ? compactReadReference(recoveredEnvelope, result)
+          : fullReadResult(recoveredEnvelope, result);
+      if (isFullRead && readKey !== undefined) completedLargeReads.add(readKey);
       return {
         content: [
-          { type: "text" as const, text: result.modelText },
+          { type: "text" as const, text: resultText },
           ...event.content.filter((item) => item.type === "image"),
         ],
         details: {

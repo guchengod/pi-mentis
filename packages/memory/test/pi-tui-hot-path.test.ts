@@ -144,8 +144,11 @@ describe("Pi TUI foreground path", () => {
     const handler = eventHandler(sourceFile, filename, "tool_result");
     const foreground = handler.body.getText(sourceFile);
 
-    expect(foreground).toContain("pendingInlineToolResults.push(envelope)");
-    expect(foreground).toContain("createToolResultSpool(config.storage.rootDir, text)");
+    expect(foreground).toContain("recoverFullToolResult(envelope)");
+    expect(foreground).toContain("pendingInlineToolResults.push(recoveredEnvelope)");
+    expect(foreground).toContain(
+      "createToolResultSpool(config.storage.rootDir, recoveredEnvelope.text)",
+    );
     expect(foreground).toContain('"capture.toolResultSpool"');
     expect(foreground).not.toContain('"capture.toolResult",');
   });

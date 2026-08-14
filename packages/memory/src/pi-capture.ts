@@ -45,6 +45,80 @@ function isInside(parent: string, candidate: string): boolean {
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
 
+function recoveredIntegrity(
+  capturedBytes: number,
+  reportedBytes: number | undefined,
+): NonNullable<ToolResultEnvelope["captureIntegrity"]> {
+  return {
+    complete: reportedBytes === undefined || capturedBytes >= reportedBytes,
+    lossy: reportedBytes !== undefined && capturedBytes < reportedBytes,
+    ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+    capturedBytes,
+    ...(reportedBytes !== undefined && capturedBytes < reportedBytes
+      ? { truncationStage: "host" as const }
+      : {}),
+  };
+}
+
+/**
+ * Pi's read tool tells the model to continue in chunks once its output limit
+ * is reached. The original call has already authorized this exact path, so we
+ * reconstruct the selected line range once instead of requiring many repeats.
+ */
+async function recoverFullReadResult(
+  envelope: ToolResultEnvelope,
+  reportedBytes: number | undefined,
+): Promise<ToolResultEnvelope> {
+  const capturedBytes = Buffer.byteLength(envelope.text, "utf8");
+  const requestedPath = envelope.input["path"];
+  if (typeof requestedPath !== "string") {
+    return {
+      ...envelope,
+      captureIntegrity: {
+        complete: false,
+        lossy: true,
+        ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+        capturedBytes,
+        truncationStage: "host",
+      },
+    };
+  }
+  try {
+    const resolved = await realpath(path.resolve(envelope.cwd, requestedPath));
+    const metadata = await stat(resolved);
+    if (!metadata.isFile() || metadata.size > MAX_RECOVERED_TOOL_RESULT_BYTES) {
+      throw new Error("Pi read output is not a bounded regular file");
+    }
+    const fileText = await readFile(resolved, "utf8");
+    const lines = fileText.split("\n");
+    const offset = envelope.input["offset"];
+    const limit = envelope.input["limit"];
+    const startLine = typeof offset === "number" ? Math.max(0, offset - 1) : 0;
+    if (startLine >= lines.length) throw new Error("Pi read offset is outside the file");
+    const endLine =
+      typeof limit === "number"
+        ? Math.min(startLine + Math.max(0, limit), lines.length)
+        : lines.length;
+    const text = lines.slice(startLine, endLine).join("\n");
+    return {
+      ...envelope,
+      text,
+      captureIntegrity: recoveredIntegrity(Buffer.byteLength(text, "utf8"), reportedBytes),
+    };
+  } catch {
+    return {
+      ...envelope,
+      captureIntegrity: {
+        complete: false,
+        lossy: true,
+        ...(reportedBytes === undefined ? {} : { sourceReportedBytes: reportedBytes }),
+        capturedBytes,
+        truncationStage: "host",
+      },
+    };
+  }
+}
+
 /**
  * Pi's bash tool keeps the complete output in a process-owned temporary file when
  * the text returned to extensions is truncated. Recover only that narrowly
@@ -58,6 +132,9 @@ export async function recoverFullToolResult(
   const truncation = objectValue(envelope.details, "truncation");
   const hostTruncated = objectValue(truncation, "truncated") === true;
   const fullOutputPath = objectValue(envelope.details, "fullOutputPath");
+  if (envelope.toolName === "read" && hostTruncated) {
+    return recoverFullReadResult(envelope, reportedBytes);
+  }
   if (
     envelope.toolName !== "bash" ||
     !hostTruncated ||
