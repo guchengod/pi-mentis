@@ -164,6 +164,17 @@ function visitPackage(name, trail = []) {
 }
 for (const name of manifests.keys()) visitPackage(name);
 
+const githubReadme = await readFile(path.join(root, "README.md"), "utf8");
+const npmReadme = await readFile(
+  path.join(root, "packages/pi-context-extension/README.md"),
+  "utf8",
+);
+if (githubReadme !== npmReadme) {
+  failures.push(
+    "packages/pi-context-extension/README.md must exactly match the repository README.md",
+  );
+}
+
 if (failures.length > 0) {
   console.error(failures.join("\n"));
   process.exitCode = 1;

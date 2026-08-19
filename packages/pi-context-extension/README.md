@@ -1,60 +1,126 @@
-# @galvinsan/pi-mentis
+# Pi Mentis
 
-Pi Mentis 是为 [Pi](https://github.com/badlogic/pi-mono) 设计的个人长期记忆与知识库 Extension，包含知识库 + 长期记忆的完整集成版本。
+![Pi Mentis 功能概览](https://raw.githubusercontent.com/guchengod/pi-mentis/main/assets/pi-mentis-gallery.png)
 
-- 个人长期记忆：偏好、事实、决策、流程、事件，跨会话召回。
-- 知识库：文件、目录、Git 工作区、在线文档、Wiki 型站点。
-- 混合检索：Dense + 全文 + RRF + 可选 Rerank + MMR。
-- 本地持久化：Zvec 存储在本机，API Key 只读环境变量。
-- Pi 原生：复用 Session / Branch 语义，不维护第二套会话树。
-- 进程隔离：Pi 只加载轻量适配器和内存胶囊；Zvec、推理、捕获与维护运行在 Sidecar。
+## 说明
 
-> English: Pi-native personal long-term memory + knowledge base, backed by Zvec and SiliconFlow.
+> 面向 [Pi](https://github.com/badlogic/pi-mono) 的本地优先长期记忆与知识库：让 Agent 记住偏好、决策和项目上下文，并在需要时检索，而不是把所有历史一直塞进模型上下文。
 
-## 要求
-
-| 项目    | 要求                           |
-| ------- | ------------------------------ |
-| Pi      | `>= 0.84.0`                    |
-| Node.js | `>=22.19.0`                    |
-| 凭证    | `SILICONFLOW_API_KEY` 环境变量 |
-| 存储    | 本机 Zvec，单写者              |
-
-三个可选产品，只安装一个：
-
-| 包                               | 适用场景              | 工具                                   |
-| -------------------------------- | --------------------- | -------------------------------------- |
-| `@galvinsan/pi-mentis`           | **推荐**：知识 + 记忆 | `commit_memory`, `search_memory`       |
-| `@galvinsan/pi-mentis-memory`    | 只要个人记忆          | `commit_memory`, `search_memory`       |
-| `@galvinsan/pi-mentis-knowledge` | 只要知识库            | `commit_knowledge`, `search_knowledge` |
+Pi Mentis 为 Pi `>= 0.84.0` 提供三件事：跨会话的个人长期记忆、可导入文件和网页的知识库，以及针对大工具输出的 Artifact 按需检索。它复用 Pi 原生的 Session 和 Branch 语义，不维护第二套会话树。
 
 ## 安装
+
+### 1. 准备环境
+
+| 项目     | 要求                           |
+| -------- | ------------------------------ |
+| Pi       | `>= 0.84.0`                    |
+| Node.js  | `>= 22.19.0`                   |
+| 推理服务 | SiliconFlow API Key            |
+| 数据库   | 本机 Zvec（由 Pi Mentis 管理） |
+
+### 2. 安装一个产品
+
+三个产品共用同一套本地数据目录，**请选择其一安装**。通常直接选集成版。
+
+| 包                               | 适用场景                    | 可用能力                                |
+| -------------------------------- | --------------------------- | --------------------------------------- |
+| `@galvinsan/pi-mentis`           | **推荐**：知识库 + 长期记忆 | `commit_memory`、`search_memory`、`/kb` |
+| `@galvinsan/pi-mentis-memory`    | 仅个人长期记忆              | `commit_memory`、`search_memory`        |
+| `@galvinsan/pi-mentis-knowledge` | 仅知识库                    | `commit_knowledge`、`search_knowledge`  |
 
 ```bash
 pi install npm:@galvinsan/pi-mentis
 ```
 
-升级：`pi update npm:@galvinsan/pi-mentis` · 卸载：`pi remove npm:@galvinsan/pi-mentis`
+升级或卸载：
 
-## 配置
+```bash
+pi update npm:@galvinsan/pi-mentis
+pi remove npm:@galvinsan/pi-mentis
+```
+
+### 3. 配置凭证并验证
+
+API Key 只放在环境变量中，不要写入配置文件。
 
 ```bash
 export SILICONFLOW_API_KEY="your-api-key"
+pi
 ```
 
-默认模型：Embedding `Qwen/Qwen3-Embedding-8B`（1024 维），Rerank `Qwen/Qwen3-Reranker-8B`。
-可选 BAAI 模型（`SILICONFLOW_EMBEDDING_MODEL`、`SILICONFLOW_EMBEDDING_DIMENSIONS`、`SILICONFLOW_RERANKER_MODEL`、`SILICONFLOW_RERANK_MAX_INPUT_TOKENS`）。
+在 Pi 中执行：
 
-详细配置默认位于 `~/.pi/.pi-mentis/config.json`，不随启动目录或 Workspace
-变化；所有字段可省略并继承安全默认值。显式 Pi profile 使用
-`<PI_CODING_AGENT_DIR>/.pi-mentis`，`PI_MENTIS_HOME` 可指定隔离的绝对路径。
-API Key 只放环境变量，不要写入 JSON。
+```text
+/mentis doctor
+```
 
-自动召回默认关闭。普通情况下，仅在当前轮启用了 `search_memory` 时，Extension 才会把一段
-紧凑规则加入 Pi 系统提示词：当信息未知、不确定、当前上下文缺失，或可能存在于长期记忆/
-知识库时，先搜索，不要猜测；工具未启用时不占用提示词 Token。
+它会只读检查 Pi 版本、凭证变量、存储配置和 Sidecar 状态，不会发起模型请求，也不会显示 API Key。`/mentis help` 会显示当前实际使用的配置文件路径和完整帮助。
 
-如需开启自动召回，在配置文件中加入：
+## 使用
+
+### 让 Agent 记住长期信息
+
+直接用自然语言告诉 Pi；只有你明确要求记住、更新、纠正或忘记时，Pi 才应写入长期记忆。
+
+```text
+请记住：我在 Node.js 项目中优先使用 pnpm，并且默认开启 TypeScript 严格模式。
+```
+
+Pi 会调用 `commit_memory({ content })`。公开写入接口只有一项自然语言内容，无需填写标签、谓词、记忆类型或事实键。
+
+### 检索已有记忆和知识
+
+```text
+请搜索我关于 Node.js 包管理器的长期偏好。
+```
+
+Pi 会调用 `search_memory`。集成版的搜索会同时检索个人记忆和知识库；当信息不在当前上下文、存在不确定性或可能来自历史记录时，Pi Mentis 会提示 Agent 先搜索再回答。
+
+要纠正旧信息，先让 Agent 搜到具体旧记录，再写入新的陈述：
+
+```text
+先搜索我之前的包管理器偏好，然后更新为：这个项目改用 npm workspaces。
+```
+
+### 导入知识库
+
+集成版和知识库版支持文件、目录、Git 工作区和网页：
+
+```text
+/kb add ./docs
+/kb add https://zhanghandong.github.io/pi-book/
+/kb status
+/kb help
+```
+
+导入任务在后台执行，Pi 前台不会因索引或大文件解析而被阻塞。
+
+## 核心功能
+
+### 长期记忆：写入快、整合慢
+
+每条记忆先以带来源和时间的原子陈述保存。后续的强化、替代、撤回或冲突判断在后台进行；相似度只用于寻找候选，不能单独改变记忆状态。这样既能支持偏好和决策的演进，也能保留可追溯的原始记录。
+
+### 知识库：混合检索、按预算返回
+
+知识与记忆候选会经过全文检索、向量检索、RRF 融合、权限/时效门控、可选 Rerank、去重和 MMR 多样性选择。最后按上下文预算挑选信息密度最高的内容，而不是简单塞入固定数量的片段。
+
+### 大结果不反复占用上下文
+
+工具结果默认按大小处理：
+
+| 结果大小   | 模型看到的内容                    | 完整内容   |
+| ---------- | --------------------------------- | ---------- |
+| `≤ 8 KiB`  | 原样返回                          | 当前上下文 |
+| `8–64 KiB` | 摘要 + 一份 preview + Artifact ID | Artifact   |
+| `> 64 KiB` | 结构化摘要 + Artifact ID          | Artifact   |
+
+完整 `read` 结果（最多 256 KiB）会在首次读取时提供给模型，并存为 Artifact；相同路径、范围且内容未变时，后续读取只返回引用。文件内容变化后会再次完整提供。需要细节时，Agent 可使用 `search_memory({ id, query })` 在对应 Artifact 内定位局部窗口。
+
+### 可选自动召回
+
+自动召回默认关闭。开启后，Sidecar 在每轮结束后生成 Memory Capsule；下一轮开始时，Pi 只从已加载的不可变 Capsule 中选择少量证据，不访问磁盘、Zvec 或网络。完整语义检索仍由 `search_memory` 在 Sidecar 中执行。
 
 ```json
 {
@@ -62,56 +128,61 @@ API Key 只放环境变量，不要写入 JSON。
 }
 ```
 
-开启后，召回选择本身仍然只读取内存胶囊，不访问 Zvec 或网络；但它会增加模型提示词内容，
-并启用每轮结束后的语义胶囊刷新，因此发送消息后可能出现可感知的 TUI 延迟。Extension 会在
-每个进程首次启用时显示警告。
+开启后会增加提示词内容和后台刷新工作，发送消息后可能出现可感知延迟。
 
-Tool Result 的小结果会在一轮结束时批量发送给 Sidecar；大结果正文通过权限为 `0600` 的
-一次性文件交接，避免 Node IPC 再复制整段文本。Sidecar 默认以较低 CPU 优先级运行，同时
-限制知识库任务和全局文件解析并发，并把维护任务延后到消息发送后的敏感窗口之外。
+## 系统架构
 
-## 使用
+```mermaid
+flowchart LR
+  User[用户] --> Pi[Pi Agent / 原生 Session 与 Branch]
+  Pi --> Adapter[Pi Mentis 轻量适配器\n工具、事件、Capsule]
+  Adapter <-->|版本化 IPC\n请求、通知、大结果一次性文件交接| Sidecar[Mentis Sidecar]
 
-```text
-请使用 commit_memory 记住：我在 Node.js 项目中优先使用 pnpm。
-请调用 search_memory，搜索我关于 Node.js 包管理器的长期偏好。
+  Adapter -->|可选：自动召回| Capsule[内存中的不可变\nMemory Capsule]
+
+  Sidecar --> Memory[长期记忆\n原子陈述与关系整合]
+  Sidecar --> Knowledge[知识导入\n文件、目录、网页]
+  Sidecar --> Retrieval[检索管线\n全文 + 向量 + RRF + Rerank + MMR]
+  Sidecar --> Capture[工具结果捕获\n摘要与 Artifact]
+
+  Memory --> Zvec[(本机 Zvec\n记忆、知识、证据、Artifact)]
+  Knowledge --> Zvec
+  Retrieval <--> Zvec
+  Capture --> Zvec
+
+  Sidecar <--> Provider[SiliconFlow\nEmbedding / Rerank]
+  Retrieval -->|受预算约束的证据| Adapter
 ```
 
-Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Type、Domain、Cardinality、Fact Key 或 Semantic Key。需要纠正、强化或撤回时，Agent 会优先在同一轮用 `search_memory` 找到具体旧记录，再用不变的 `commit_memory({content})` 写入新陈述。主写路径先完成保存；后台优先对本轮召回的具体记录做 pairwise reasoning；没有显式召回时可复核 Core 找到的最强向量候选。相似度只选候选，不能改变状态；只有高置信成对证据才能建立 reinforce / supersede / retract / conflict 关系，不确定时安全 coexist。
+Pi 进程只保留轻量适配器和可选的内存 Capsule；Zvec、远程推理、知识导入、工具结果捕获和后台维护都运行在独立 Sidecar 中。Sidecar 异常时 Pi 仍可继续使用，并会按退避策略尝试恢复。
 
-这不是关键词或 correction/retraction 分类器。相似度只负责找候选，不能改变状态；后台整合保留原始来源、关系边和 decision trace。Branch hypothesis 在验证前不会污染主事实。
+## 配置、数据与安全
 
-```text
-/kb add ./docs
-/kb add https://zhanghandong.github.io/pi-book/
-/kb status
-/kb help
-/mentis help
+- 默认配置文件：`~/.pi/.pi-mentis/config.json`；可使用 `PI_MENTIS_HOME` 指定独立的绝对路径。
+- 默认数据目录：`~/.pi/.pi-mentis/zvec`；同一目录只允许一个写入进程。
+- 备份前先停止 Pi，再整体复制 `storage.rootDir`。
+- 召回内容会作为不受信任的证据提供给 Agent，不能覆盖当前用户指令。
+- 详细字段、模型设置、资源限制与存储迁移请参阅 [配置文档](https://github.com/guchengod/pi-mentis/blob/main/docs/configuration.md)。
+
+## 开发
+
+仓库是 ESM TypeScript monorepo，使用 pnpm：
+
+```bash
+pnpm install
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm test:e2e
+pnpm build
+pnpm pack:extensions
 ```
 
-`/mentis help` 会显示当前实际采用的配置文件路径和完整用法；`/kb help` 是同一份帮助的快捷入口。
+更多设计细节见 [系统架构](https://github.com/guchengod/pi-mentis/blob/main/docs/architecture.md)、[数据模型](https://github.com/guchengod/pi-mentis/blob/main/docs/data-model.md)、[检索机制](https://github.com/guchengod/pi-mentis/blob/main/docs/retrieval.md)、[测试说明](https://github.com/guchengod/pi-mentis/blob/main/docs/testing.md) 和各 npm 包：
 
-安装或配置后运行 `/mentis doctor`。它只检查本地 Pi 版本、凭证变量是否存在、存储配置和
-Sidecar 响应状态；不会发起任何模型或远程 provider 请求，也不会显示 API Key。
-
-## 数据与安全
-
-- 备份前停止 Pi，整体复制 `storage.rootDir`（默认 `~/.pi/.pi-mentis/zvec`）。
-- 仅存在 `~/.pi/agent/.pi-mentis` 时会兼容使用；两套目录并存时固定选择稳定的
-  `~/.pi/.pi-mentis`，另一套只报告为 inactive，不会自动合并、覆盖或删除。
-- 同一存储目录只允许一个写入进程。
-- 自动召回默认关闭；开启后只读取进程内不可变 Memory Capsule，不访问 Zvec、网络或文件系统。
-- 完整语义检索继续由 `search_memory` 提供，并在隔离 Sidecar 中执行。
-- 每个 Pi Extension 进程只启动一个 Sidecar；并发请求共享启动过程，不会重复拉起服务。
-- Sidecar 在 Session 启动时异步启动、Session 关闭时停止；异常退出会自动退避重启并恢复最新 Branch。
-- `search_memory`、独立的 `commit_memory` 及多个知识导入任务可在 Sidecar 中并发执行。
-- 召回内容标记为不受信任证据，不会覆盖当前用户指令。
-
-## 链接
-
-- [GitHub](https://github.com/guchengod/pi-mentis)
-- [Architecture](https://github.com/guchengod/pi-mentis/blob/main/docs/architecture.md)
-- [Configuration](https://github.com/guchengod/pi-mentis/blob/main/docs/configuration.md)
-- [Issues](https://github.com/guchengod/pi-mentis/issues)
+- [集成版 `@galvinsan/pi-mentis`](https://www.npmjs.com/package/@galvinsan/pi-mentis)
+- [记忆版 `@galvinsan/pi-mentis-memory`](https://www.npmjs.com/package/@galvinsan/pi-mentis-memory)
+- [知识库版 `@galvinsan/pi-mentis-knowledge`](https://www.npmjs.com/package/@galvinsan/pi-mentis-knowledge)
 
 MIT License.

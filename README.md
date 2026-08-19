@@ -1,5 +1,9 @@
 # Pi Mentis
 
+![Pi Mentis 功能概览](https://raw.githubusercontent.com/guchengod/pi-mentis/main/assets/pi-mentis-gallery.png)
+
+## 说明
+
 > 面向 [Pi](https://github.com/badlogic/pi-mono) 的本地优先长期记忆与知识库：让 Agent 记住偏好、决策和项目上下文，并在需要时检索，而不是把所有历史一直塞进模型上下文。
 
 Pi Mentis 为 Pi `>= 0.84.0` 提供三件事：跨会话的个人长期记忆、可导入文件和网页的知识库，以及针对大工具输出的 Artifact 按需检索。它复用 Pi 原生的 Session 和 Branch 语义，不维护第二套会话树。
@@ -53,7 +57,7 @@ pi
 
 它会只读检查 Pi 版本、凭证变量、存储配置和 Sidecar 状态，不会发起模型请求，也不会显示 API Key。`/mentis help` 会显示当前实际使用的配置文件路径和完整帮助。
 
-## 快速使用
+## 使用
 
 ### 让 Agent 记住长期信息
 
@@ -158,7 +162,7 @@ Pi 进程只保留轻量适配器和可选的内存 Capsule；Zvec、远程推�
 - 默认数据目录：`~/.pi/.pi-mentis/zvec`；同一目录只允许一个写入进程。
 - 备份前先停止 Pi，再整体复制 `storage.rootDir`。
 - 召回内容会作为不受信任的证据提供给 Agent，不能覆盖当前用户指令。
-- 详细字段、模型设置、资源限制与存储迁移请参阅 [配置文档](docs/configuration.md)。
+- 详细字段、模型设置、资源限制与存储迁移请参阅 [配置文档](https://github.com/guchengod/pi-mentis/blob/main/docs/configuration.md)。
 
 ## 开发
 
@@ -175,10 +179,10 @@ pnpm build
 pnpm pack:extensions
 ```
 
-更多设计细节见 [系统架构](docs/architecture.md)、[数据模型](docs/data-model.md)、[检索机制](docs/retrieval.md)、[测试说明](docs/testing.md) 和各 npm 包的 README：
+更多设计细节见 [系统架构](https://github.com/guchengod/pi-mentis/blob/main/docs/architecture.md)、[数据模型](https://github.com/guchengod/pi-mentis/blob/main/docs/data-model.md)、[检索机制](https://github.com/guchengod/pi-mentis/blob/main/docs/retrieval.md)、[测试说明](https://github.com/guchengod/pi-mentis/blob/main/docs/testing.md) 和各 npm 包：
 
-- [集成版 `@galvinsan/pi-mentis`](packages/pi-context-extension/README.md)
-- [记忆版 `@galvinsan/pi-mentis-memory`](packages/pi-memory-extension/README.md)
-- [知识库版 `@galvinsan/pi-mentis-knowledge`](packages/pi-knowledge-extension/README.md)
+- [集成版 `@galvinsan/pi-mentis`](https://www.npmjs.com/package/@galvinsan/pi-mentis)
+- [记忆版 `@galvinsan/pi-mentis-memory`](https://www.npmjs.com/package/@galvinsan/pi-mentis-memory)
+- [知识库版 `@galvinsan/pi-mentis-knowledge`](https://www.npmjs.com/package/@galvinsan/pi-mentis-knowledge)
 
 MIT License.
