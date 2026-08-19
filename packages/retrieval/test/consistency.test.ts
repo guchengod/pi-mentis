@@ -404,4 +404,42 @@ describe("query-vs-ID consistency invariant", () => {
     const found = result.hits.some((hit) => hit.id === recordId3);
     expect(found).toBe(true);
   });
+
+  it("does not reuse query results across recalls when underlying memory changes", async () => {
+    let revision = 0;
+    const retrieval = {
+      async search(): Promise<SearchResult> {
+        revision += 1;
+        const id = `memory-revision-${revision}`;
+        return {
+          hits: [
+            {
+              id,
+              kind: "memory",
+              text: `current revision ${revision}`,
+              score: 1,
+              tokenCount: 4,
+              authority: EvidenceAuthority.UserCurrentInstruction,
+              namespace: "user",
+              contentHash: id,
+              metadata: { retrievalSignals: ["fts"] },
+            },
+          ],
+          diagnostics: { durationMs: 1, timedOut: false, degraded: [], stages: {} },
+        };
+      },
+    } as RetrievalService;
+    const coordinator = new DefaultRecallCoordinator({
+      getMemory: () => undefined,
+      getRetrieval: () => retrieval,
+      getEvidence: () => undefined,
+    });
+    const context = { scopeContext: makeScopeContext() };
+
+    const first = await coordinator.recall({ query: "current preference" }, context);
+    const second = await coordinator.recall({ query: "current preference" }, context);
+
+    expect(first.hits[0]?.id).toBe("memory-revision-1");
+    expect(second.hits[0]?.id).toBe("memory-revision-2");
+  });
 });

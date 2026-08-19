@@ -12,7 +12,12 @@
  * All results pass through secret detection before return.
  */
 
-import type { SearchHit, SearchResult, MentisContextSnapshot } from "@pi-mentis/pi-mentis-core";
+import {
+  estimateModelTokens,
+  type SearchHit,
+  type SearchResult,
+  type MentisContextSnapshot,
+} from "@pi-mentis/pi-mentis-core";
 import type {
   MemoryService,
   MemoryScope,
@@ -622,28 +627,11 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
   readonly #services: MentisServiceAccess;
   readonly #resolver: MentisResourceReferenceResolver;
   readonly #artifactQuery: ArtifactQueryService;
-  readonly #turnSearchCache = new Map<string, PublicRecallResult>();
 
   constructor(services: MentisServiceAccess) {
     this.#services = services;
     this.#resolver = new DefaultMentisResourceReferenceResolver(services);
     this.#artifactQuery = new DefaultArtifactQueryService(services);
-  }
-
-  #searchCacheKey(query: string, scopeContext: PiScopeContext): string {
-    return JSON.stringify({
-      query: query.normalize("NFKC").trim().toLowerCase(),
-      tenantId: scopeContext.tenantId,
-      userId: scopeContext.userId,
-      appId: scopeContext.appId,
-      agentId: scopeContext.agentId,
-      repositoryId: scopeContext.repositoryId,
-      projectId: scopeContext.projectId,
-      taskId: scopeContext.taskId,
-      branchId: scopeContext.branchId,
-      sessionId: scopeContext.sessionId,
-      topicIds: scopeContext.topicIds,
-    });
   }
 
   async recall(
@@ -771,11 +759,6 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
 
     // ── MODE 3: Query only → intent-based lane routing ──
     if (query !== undefined) {
-      // Dedup: check turn cache
-      const cacheKey = this.#searchCacheKey(query, scopeContext);
-      const cached = this.#turnSearchCache.get(cacheKey);
-      if (cached !== undefined) return cached;
-
       try {
         if (retrieval === undefined && memory !== undefined) {
           const memResult = await memory.search(
@@ -802,15 +785,14 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                   (total, hit) => total + Buffer.byteLength(hit.content, "utf8"),
                   0,
                 ),
-                estimatedReturnedTokens: Math.ceil(
-                  hits.reduce((total, hit) => total + Buffer.byteLength(hit.content, "utf8"), 0) /
-                    4,
+                estimatedReturnedTokens: hits.reduce(
+                  (total, hit) => total + estimateModelTokens(hit.content),
+                  0,
                 ),
               },
             },
             summary,
           );
-          this.#turnSearchCache.set(cacheKey, result);
           return result;
         }
 
@@ -892,8 +874,9 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
                 (total, hit) => total + Buffer.byteLength(hit.content, "utf8"),
                 0,
               ),
-              estimatedReturnedTokens: Math.ceil(
-                hits.reduce((total, hit) => total + Buffer.byteLength(hit.content, "utf8"), 0) / 4,
+              estimatedReturnedTokens: hits.reduce(
+                (total, hit) => total + estimateModelTokens(hit.content),
+                0,
               ),
               ...(semanticPlan === undefined
                 ? {}
@@ -905,7 +888,6 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
           },
           summary,
         );
-        this.#turnSearchCache.set(cacheKey, result);
         return result;
       } catch {
         return {

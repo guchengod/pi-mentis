@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ApproximateModelTokenEstimator,
   ConservativeUtf8TokenEstimator,
   assertSupportedEmbeddingDimension,
   createRerankBudget,
@@ -71,6 +72,15 @@ describe("Embedding identity and validation", () => {
 });
 
 describe("Rerank planning", () => {
+  it("keeps approximate model tokens separate from the UTF-8 safety bound", () => {
+    const approximate = new ApproximateModelTokenEstimator();
+    const conservative = new ConservativeUtf8TokenEstimator();
+    const text = "alpha beta gamma delta ".repeat(40);
+
+    expect(approximate.count(text)).toBeLessThan(conservative.count(text));
+    expect(conservative.count("数据库")).toBe(Buffer.byteLength("数据库", "utf8"));
+  });
+
   it.each([8192, 16384, 32768])("keeps batches inside a %i-token context", (context) => {
     const estimator = new ConservativeUtf8TokenEstimator();
     const budget = createRerankBudget("query", "instruction", estimator, {

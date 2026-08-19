@@ -9,8 +9,8 @@ import {
   type MentisContextSnapshot,
 } from "@pi-mentis/pi-mentis-core";
 import {
+  ApproximateModelTokenEstimator,
   BoundedTtlCache,
-  ConservativeUtf8TokenEstimator,
   createRerankBudget,
   normalizeBatchScores,
   planRerankBatches,
@@ -89,6 +89,37 @@ export interface CreateRetrievalServiceOptions {
   readonly embeddingModel?: string;
   readonly embeddingDimensions?: number;
   readonly semanticPlanner?: SemanticQueryPlanner;
+  readonly contextTokens?: number;
+  readonly knowledgeTokens?: number;
+  readonly memoryTokens?: number;
+}
+
+export interface RetrievalContextBudgets {
+  readonly total: number;
+  readonly knowledge: number;
+  readonly memory: number;
+}
+
+export function scaleRetrievalContextBudgets(
+  contextTokenLimit: number,
+  baselineContextTokens: number,
+  baselineKnowledgeTokens: number,
+  baselineMemoryTokens: number,
+): RetrievalContextBudgets {
+  if (
+    !Number.isFinite(contextTokenLimit) ||
+    !Number.isFinite(baselineContextTokens) ||
+    contextTokenLimit < 1 ||
+    baselineContextTokens < 1
+  ) {
+    throw new Error("Retrieval context token budgets must be positive finite numbers");
+  }
+  const scale = contextTokenLimit / baselineContextTokens;
+  return {
+    total: contextTokenLimit,
+    knowledge: Math.min(Math.floor(baselineKnowledgeTokens * scale), contextTokenLimit),
+    memory: Math.min(Math.floor(baselineMemoryTokens * scale), contextTokenLimit),
+  };
 }
 
 function fallbackPlan(): MemoryQueryPlan {
@@ -151,7 +182,10 @@ export class DefaultRetrievalService implements RetrievalService {
   readonly #candidateLimit: number;
   readonly #rerankCache: BoundedTtlCache<RerankCacheValue>;
   readonly #telemetry: InMemoryTelemetry;
-  readonly #estimator = new ConservativeUtf8TokenEstimator();
+  readonly #estimator = new ApproximateModelTokenEstimator();
+  readonly #contextTokens: number;
+  readonly #knowledgeTokens: number;
+  readonly #memoryTokens: number;
   readonly #effectiveness: EffectivenessService | undefined;
   readonly #policy: AdaptivePolicyService | undefined;
   readonly #clock: Clock;
@@ -164,6 +198,22 @@ export class DefaultRetrievalService implements RetrievalService {
     this.#rerankModel = options.rerankModel;
     this.#rerankContextTokens = options.rerankContextTokens;
     this.#candidateLimit = options.rerankCandidateLimit ?? 40;
+    this.#contextTokens = options.contextTokens ?? 1_600;
+    this.#knowledgeTokens = options.knowledgeTokens ?? 1_100;
+    this.#memoryTokens = options.memoryTokens ?? 500;
+    if (
+      !Number.isFinite(this.#contextTokens) ||
+      !Number.isFinite(this.#knowledgeTokens) ||
+      !Number.isFinite(this.#memoryTokens) ||
+      this.#contextTokens < 1 ||
+      this.#knowledgeTokens < 0 ||
+      this.#memoryTokens < 0
+    ) {
+      throw new Error("Retrieval token budgets must be finite and non-negative");
+    }
+    if (this.#knowledgeTokens + this.#memoryTokens > this.#contextTokens) {
+      throw new Error("Knowledge and memory token budgets exceed the retrieval context budget");
+    }
     this.#rerankCache = new BoundedTtlCache(
       options.rerankCacheEntries ?? 256,
       options.rerankCacheTtlMs ?? 60_000,
@@ -311,7 +361,7 @@ export class DefaultRetrievalService implements RetrievalService {
             kind: "memory",
             text,
             score: 1,
-            tokenCount: Math.max(1, Math.ceil(Buffer.byteLength(text, "utf8") / 4)),
+            tokenCount: this.#estimator.count(text),
             authority: Math.max(
               EvidenceAuthority.HistoricalSummary,
               ...Object.values(view.facts).map((fact) => fact.authority),
@@ -520,16 +570,22 @@ export class DefaultRetrievalService implements RetrievalService {
       );
       const rerankRanking = ranked.map((hit) => hit.id);
       const mmrRanking = diversified.map((hit) => hit.id);
-      const policyContextTokens = activePolicy?.parameters.contextTokens ?? 1_600;
+      const policyContextTokens = activePolicy?.parameters.contextTokens ?? this.#contextTokens;
       const contextTokenLimit = Math.min(
         query.contextTokens ?? policyContextTokens,
         policyContextTokens,
       );
+      const contextBudgets = scaleRetrievalContextBudgets(
+        contextTokenLimit,
+        this.#contextTokens,
+        this.#knowledgeTokens,
+        this.#memoryTokens,
+      );
       const selectedContext = selectContext(
         diversified,
-        contextTokenLimit,
-        Math.min(1_100, contextTokenLimit),
-        Math.min(500, contextTokenLimit),
+        contextBudgets.total,
+        contextBudgets.knowledge,
+        contextBudgets.memory,
       );
       const selectedIds = new Set(selectedContext.map((hit) => hit.id));
       const context = diversified.filter((hit) => selectedIds.has(hit.id));

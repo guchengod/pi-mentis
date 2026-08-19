@@ -10,7 +10,7 @@
  * All results pass through secret detection before return.
  */
 
-import { throwIfAborted } from "@pi-mentis/pi-mentis-core";
+import { estimateModelTokens, throwIfAborted } from "@pi-mentis/pi-mentis-core";
 import type { PiEvidenceStore, EvidenceReadOptions } from "@pi-mentis/pi-mentis-memory-core";
 import { detectSecrets, safeSummary } from "@pi-mentis/pi-mentis-memory-core";
 
@@ -183,7 +183,10 @@ function diagnostics(
     chunksScanned: input.chunksScanned ?? 0,
     bytesRead: input.bytesRead ?? 0,
     returnedBytes,
-    estimatedReturnedTokens: Math.ceil(returnedBytes / 4),
+    estimatedReturnedTokens: (input.hits ?? []).reduce(
+      (total, hit) => total + estimateModelTokens(hit.content),
+      0,
+    ),
     durationMs: performance.now() - started,
   };
 }

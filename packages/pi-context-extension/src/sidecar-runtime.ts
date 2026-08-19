@@ -426,6 +426,10 @@ export class MentisSidecarRuntime {
     const policy = config.intelligence.adaptivePolicy.enabled
       ? new AdaptivePolicyService(storeHandle.store, "local:local:pi:pi-mentis", {
           cooldownMs: config.intelligence.adaptivePolicy.cooldownMs,
+          baselineParameters: {
+            contextTokens: config.retrieval.contextTokens,
+            rerankCandidateLimit: config.inference.rerank.candidateLimit,
+          },
         })
       : undefined;
     await policy?.initialize();
@@ -441,6 +445,9 @@ export class MentisSidecarRuntime {
       rerankCandidateLimit: config.inference.rerank.candidateLimit,
       rerankCacheEntries: config.inference.rerank.cacheEntries,
       rerankCacheTtlMs: config.inference.rerank.cacheTtlMs,
+      contextTokens: config.retrieval.contextTokens,
+      knowledgeTokens: config.retrieval.knowledgeTokens,
+      memoryTokens: config.retrieval.memoryTokens,
       telemetry,
       ...(effectiveness === undefined ? {} : { effectiveness }),
       ...(policy === undefined ? {} : { policy }),

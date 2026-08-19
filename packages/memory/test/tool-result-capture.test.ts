@@ -128,4 +128,37 @@ describe("Pi tool result capture", () => {
     });
     expect(result.symbolic.captureIntegrity).toMatchObject({ complete: true, lossy: false });
   });
+
+  it("includes a truncated preview once and accounts for model-visible text", async () => {
+    const artifact = {
+      id: "artifact-2",
+      episodeId: "episode-1",
+      securityNamespace: "local",
+      mediaType: "text/plain; charset=utf-8",
+      byteLength: 10_000,
+      contentHash: "hash",
+      relativePath: "artifacts/b/manifest.json",
+      state: "ready",
+      chunks: [],
+      createdAt: 1,
+      updatedAt: 1,
+    } as ArtifactRecord;
+    const evidence = {
+      writeArtifact: async () => artifact,
+    } as unknown as PiEvidenceStore;
+    const preview = "unique-preview-marker";
+    const result = await offloadToolResult(
+      evidence,
+      "episode-1",
+      "event-1",
+      envelope(`${preview}${"x".repeat(10_000)}`, undefined),
+      { inlineMaxBytes: 100, truncateMaxBytes: 20_000, previewBytes: preview.length },
+    );
+
+    expect(result.mode).toBe("truncated");
+    expect(result.modelText.split(preview)).toHaveLength(2);
+    expect(result.tokenAccounting.estimator).toBe("approximate-model-v1");
+    expect(result.tokenAccounting.modelVisibleTokens).toBe(result.tokenAccounting.retainedTokens);
+    expect(result.tokenAccounting.avoidedModelTokens).toBe(result.tokenAccounting.offloadedTokens);
+  });
 });

@@ -1,4 +1,8 @@
-import { RerankBudgetExceededError } from "@pi-mentis/pi-mentis-core";
+import {
+  RerankBudgetExceededError,
+  estimateModelTokens,
+  utf8TokenUpperBound,
+} from "@pi-mentis/pi-mentis-core";
 
 import type { RerankDocument } from "./contracts.js";
 
@@ -6,11 +10,16 @@ export interface TokenEstimator {
   count(text: string): number;
 }
 
+export class ApproximateModelTokenEstimator implements TokenEstimator {
+  count(text: string): number {
+    return estimateModelTokens(text);
+  }
+}
+
+/** @deprecated Prefer ApproximateModelTokenEstimator for packing and telemetry. */
 export class ConservativeUtf8TokenEstimator implements TokenEstimator {
   count(text: string): number {
-    // A byte-based upper bound is conservative across known text tokenizers and
-    // avoids treating JavaScript character count as a token count.
-    return Math.max(1, Buffer.byteLength(text.normalize("NFKC"), "utf8"));
+    return utf8TokenUpperBound(text);
   }
 }
 

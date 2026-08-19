@@ -1,4 +1,9 @@
-import { contentHash, normalizeText } from "@pi-mentis/pi-mentis-core";
+import {
+  contentHash,
+  estimateModelTokens,
+  normalizeText,
+  utf8TokenUpperBound,
+} from "@pi-mentis/pi-mentis-core";
 
 import type { DocumentNode, KnowledgeChunkDraft, StructuredDocument } from "./types.js";
 
@@ -24,9 +29,16 @@ export const DEFAULT_CODE_CHUNK_POLICY: ChunkPolicy = {
   overlapTokens: 60,
 };
 
+export class ApproximateModelTokenCounter implements TokenCounter {
+  count(text: string): number {
+    return estimateModelTokens(text);
+  }
+}
+
+/** @deprecated Use only as a hard provider-safety upper bound. */
 export class ConservativeByteTokenCounter implements TokenCounter {
   count(text: string): number {
-    return Math.max(1, Buffer.byteLength(text.normalize("NFKC"), "utf8"));
+    return utf8TokenUpperBound(text);
   }
 }
 
@@ -150,7 +162,7 @@ function hardSplit(text: string, maxTokens: number, counter: TokenCounter): read
 
 export function chunkStructuredDocument(
   document: StructuredDocument,
-  counter: TokenCounter = new ConservativeByteTokenCounter(),
+  counter: TokenCounter = new ApproximateModelTokenCounter(),
   policy: ChunkPolicy = DEFAULT_DOCUMENT_CHUNK_POLICY,
   embeddingMaxInputTokens = Number.POSITIVE_INFINITY,
 ): readonly KnowledgeChunkDraft[] {

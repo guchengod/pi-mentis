@@ -2,6 +2,7 @@ export interface MentisHelpOptions {
   readonly configPath: string;
   readonly memory?: boolean;
   readonly knowledge?: boolean;
+  readonly doctor?: boolean;
 }
 
 export function formatMentisHelp(options: MentisHelpOptions): string {
@@ -45,6 +46,9 @@ export function formatMentisHelp(options: MentisHelpOptions): string {
     "",
     "服务：",
     "- /mentis status：查看 Mentis 当前状态。",
+    ...(options.doctor === true
+      ? ["- /mentis doctor：运行只读的本地配置、凭证和 Sidecar 健康检查。"]
+      : []),
     "- /mentis help：显示本帮助。",
     "- 每个 Pi 扩展进程只维护一个 Sidecar；Sidecar 意外退出后会按需自动重启。",
   );

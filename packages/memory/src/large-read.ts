@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { contentHash } from "@pi-mentis/pi-mentis-core";
+
 import type { OffloadedToolResult, ToolResultEnvelope } from "./types.js";
 
 export const MAX_FULL_READ_MODEL_BYTES = 256 * 1024;
@@ -25,6 +27,10 @@ export function readRequestKey(envelope: ReadEnvelope): string | undefined {
     ...(typeof envelope.input["offset"] === "number" ? { offset: envelope.input["offset"] } : {}),
     ...(typeof envelope.input["limit"] === "number" ? { limit: envelope.input["limit"] } : {}),
   });
+}
+
+export function readContentHash(envelope: ReadEnvelope): string {
+  return contentHash(envelope.text);
 }
 
 export function canReturnFullRead(envelope: ReadEnvelope, result: OffloadedToolResult): boolean {

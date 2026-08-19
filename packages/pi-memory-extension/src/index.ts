@@ -45,10 +45,12 @@ import {
   createMemoryService,
   deriveExperienceObservation,
   referencedMemoryIds,
+  readContentHash,
   readRequestKey,
   recoverFullToolResult,
   resolvePiProjectIdentity,
   taskIdentityId,
+  toolResultTokenAccounting,
   TurnContextManager,
   ScopeSemanticPlanner,
   type MemoryService,
@@ -328,7 +330,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
-  const completedLargeReads = new Set<string>();
+  const completedLargeReads = new Map<string, string>();
   let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
   let contextRefreshSequence = 0;
   let evidenceStore: PiEvidenceStore | undefined;
@@ -410,7 +412,13 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
           policy ??= new AdaptivePolicyService(
             storeHandle.store,
             "local:local:pi:pi-mentis-memory",
-            { cooldownMs: config.intelligence.adaptivePolicy.cooldownMs },
+            {
+              cooldownMs: config.intelligence.adaptivePolicy.cooldownMs,
+              baselineParameters: {
+                contextTokens: config.retrieval.contextTokens,
+                rerankCandidateLimit: config.inference.rerank.candidateLimit,
+              },
+            },
           );
           await policy.initialize();
         }
@@ -427,6 +435,9 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         rerankCandidateLimit: config.inference.rerank.candidateLimit,
         rerankCacheEntries: config.inference.rerank.cacheEntries,
         rerankCacheTtlMs: config.inference.rerank.cacheTtlMs,
+        contextTokens: config.retrieval.contextTokens,
+        knowledgeTokens: config.retrieval.knowledgeTokens,
+        memoryTokens: config.retrieval.memoryTokens,
         telemetry,
         ...(effectiveness === undefined ? {} : { effectiveness }),
         ...(policy === undefined ? {} : { policy }),
@@ -1103,13 +1114,17 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       .catch(() => undefined);
     if (result === undefined || result.mode === "inline") return;
     const readKey = readRequestKey(envelope);
+    const currentReadHash = readKey === undefined ? undefined : readContentHash(envelope);
     const isFullRead = canReturnFullRead(envelope, result);
     const resultText = !isFullRead
       ? result.modelText
-      : readKey !== undefined && completedLargeReads.has(readKey)
+      : readKey !== undefined && completedLargeReads.get(readKey) === currentReadHash
         ? compactReadReference(envelope, result)
         : fullReadResult(envelope, result);
-    if (isFullRead && readKey !== undefined) completedLargeReads.add(readKey);
+    if (isFullRead && readKey !== undefined && currentReadHash !== undefined) {
+      completedLargeReads.set(readKey, currentReadHash);
+    }
+    const actualTokenAccounting = toolResultTokenAccounting(envelope.text, resultText);
     return {
       content: [
         { type: "text" as const, text: resultText },
@@ -1117,7 +1132,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       ],
       details: {
         original: event.details,
-        piMentis: { symbolic: result.symbolic, tokenAccounting: result.tokenAccounting },
+        piMentis: { symbolic: result.symbolic, tokenAccounting: actualTokenAccounting },
       },
     };
   });

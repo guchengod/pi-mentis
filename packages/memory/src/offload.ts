@@ -7,20 +7,24 @@ import type {
   ToolResultOffloadPolicy,
   ToolSymbolicResult,
 } from "./types.js";
-import { ConservativeUtf8TokenEstimator } from "@pi-mentis/pi-mentis-inference";
+import { ApproximateModelTokenEstimator } from "@pi-mentis/pi-mentis-inference";
 
 const ERROR_LINE = /(?:\berror\b|\bfailed\b|\bfatal\b|exception|traceback|\bE[A-Z]{2,}\b)/i;
 const PATH_TOKEN = /(?:^|[\s"'`(])((?:\.{0,2}\/|\/)?[\w@.-]+(?:\/[\w@.-]+)+(?::\d+(?::\d+)?)?)/g;
-const tokenEstimator = new ConservativeUtf8TokenEstimator();
+const tokenEstimator = new ApproximateModelTokenEstimator();
 
-function tokenAccounting(original: string, retained: string) {
+export function toolResultTokenAccounting(original: string, modelVisible: string) {
   const originalTokens = tokenEstimator.count(original);
-  const retainedTokens = tokenEstimator.count(retained);
+  const modelVisibleTokens = tokenEstimator.count(modelVisible);
+  const avoidedModelTokens = Math.max(0, originalTokens - modelVisibleTokens);
   return {
-    estimator: "conservative-utf8-v1" as const,
+    estimator: "approximate-model-v1" as const,
     originalTokens,
-    retainedTokens,
-    offloadedTokens: Math.max(0, originalTokens - retainedTokens),
+    modelVisibleTokens,
+    avoidedModelTokens,
+    // Compatibility aliases for existing telemetry consumers.
+    retainedTokens: modelVisibleTokens,
+    offloadedTokens: avoidedModelTokens,
   };
 }
 
@@ -108,7 +112,7 @@ export async function offloadToolResult(
       mode,
       symbolic: summarizeToolResult(envelope, policy),
       modelText: envelope.text,
-      tokenAccounting: tokenAccounting(envelope.text, envelope.text),
+      tokenAccounting: toolResultTokenAccounting(envelope.text, envelope.text),
     };
   }
   const artifact = await evidence.writeArtifact({
@@ -128,14 +132,18 @@ export async function offloadToolResult(
     },
   });
   const symbolic = summarizeToolResult(envelope, policy, artifact);
-  const header = `<pi-mentis-tool-result artifact_id="${artifact.id}" mode="${mode}">\n${JSON.stringify(symbolic, null, 2)}\n</pi-mentis-tool-result>`;
+  const headerSymbolic =
+    mode === "truncated"
+      ? Object.fromEntries(Object.entries(symbolic).filter(([key]) => key !== "preview"))
+      : symbolic;
+  const header = `<pi-mentis-tool-result artifact_id="${artifact.id}" mode="${mode}">\n${JSON.stringify(headerSymbolic, null, 2)}\n</pi-mentis-tool-result>`;
   const modelText =
     mode === "truncated" ? `${header}\n\nPreview:\n${symbolic.preview ?? ""}` : header;
   return {
     mode,
     symbolic,
     modelText,
-    tokenAccounting: tokenAccounting(envelope.text, modelText),
+    tokenAccounting: toolResultTokenAccounting(envelope.text, modelText),
     artifact,
   };
 }

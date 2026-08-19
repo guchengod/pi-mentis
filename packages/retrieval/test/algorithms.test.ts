@@ -8,6 +8,7 @@ import {
   maximalMarginalRelevance,
   preserveLexicalEvidenceFloor,
   reciprocalRankFusion,
+  scaleRetrievalContextBudgets,
   selectContext,
 } from "../src/index.js";
 
@@ -25,6 +26,19 @@ function hit(id: string, kind: SearchHit["kind"], score = 1, tokenCount = 10): S
 }
 
 describe("retrieval algorithms", () => {
+  it("scales configured source budgets with the active context budget", () => {
+    expect(scaleRetrievalContextBudgets(2_000, 2_000, 1_250, 750)).toEqual({
+      total: 2_000,
+      knowledge: 1_250,
+      memory: 750,
+    });
+    expect(scaleRetrievalContextBudgets(1_000, 2_000, 1_250, 750)).toEqual({
+      total: 1_000,
+      knowledge: 625,
+      memory: 375,
+    });
+  });
+
   it("fuses ranks, applies authority/freshness, diversifies, and budgets context", () => {
     const fused = reciprocalRankFusion([
       { weight: 1, hits: [hit("a", "knowledge"), hit("c", "memory")] },

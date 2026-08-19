@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis-memory",
-  "version": "0.1.60",
+  "version": "0.1.61",
   "description": "Standalone Pi Mentis memory extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",
@@ -39,7 +39,8 @@
   "pi": {
     "extensions": [
       "./dist/index.js"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/guchengod/pi-mentis/main/assets/pi-mentis-gallery.png"
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec --external proper-lockfile",

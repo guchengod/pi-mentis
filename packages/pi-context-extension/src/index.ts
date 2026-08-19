@@ -12,8 +12,10 @@ import {
   canReturnFullRead,
   compactReadReference,
   fullReadResult,
+  readContentHash,
   readRequestKey,
   recoverFullToolResult,
+  toolResultTokenAccounting,
   type PiScopeContext,
   type ToolResultEnvelope,
 } from "@pi-mentis/pi-mentis-memory-core";
@@ -113,16 +115,27 @@ function knowledgeResultMessage(action: string, result: unknown): string {
   return formatPiToolJson(result ?? { found: false });
 }
 
+function isReadyStatus(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "ready" in value &&
+    (value as { readonly ready: unknown }).ready === true
+  );
+}
+
 export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Promise<void> {
   let config: PiMentisConfig;
   let configPath: string;
   let piPackageRoot: string;
+  let piRuntimeVersion: string;
   try {
     const installedVersion = await detectInstalledPackageVersion(
       "@earendil-works/pi-coding-agent",
       import.meta.url,
     );
     assertPiCompatibility(installedVersion);
+    piRuntimeVersion = installedVersion;
     piPackageRoot = await findInstalledPackageRoot(
       "@earendil-works/pi-coding-agent",
       import.meta.url,
@@ -154,7 +167,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let sidecarSessionReady = false;
   let automaticRecallWarningShown = false;
   const pendingInlineToolResults: ToolResultEnvelope[] = [];
-  const completedLargeReads = new Set<string>();
+  const completedLargeReads = new Map<string, string>();
   let sessionOpen:
     | {
         readonly clientSessionId: string;
@@ -165,7 +178,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       }
     | undefined;
   const recalledMemoryIds = new Set<string>();
-  const helpText = formatMentisHelp({ configPath, memory: true, knowledge: true });
+  const helpText = formatMentisHelp({ configPath, memory: true, knowledge: true, doctor: true });
   const memorySystemPrompt = createMentisMemorySystemPrompt();
   const sidecar = new MentisSidecarClient({
     onCapsule: (updated) => {
@@ -252,15 +265,83 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.registerCommand("mentis", {
-    description: "Show Pi Mentis help or current status",
+    description: "Show Pi Mentis help, status, or local health diagnostics",
     handler: async (rawArguments, context) => {
       const action = rawArguments.trim() || "help";
       if (action === "help") {
         notifyWhenUiAvailable(context, helpText, "info");
         return;
       }
-      if (action !== "status") {
-        notifyWhenUiAvailable(context, "Usage: /mentis help | /mentis status", "error");
+      if (!["status", "doctor"].includes(action)) {
+        notifyWhenUiAvailable(
+          context,
+          "Usage: /mentis help | /mentis status | /mentis doctor",
+          "error",
+        );
+        return;
+      }
+      if (action === "doctor") {
+        const credentialVariable = config.inference.siliconflow.apiKeyEnv;
+        const checks: Array<{
+          readonly name: string;
+          readonly ok: boolean;
+          readonly detail: string;
+        }> = [
+          {
+            name: "pi_runtime",
+            ok: true,
+            detail: `Pi ${piRuntimeVersion} satisfies the configured minimum ${config.runtime.piVersion}.`,
+          },
+          {
+            name: "credential",
+            ok: (process.env[credentialVariable]?.trim().length ?? 0) > 0,
+            detail: `Environment variable ${credentialVariable} is ${
+              (process.env[credentialVariable]?.trim().length ?? 0) > 0 ? "set" : "not set"
+            }.`,
+          },
+          {
+            name: "storage_configuration",
+            ok: config.storage.rootDir.trim() !== "",
+            detail: `Storage root: ${config.storage.rootDir}`,
+          },
+        ];
+        let sidecarStatus: unknown;
+        try {
+          await ensureSidecarSession();
+          if (clientSessionId === undefined) {
+            throw new Error("Pi session is not initialized yet");
+          }
+          sidecarStatus = await sidecar.call("status", { clientSessionId }, 15_000);
+          checks.push({
+            name: "sidecar",
+            ok: isReadyStatus(sidecarStatus),
+            detail: isReadyStatus(sidecarStatus)
+              ? `Ready (pid ${sidecar.pid ?? "unknown"}).`
+              : "Responded without a ready status.",
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          checks.push({ name: "sidecar", ok: false, detail: message });
+        }
+        const healthy = checks.every((check) => check.ok);
+        const result = {
+          healthy,
+          checks,
+          configuration: {
+            path: configPath,
+            storageRoot: config.storage.rootDir,
+            automaticRecall: config.retrieval.automaticRecall,
+            provider: config.inference.provider,
+            embedding: {
+              model: config.inference.siliconflow.embedding.model,
+              dimensions: config.inference.siliconflow.embedding.dimensions,
+            },
+          },
+          nextStep: healthy
+            ? "Pi Mentis is ready. This diagnostic does not call the remote provider."
+            : `Fix the failed checks, then run /mentis doctor again.`,
+        };
+        notifyWhenUiAvailable(context, formatPiToolJson(result), healthy ? "info" : "warning");
         return;
       }
       try {
@@ -508,13 +589,18 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       );
       if (result === undefined || result.mode === "inline") return;
       const readKey = readRequestKey(recoveredEnvelope);
+      const currentReadHash =
+        readKey === undefined ? undefined : readContentHash(recoveredEnvelope);
       const isFullRead = canReturnFullRead(recoveredEnvelope, result);
       const resultText = !isFullRead
         ? result.modelText
-        : readKey !== undefined && completedLargeReads.has(readKey)
+        : readKey !== undefined && completedLargeReads.get(readKey) === currentReadHash
           ? compactReadReference(recoveredEnvelope, result)
           : fullReadResult(recoveredEnvelope, result);
-      if (isFullRead && readKey !== undefined) completedLargeReads.add(readKey);
+      if (isFullRead && readKey !== undefined && currentReadHash !== undefined) {
+        completedLargeReads.set(readKey, currentReadHash);
+      }
+      const actualTokenAccounting = toolResultTokenAccounting(recoveredEnvelope.text, resultText);
       return {
         content: [
           { type: "text" as const, text: resultText },
@@ -522,7 +608,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ],
         details: {
           original: event.details,
-          piMentis: { symbolic: result.symbolic, tokenAccounting: result.tokenAccounting },
+          piMentis: { symbolic: result.symbolic, tokenAccounting: actualTokenAccounting },
         },
       };
     } catch {

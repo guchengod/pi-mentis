@@ -197,17 +197,26 @@ export class AdaptivePolicyService {
   constructor(
     store: ZvecStore,
     namespace: string,
-    options: { readonly clock?: Clock; readonly cooldownMs?: number } = {},
+    options: {
+      readonly clock?: Clock;
+      readonly cooldownMs?: number;
+      readonly baselineParameters?: Partial<RetrievalPolicyParameters>;
+    } = {},
   ) {
     this.#state = new ZvecStateStore(store);
     this.#clock = options.clock ?? systemClock;
     this.#namespace = namespace;
     this.#cooldownMs = options.cooldownMs ?? 30 * 60_000;
     const createdAt = this.#clock.now();
+    const baselineParameters = {
+      ...DEFAULT_PARAMETERS,
+      ...options.baselineParameters,
+    };
+    validateParameters(baselineParameters, DEFAULT_INVARIANTS);
     this.#active = {
       id: "policy:default",
       state: "active",
-      parameters: DEFAULT_PARAMETERS,
+      parameters: baselineParameters,
       invariants: DEFAULT_INVARIANTS,
       createdAt,
       activatedAt: createdAt,

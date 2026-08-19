@@ -91,6 +91,9 @@ Memory 以不分类的自然语言断言保存，不写入 Predicate、Memory Ty
 
 `/mentis help` 会显示当前实际采用的配置文件路径和完整用法；`/kb help` 是同一份帮助的快捷入口。
 
+安装或配置后运行 `/mentis doctor`。它只检查本地 Pi 版本、凭证变量是否存在、存储配置和
+Sidecar 响应状态；不会发起任何模型或远程 provider 请求，也不会显示 API Key。
+
 ## 数据与安全
 
 - 备份前停止 Pi，整体复制 `storage.rootDir`（默认 `~/.pi/.pi-mentis/zvec`）。

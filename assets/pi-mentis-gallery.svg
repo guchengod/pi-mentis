@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" role="img" aria-labelledby="title desc">
+  <title id="title">Pi Mentis — Pi session, Sidecar, and durable memory</title>
+  <desc id="desc">A dark developer-tool illustration showing a Pi terminal session flowing through a Sidecar into long-term memory and a knowledge base.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10152c"/>
+      <stop offset="0.52" stop-color="#181443"/>
+      <stop offset="1" stop-color="#0d2439"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#57e6ff"/>
+      <stop offset="1" stop-color="#aa7dff"/>
+    </linearGradient>
+    <linearGradient id="sidecar" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2cd5e6"/>
+      <stop offset="1" stop-color="#896bff"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#050819" flood-opacity="0.55"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="675" fill="url(#background)"/>
+  <circle cx="118" cy="102" r="190" fill="#3159bb" opacity="0.12"/>
+  <circle cx="1057" cy="603" r="280" fill="#20b7ce" opacity="0.1"/>
+  <path d="M95 505 C280 390 345 450 506 350 S800 250 1085 365" fill="none" stroke="url(#flow)" stroke-width="3" opacity="0.3"/>
+  <path d="M190 148 C330 265 377 175 532 266 S813 378 1027 197" fill="none" stroke="#80dcff" stroke-width="2" opacity="0.16"/>
+
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="84" y="104" font-size="31" font-weight="700" fill="#f2f6ff">Pi Mentis</text>
+    <text x="84" y="140" font-size="17" fill="#b4c5e7">Long-term memory and knowledge for Pi</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="84" y="218" width="294" height="246" rx="20" fill="#111a35" stroke="#415578" stroke-width="2"/>
+    <rect x="84" y="218" width="294" height="43" rx="20" fill="#1d294c"/>
+    <circle cx="114" cy="239" r="6" fill="#ff7a99"/>
+    <circle cx="136" cy="239" r="6" fill="#ffd36e"/>
+    <circle cx="158" cy="239" r="6" fill="#61e5ae"/>
+    <text x="190" y="245" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#b9c8e4">Pi session</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">
+      <text x="113" y="303" fill="#72e7ff">›</text><text x="137" y="303" fill="#e7efff">remember project decisions</text>
+      <text x="113" y="339" fill="#aa87ff">›</text><text x="137" y="339" fill="#e7efff">search knowledge</text>
+      <text x="113" y="375" fill="#72e7ff">›</text><text x="137" y="375" fill="#e7efff">continue with context</text>
+    </g>
+    <rect x="112" y="405" width="160" height="8" rx="4" fill="#294267"/>
+    <rect x="112" y="426" width="106" height="8" rx="4" fill="#294267"/>
+  </g>
+
+  <g fill="none" stroke="url(#flow)" stroke-width="5" filter="url(#glow)">
+    <path d="M394 341 H492"/>
+    <path d="M708 341 H804"/>
+  </g>
+  <g fill="#8eeaff">
+    <path d="M482 331 l20 10 -20 10z"/>
+    <path d="M794 331 l20 10 -20 10z"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="510" y="245" width="182" height="193" rx="34" fill="url(#sidecar)"/>
+    <rect x="524" y="259" width="154" height="165" rx="26" fill="#151b42" opacity="0.82"/>
+    <path d="M563 326 h24 v-24 h28 v24 h24 v28 h-24 v24 h-28 v-24 h-24z" fill="#76edff" filter="url(#glow)"/>
+    <text x="601" y="396" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="16" font-weight="700" fill="#ecf8ff">SIDECAR</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="822" y="204" width="288" height="288" rx="28" fill="#131b38" stroke="#4c6089" stroke-width="2"/>
+    <rect x="849" y="239" width="232" height="84" rx="16" fill="#1c3356"/>
+    <path d="M875 272 h36 l12 14 -12 14 h-36 l-12-14z" fill="#6eeaff" opacity="0.9"/>
+    <text x="943" y="280" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="700" fill="#eff7ff">Memory</text>
+    <text x="943" y="303" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#a9c4e8">preferences · decisions · history</text>
+    <rect x="849" y="344" width="232" height="84" rx="16" fill="#292252"/>
+    <path d="M875 372 h38 v30 h-38z" fill="#af8cff"/>
+    <path d="M881 366 h26 l6 6 h-38z" fill="#d1b7ff"/>
+    <text x="943" y="386" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="17" font-weight="700" fill="#f5f0ff">Knowledge</text>
+    <text x="943" y="409" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="13" fill="#c8b9f2">docs · code · web sources</text>
+    <text x="966" y="465" text-anchor="middle" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="14" fill="#72e7ff">durable · scoped · safe</text>
+  </g>
+
+  <g transform="translate(84 572)" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <rect width="130" height="36" rx="18" fill="#1f4863"/>
+    <circle cx="20" cy="18" r="5" fill="#6eeaff"/>
+    <text x="36" y="23" font-size="14" font-weight="600" fill="#dff8ff">Pi native</text>
+    <rect x="146" width="168" height="36" rx="18" fill="#382b68"/>
+    <circle cx="166" cy="18" r="5" fill="#b391ff"/>
+    <text x="182" y="23" font-size="14" font-weight="600" fill="#f0eaff">Private local store</text>
+    <rect x="330" width="151" height="36" rx="18" fill="#1c4a46"/>
+    <circle cx="350" cy="18" r="5" fill="#77edb4"/>
+    <text x="366" y="23" font-size="14" font-weight="600" fill="#e4fff2">Safe retrieval</text>
+  </g>
+</svg>

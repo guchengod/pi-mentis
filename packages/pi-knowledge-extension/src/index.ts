@@ -512,6 +512,9 @@ export default async function piMentisKnowledgeExtension(pi: ExtensionAPI): Prom
         rerankCandidateLimit: config.inference.rerank.candidateLimit,
         rerankCacheEntries: config.inference.rerank.cacheEntries,
         rerankCacheTtlMs: config.inference.rerank.cacheTtlMs,
+        contextTokens: config.retrieval.contextTokens,
+        knowledgeTokens: config.retrieval.knowledgeTokens,
+        memoryTokens: config.retrieval.memoryTokens,
       });
     },
   });

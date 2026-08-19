@@ -1,3 +1,5 @@
+import { estimateModelTokens } from "@pi-mentis/pi-mentis-core";
+
 import type { PublicRecallHit, PublicRecallResult } from "./memory-tools.js";
 
 export interface RecentAssertion {
@@ -119,7 +121,7 @@ export async function projectDurablePendingAutomaticRecall<
       kind: "memory",
       text: record.content,
       score: bestScore + 1 - index / 100,
-      tokenCount: Math.max(1, Math.ceil(record.content.length / 4)),
+      tokenCount: estimateModelTokens(record.content),
       authority: record.authority ?? fallback.authority,
       namespace: fallback.namespace,
       contentHash: `pending:${work.incomingId}`,

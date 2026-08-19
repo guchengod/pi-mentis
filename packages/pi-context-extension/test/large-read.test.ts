@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   compactReadReference,
   fullReadResult,
+  readContentHash,
   readRequestKey,
+  toolResultTokenAccounting,
 } from "@pi-mentis/pi-mentis-memory-core";
 
 const artifactId = "a".repeat(64);
@@ -31,7 +33,7 @@ describe("large read results", () => {
     },
     modelText: "preview",
     tokenAccounting: {
-      estimator: "conservative-utf8-v1" as const,
+      estimator: "approximate-model-v1" as const,
       originalTokens: 10,
       retainedTokens: 2,
       offloadedTokens: 8,
@@ -40,14 +42,18 @@ describe("large read results", () => {
 
   it("returns the complete first read and a retrievable artifact reference", () => {
     const text = fullReadResult(envelope, result);
+    const accounting = toolResultTokenAccounting(envelope.text, text);
 
     expect(text).toContain(envelope.text);
     expect(text).toContain(artifactId);
     expect(text).toContain('search_memory({ id: "artifact-id", query: "focused keywords" })');
+    expect(accounting.modelVisibleTokens).toBeGreaterThan(accounting.originalTokens);
+    expect(accounting.avoidedModelTokens).toBe(0);
   });
 
-  it("uses one stable key and omits the preview from repeated-read summaries", () => {
+  it("separates request identity from content identity and omits repeated previews", () => {
     expect(readRequestKey(envelope)).toBe(readRequestKey({ ...envelope, text: "different" }));
+    expect(readContentHash(envelope)).not.toBe(readContentHash({ ...envelope, text: "different" }));
 
     const text = compactReadReference(envelope, result);
     expect(text).toContain(artifactId);

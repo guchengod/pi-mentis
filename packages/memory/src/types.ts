@@ -822,9 +822,13 @@ export interface OffloadedToolResult {
 }
 
 export interface ToolResultTokenAccounting {
-  readonly estimator: "conservative-utf8-v1";
+  readonly estimator: "approximate-model-v1" | "conservative-utf8-v1";
   readonly originalTokens: number;
+  readonly modelVisibleTokens?: number;
+  readonly avoidedModelTokens?: number;
+  /** @deprecated Compatibility alias for modelVisibleTokens. */
   readonly retainedTokens: number;
+  /** @deprecated Compatibility alias for avoidedModelTokens. */
   readonly offloadedTokens: number;
 }
 
