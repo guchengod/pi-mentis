@@ -14,6 +14,10 @@ const alias = {
   "@pi-mentis/pi-mentis-memory-core": path.join(root, "packages/memory/src/index.ts"),
   "@pi-mentis/pi-mentis-retrieval": path.join(root, "packages/retrieval/src/index.ts"),
   "@pi-mentis/pi-mentis-pi-capabilities": path.join(root, "packages/pi-capabilities/src/index.ts"),
+  "@pi-mentis/pi-mentis-pi-extension-support": path.join(
+    root,
+    "packages/pi-extension-support/src/index.ts",
+  ),
 };
 
 export default defineConfig({
