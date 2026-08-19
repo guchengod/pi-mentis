@@ -1,4 +1,5 @@
 import {
+  EvidenceAuthority,
   estimateModelTokens,
   stableHash,
   systemClock,
@@ -25,6 +26,7 @@ export interface TaskEpisodeTurn {
   readonly activeResources: readonly string[];
   readonly artifactIds: readonly string[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly evidence: readonly TaskEpisodeDigestEvidence[];
   readonly verifiedEvidenceIds?: readonly string[];
   readonly outcome: OutcomeStatus;
   readonly startedAt: number;
@@ -36,6 +38,7 @@ export interface TaskEpisode {
   readonly id: string;
   readonly namespace: string;
   readonly taskId: string;
+  readonly sessionId: string;
   readonly repositoryId?: string;
   readonly projectId?: string;
   readonly branchId: string;
@@ -57,6 +60,9 @@ export interface TaskEpisodeDigestEvidence {
   readonly kind: EvidenceRef["kind"];
   readonly text: string;
   readonly verified: boolean;
+  readonly structural: boolean;
+  readonly sourceKind: "user" | "tool" | "verification" | "manifest";
+  readonly authority: EvidenceAuthority;
 }
 
 export interface TaskEpisodeDigest {
@@ -91,6 +97,54 @@ function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
 
 function eventRef(event: PiEvent): EvidenceRef {
   return { kind: "event", id: event.id, observedAt: event.timestamp };
+}
+
+function eventEvidence(
+  event: PiEvent,
+  calls: ReadonlyMap<string, PiEvent>,
+): TaskEpisodeDigestEvidence {
+  const result = object(event.payload["result"]);
+  const command =
+    typeof event.payload["command"] === "string" ? event.payload["command"] : undefined;
+  const text =
+    event.kind === "goal"
+      ? String(event.payload["goal"] ?? "goal")
+      : event.kind === "steering"
+        ? String(event.payload["updatedGoal"] ?? "steering")
+        : event.kind === "verification"
+          ? `${command ?? "verification"}: ${String(event.payload["status"] ?? "unknown")}`
+          : event.kind === "tool_call"
+            ? (toolSummary(event) ?? `tool call ${event.id}`)
+            : event.kind === "tool_result" || event.kind === "file_edit"
+              ? `${
+                  event.toolCallId === undefined
+                    ? String(result?.["tool"] ?? event.kind)
+                    : (toolSummary(calls.get(event.toolCallId) ?? event) ?? event.kind)
+                }: ${String(result?.["status"] ?? "unknown")}`
+              : `${event.kind}: ${JSON.stringify(event.payload)}`;
+  const sourceKind =
+    event.kind === "goal" || event.kind === "steering"
+      ? "user"
+      : event.kind === "verification"
+        ? "verification"
+        : /(?:^|[/\\])(?:package\.json|pnpm-lock\.yaml|pyproject\.toml|Cargo\.toml)\b/iu.test(text)
+          ? "manifest"
+          : "tool";
+  const verified = event.kind === "verification" && event.payload["status"] === "passed";
+  return {
+    id: event.id,
+    kind: "event",
+    text: safeSummary(boundedText(text, 500), 500),
+    verified,
+    structural: sourceKind === "manifest" && result?.["status"] === "completed",
+    sourceKind,
+    authority:
+      sourceKind === "user"
+        ? EvidenceAuthority.UserCurrentInstruction
+        : sourceKind === "manifest" || sourceKind === "verification"
+          ? EvidenceAuthority.VerifiedToolObservation
+          : EvidenceAuthority.EpisodicMemory,
+  };
 }
 
 function resultStatus(event: PiEvent): "completed" | "failed" | undefined {
@@ -169,7 +223,8 @@ function turnFromEpisode(
       .slice(-8),
     activeResources: [...new Set(activeResources)].slice(-32),
     artifactIds: [...new Set(artifactIds)].slice(-32),
-    evidenceRefs: events.map(eventRef).slice(-128),
+    evidenceRefs: validPath.map(eventRef).slice(-128),
+    evidence: validPath.map((event) => eventEvidence(event, calls)).slice(-128),
     verifiedEvidenceIds: validPath
       .filter((event) => event.kind === "verification" && event.payload["status"] === "passed")
       .map((event) => event.id)
@@ -212,66 +267,81 @@ export class TaskEpisodeService {
     const namespace = securityNamespaceForScope(input.scopeContext);
     const branchId = input.scopeContext.branchId ?? input.episode.branchId ?? "root";
     const id = taskEpisodeId(namespace, input.taskId, branchId);
-    const existing = (await this.#state.get<TaskEpisode>(id))?.value;
-    if (existing?.episodeIds.includes(input.episode.id)) return existing;
     const turn = turnFromEpisode(input.episode, input.events, input.outcome);
     const now = this.#clock.now();
     const state = stateForOutcome(input.outcome);
-    const task: TaskEpisode = {
-      version: 1,
+    const stored = await this.#state.mutate<TaskEpisode>({
       id,
+      kind: "task-episode-v1",
       namespace,
-      taskId: input.taskId,
-      ...(input.scopeContext.repositoryId === undefined
-        ? {}
-        : { repositoryId: input.scopeContext.repositoryId }),
-      ...(input.scopeContext.projectId === undefined
-        ? {}
-        : { projectId: input.scopeContext.projectId }),
-      branchId,
-      ...(input.scopeContext.parentBranchId === undefined
-        ? {}
-        : { parentBranchId: input.scopeContext.parentBranchId }),
-      episodeIds: [...(existing?.episodeIds ?? []), input.episode.id].slice(-256),
-      state,
-      verification:
-        input.outcome.verificationStatus === "passed"
-          ? "passed"
-          : input.outcome.verificationStatus === "failed"
-            ? "failed"
-            : (existing?.verification ?? "unknown"),
-      turns: [...(existing?.turns ?? []), turn].slice(-128),
-      recalledMemoryIds: [
-        ...new Set([
-          ...(existing?.recalledMemoryIds ?? []),
-          ...(input.workingMemory?.recalledMemoryIds ?? []),
-        ]),
-      ].slice(-64),
-      workingMemoryDecisions: [
-        ...new Set([
-          ...(existing?.workingMemoryDecisions ?? []),
-          ...(input.workingMemory?.decisions
-            .filter((entry) => entry.state === "active" || entry.state === "confirmed")
-            .map((entry) => entry.text) ?? []),
-        ]),
-      ].slice(-32),
-      confirmedWorkingFacts: [
-        ...new Set([
-          ...(existing?.confirmedWorkingFacts ?? []),
-          ...(input.workingMemory?.confirmed
-            .filter((entry) => entry.state === "confirmed")
-            .map((entry) => entry.text) ?? []),
-        ]),
-      ].slice(-64),
-      startedAt: existing?.startedAt ?? input.episode.startedAt,
-      updatedAt: now,
-      ...(state === "active" ? {} : { endedAt: input.episode.endedAt ?? now }),
-    };
-    await this.#state.put(
-      { id, kind: "task-episode-v1", namespace, value: task },
-      { status: task.state, now },
-    );
-    return task;
+      reduce: (record) => {
+        const existing = record?.value;
+        if (existing?.episodeIds.includes(input.episode.id)) {
+          return { value: existing, status: existing.state, now: existing.updatedAt };
+        }
+        const invalidatesEarlierTurns = turn.steeringEvents.length > 0;
+        const task: TaskEpisode = {
+          version: 1,
+          id,
+          namespace,
+          taskId: input.taskId,
+          sessionId: input.scopeContext.sessionId ?? input.episode.sessionId,
+          ...(input.scopeContext.repositoryId === undefined
+            ? {}
+            : { repositoryId: input.scopeContext.repositoryId }),
+          ...(input.scopeContext.projectId === undefined
+            ? {}
+            : { projectId: input.scopeContext.projectId }),
+          branchId,
+          ...(input.scopeContext.parentBranchId === undefined
+            ? {}
+            : { parentBranchId: input.scopeContext.parentBranchId }),
+          episodeIds: [
+            ...(invalidatesEarlierTurns ? [] : (existing?.episodeIds ?? [])),
+            input.episode.id,
+          ].slice(-256),
+          state,
+          verification:
+            input.outcome.verificationStatus === "passed"
+              ? "passed"
+              : input.outcome.verificationStatus === "failed"
+                ? "failed"
+                : invalidatesEarlierTurns
+                  ? "unknown"
+                  : (existing?.verification ?? "unknown"),
+          turns: [...(invalidatesEarlierTurns ? [] : (existing?.turns ?? [])), turn].slice(-128),
+          recalledMemoryIds: [
+            ...new Set([
+              ...(existing?.recalledMemoryIds ?? []),
+              ...(input.workingMemory?.recalledMemoryIds ?? []),
+            ]),
+          ].slice(-64),
+          workingMemoryDecisions: [
+            ...new Set([
+              ...(invalidatesEarlierTurns ? [] : (existing?.workingMemoryDecisions ?? [])),
+              ...(input.workingMemory?.decisions
+                .filter((entry) => entry.state === "active" || entry.state === "confirmed")
+                .map((entry) => entry.text) ?? []),
+            ]),
+          ].slice(-32),
+          confirmedWorkingFacts: [
+            ...new Set([
+              ...(invalidatesEarlierTurns ? [] : (existing?.confirmedWorkingFacts ?? [])),
+              ...(input.workingMemory?.confirmed
+                .filter((entry) => entry.state === "confirmed")
+                .map((entry) => entry.text) ?? []),
+            ]),
+          ].slice(-64),
+          startedAt: invalidatesEarlierTurns
+            ? input.episode.startedAt
+            : (existing?.startedAt ?? input.episode.startedAt),
+          updatedAt: now,
+          ...(state === "active" ? {} : { endedAt: input.episode.endedAt ?? now }),
+        };
+        return { value: task, status: task.state, now };
+      },
+    });
+    return stored.value;
   }
 
   async get(namespace: string, taskId: string, branchId: string): Promise<TaskEpisode | undefined> {
@@ -280,10 +350,16 @@ export class TaskEpisodeService {
 
   async checkpoint(task: TaskEpisode, options: OperationOptions = {}): Promise<void> {
     if (options.signal?.aborted) throw options.signal.reason;
-    await this.#state.put(
-      { id: task.id, kind: "task-episode-v1", namespace: task.namespace, value: task },
-      { status: task.state, now: this.#clock.now() },
-    );
+    await this.#state.mutate<TaskEpisode>({
+      id: task.id,
+      kind: "task-episode-v1",
+      namespace: task.namespace,
+      reduce: (current) => {
+        const value =
+          current !== undefined && current.value.updatedAt > task.updatedAt ? current.value : task;
+        return { value, status: value.state, now: value.updatedAt };
+      },
+    });
   }
 }
 
@@ -333,19 +409,22 @@ export function createTaskEpisodeDigest(task: TaskEpisode, maxTokens: number): T
     confirmedWorkingFacts: [...task.confirmedWorkingFacts],
     episodeIds: [...task.episodeIds],
     evidence: task.turns
-      .flatMap((turn) =>
-        turn.evidenceRefs.map((ref) => ({
-          id: ref.id,
-          kind: ref.kind,
-          text: boundedText(
-            [...turn.failures, ...turn.successfulActions, ...turn.verifications].join("; ") ||
-              turn.goal,
-            500,
-          ),
-          verified:
-            turn.outcome.verificationStatus === "passed" &&
-            (turn.verifiedEvidenceIds ?? []).includes(ref.id),
-        })),
+      .flatMap(
+        (turn) =>
+          turn.evidence ??
+          turn.evidenceRefs.map((ref) => ({
+            id: ref.id,
+            kind: ref.kind,
+            text: boundedText(
+              [...turn.failures, ...turn.successfulActions, ...turn.verifications].join("; ") ||
+                turn.goal,
+              500,
+            ),
+            verified: (turn.verifiedEvidenceIds ?? []).includes(ref.id),
+            structural: false,
+            sourceKind: "tool" as const,
+            authority: EvidenceAuthority.EpisodicMemory,
+          })),
       )
       .filter((entry, index, all) => all.findIndex((item) => item.id === entry.id) === index)
       .slice(-128),
@@ -353,12 +432,12 @@ export function createTaskEpisodeDigest(task: TaskEpisode, maxTokens: number): T
   const trimOrder: Array<keyof typeof mutable> = [
     "activeResources",
     "recalledMemoryIds",
-    "steeringEvents",
     "failures",
     "successfulActions",
     "confirmedWorkingFacts",
     "workingMemoryDecisions",
     "goals",
+    "steeringEvents",
     "evidence",
     "episodeIds",
     "artifactIds",

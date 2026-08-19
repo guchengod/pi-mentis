@@ -895,7 +895,8 @@ export interface ExperienceCandidate {
   readonly excludesWhen: readonly string[];
   readonly successes: number;
   readonly failures: number;
-  readonly state: "observed" | "evaluating" | "qualified" | "promoted" | "rejected";
+  readonly state:
+    "observed" | "evaluating" | "qualified" | "promoted" | "degraded" | "retired" | "rejected";
   readonly capabilityGaps: readonly string[];
   readonly generationContext: readonly string[];
   readonly validationPlan: readonly string[];
@@ -904,13 +905,23 @@ export interface ExperienceCandidate {
   readonly generalizedSteps?: readonly string[];
   readonly successCriteria?: readonly string[];
   readonly applicabilityContext?: Readonly<Record<string, string>>;
+  readonly operationPattern?: readonly string[];
+  readonly outcomes?: readonly ExperienceOutcome[];
+  readonly promotedMemoryId?: string;
+  readonly knowledgeRevision?: number;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
 
 export interface ExperienceOutcome {
+  readonly outcomeId: string;
+  readonly taskEpisodeId: string;
+  readonly episodeIds: readonly string[];
+  readonly sessionId: string;
+  readonly branchId: string;
   readonly succeeded: boolean;
   readonly evidence: EvidenceRef;
+  readonly verificationEvidenceIds: readonly string[];
   readonly cost: number;
   readonly durationMs: number;
   readonly environment: Readonly<Record<string, string>>;

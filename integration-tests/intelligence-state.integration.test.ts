@@ -109,6 +109,7 @@ describe("V2 intelligence state on real Zvec", () => {
       confidence: 0.95,
       durability: 0.9,
       evidenceIds: [evidenceId],
+      support: [{ evidenceId, relation: "entailed" as const }],
     });
     const observePreference = (sessionId: string, evidenceId: string) =>
       candidates.observe({
@@ -122,6 +123,10 @@ describe("V2 intelligence state on real Zvec", () => {
             namespace,
             text: "I usually prefer minimal repairs",
             verified: false,
+            sourceKind: "user" as const,
+            firstPersonPreferenceEvidence: true,
+            allowedScopeCeiling: "user" as const,
+            authority: EvidenceAuthority.UserHistoricalStatement,
           },
         ],
         observationId: `preference:${sessionId}`,
@@ -168,8 +173,14 @@ describe("V2 intelligence state on real Zvec", () => {
     });
     for (let index = 1; index <= 3; index++) {
       await experience.recordOutcome(procedure.id, {
+        outcomeId: `outcome:${index}`,
+        taskEpisodeId: `task-episode:${index}`,
+        episodeIds: [`episode:${index}`],
+        sessionId: `session:${index}`,
+        branchId: "feature",
         succeeded: true,
         evidence: { kind: "event", id: `procedure:${index}`, observedAt: index },
+        verificationEvidenceIds: [`verification:${index}`],
         cost: 0,
         durationMs: 1,
         environment: { os: "darwin", runtime: "node", repositoryId: "repo:a" },

@@ -20,6 +20,17 @@ export interface PutStateOptions {
   readonly now?: number;
 }
 
+export interface MutateStateOptions {
+  readonly maxRetries?: number;
+  readonly now?: number;
+}
+
+export interface StateMutation<T extends object> {
+  readonly value: T;
+  readonly status?: string;
+  readonly now?: number;
+}
+
 export class StateRevisionConflictError extends Error {
   constructor(
     readonly id: string,
@@ -116,6 +127,44 @@ export class ZvecStateStore {
       await this.#store.upsertScalar(this.#collection, [record]);
       return state;
     });
+  }
+
+  /**
+   * Applies a pure reducer with optimistic concurrency control. Reducers may be replayed after a
+   * revision conflict, so callers must keep side effects outside the reducer and derive duplicate
+   * protection from stable observation/outcome identities.
+   */
+  async mutate<T extends object>(
+    input: {
+      readonly id: string;
+      readonly kind: string;
+      readonly namespace: string;
+      readonly reduce: (current: StateRecord<T> | undefined) => StateMutation<T>;
+    },
+    options: MutateStateOptions = {},
+  ): Promise<StateRecord<T>> {
+    const maxRetries = Math.max(0, options.maxRetries ?? 8);
+    for (let attempt = 0; ; attempt++) {
+      const current = await this.get<T>(input.id);
+      const mutation = input.reduce(current);
+      try {
+        return await this.put(
+          {
+            id: input.id,
+            kind: input.kind,
+            namespace: input.namespace,
+            value: mutation.value,
+          },
+          {
+            expectedRevision: current?.revision ?? 0,
+            ...(mutation.status === undefined ? {} : { status: mutation.status }),
+            now: mutation.now ?? options.now ?? Date.now(),
+          },
+        );
+      } catch (error) {
+        if (!(error instanceof StateRevisionConflictError) || attempt >= maxRetries) throw error;
+      }
+    }
   }
 
   async remove(id: string, expectedRevision?: number): Promise<boolean> {

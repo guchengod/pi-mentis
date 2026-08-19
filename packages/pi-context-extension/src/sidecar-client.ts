@@ -49,6 +49,7 @@ function sessionKey(input: SessionOpenParams | undefined): string | undefined {
     input.clientSessionId,
     input.cwd,
     input.branchId,
+    input.branchGeneration,
     input.parentBranchId ?? "",
     input.sessionMode,
   ]);
@@ -165,6 +166,7 @@ export class MentisSidecarClient {
         cwd: this.#sessionOpen.cwd,
         sessionMode: this.#sessionOpen.sessionMode,
         branchId: notification.params.branchId,
+        branchGeneration: notification.params.branchGeneration,
         ...(notification.params.parentBranchId === undefined
           ? {}
           : { parentBranchId: notification.params.parentBranchId }),

@@ -1,4 +1,4 @@
-import type { EvidenceRef } from "@pi-mentis/pi-mentis-core";
+import { stableHash, type EvidenceRef } from "@pi-mentis/pi-mentis-core";
 
 import type {
   ExperienceCandidate,
@@ -100,8 +100,19 @@ export function deriveExperienceObservation(
       ],
     },
     outcome: {
+      outcomeId: stableHash(
+        "experience-outcome:v2",
+        episode.id,
+        evidence.id,
+        outcome.executionStatus === "success" ? "success" : "failure",
+      ),
+      taskEpisodeId: episode.taskId ?? episode.id,
+      episodeIds: [episode.id],
+      sessionId: episode.sessionId,
+      branchId: episode.branchId ?? "root",
       succeeded: outcome.executionStatus === "success" && outcome.verificationStatus === "passed",
       evidence,
+      verificationEvidenceIds: [verification.id],
       cost: 0,
       durationMs: Math.max(0, (episode.endedAt ?? episode.startedAt) - episode.startedAt),
       environment,
@@ -135,8 +146,15 @@ export function deriveTaskEpisodeExperienceObservation(
     ...(task.repositoryId === undefined ? {} : { repositoryId: task.repositoryId }),
     ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
     ...Object.fromEntries(
-      Object.entries(environment).filter(([key]) => !/(embedding|rerank|model)/iu.test(key)),
+      Object.entries(environment)
+        .filter(([key]) => !/(embedding|rerank|model|runtimeVersion)/iu.test(key))
+        .map(([key, value]) => [key, value]),
     ),
+    ...(environment["runtimeVersion"] === undefined
+      ? {}
+      : {
+          runtimeConstraint: `${environment["runtime"] ?? "runtime"}>=${environment["runtimeVersion"].replace(/^v/u, "").split(".")[0] ?? environment["runtimeVersion"]}`,
+        }),
   };
   return {
     candidate: {
@@ -160,11 +178,24 @@ export function deriveTaskEpisodeExperienceObservation(
       validationPlan: procedure.successCriteria,
     },
     outcome: {
+      outcomeId: stableHash(
+        "experience-outcome:v2",
+        task.id,
+        selected.id,
+        task.state === "completed" ? "success" : "failure",
+      ),
+      taskEpisodeId: task.id,
+      episodeIds: task.episodeIds,
+      sessionId: task.sessionId ?? scopeContext.sessionId ?? "unknown-session",
+      branchId: task.branchId,
       succeeded: task.state === "completed" && digest.verification === "passed",
       evidence: evidenceRef,
+      verificationEvidenceIds: digest.evidence
+        .filter((entry) => entry.verified)
+        .map((entry) => entry.id),
       cost: 0,
       durationMs: Math.max(0, (task.endedAt ?? task.updatedAt) - task.startedAt),
-      environment,
+      environment: applicabilityContext,
     },
   };
 }

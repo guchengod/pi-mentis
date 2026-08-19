@@ -63,6 +63,8 @@ pi
 
 Working Memory 默认开启。你可以连续说“继续”“按刚才的方向修复”“先处理剩余失败项”，Pi Mentis 会保留当前目标、已确认事实、决策、假设、未完成事项、最近结果和 Artifact 引用。它按原生 Session + Branch 隔离，重启或压缩后恢复；分叉会复制起点，但子分支之后的变化不会污染父分支。
 
+Working Memory 与自动 Capsule 共享统一的模型可见预算（默认 `1200` tokens）。系统先保留当前 Goal、Open loops 和 Decisions，再用剩余预算注入已确认事实与长期记忆，避免“已经知道什么”挤掉“现在还要做什么”。
+
 这条能力不依赖自动召回，即使 `retrieval.automaticRecall` 为 `false` 也会工作。每轮开始只注入 Sidecar 已发布到内存中的有界快照，不读取磁盘、不查询 Zvec、也不发起模型或 IPC 请求。
 
 ### 让 Agent 记住长期信息

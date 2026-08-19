@@ -40,6 +40,13 @@ export interface CandidateEvidence {
   readonly text: string;
   readonly verified: boolean;
   readonly structural?: boolean;
+  readonly sourceKind?: "user" | "tool" | "verification" | "manifest";
+  readonly polarity?: "positive" | "negative";
+  readonly firstPersonPreferenceEvidence?: boolean;
+  readonly explicitCorrection?: boolean;
+  readonly explicitCommitment?: boolean;
+  readonly allowedScopeCeiling?: "task" | "repository" | "project" | "user";
+  readonly authority?: EvidenceAuthority;
 }
 
 export interface MemoryCandidateObservation {
@@ -66,6 +73,7 @@ export interface MemoryCandidate {
   readonly stability: number;
   readonly utility: number;
   readonly confidence: number;
+  readonly derivedAuthority?: EvidenceAuthority;
   readonly firstObservedAt: number;
   readonly lastObservedAt: number;
   readonly expiresAt: number;
@@ -78,6 +86,10 @@ export interface MemoryCandidateProposal {
   readonly confidence: number;
   readonly durability: number;
   readonly evidenceIds: readonly string[];
+  readonly support?: readonly {
+    readonly evidenceId: string;
+    readonly relation: "entailed" | "contradicted" | "insufficient";
+  }[];
 }
 
 function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
@@ -102,6 +114,7 @@ export function parseMemoryCandidateProposals(
     const confidence = entry?.["confidence"];
     const durability = entry?.["durability"];
     const evidenceIds = entry?.["evidenceIds"];
+    const rawSupport = entry?.["support"];
     if (
       typeof content !== "string" ||
       typeof scopeHint !== "string" ||
@@ -121,12 +134,32 @@ export function parseMemoryCandidateProposals(
     ) {
       throw new Error("Memory candidate cognition returned an invalid candidate");
     }
+    if (
+      !Array.isArray(rawSupport) ||
+      rawSupport.length === 0 ||
+      rawSupport.some((raw) => {
+        const support = object(raw);
+        return (
+          typeof support?.["evidenceId"] !== "string" ||
+          !["entailed", "contradicted", "insufficient"].includes(String(support?.["relation"]))
+        );
+      })
+    ) {
+      throw new Error("Memory candidate cognition returned invalid support judgments");
+    }
     return {
       content: boundedText(content, options.maxCharacters),
       scopeHint: scopeHint as MemoryCandidateProposal["scopeHint"],
       confidence,
       durability,
       evidenceIds: evidenceIds as readonly string[],
+      support: rawSupport.map((raw) => {
+        const support = object(raw) as Readonly<Record<string, unknown>>;
+        return {
+          evidenceId: support["evidenceId"] as string,
+          relation: support["relation"] as "entailed" | "contradicted" | "insufficient",
+        };
+      }),
     };
   });
 }
@@ -230,6 +263,12 @@ export function buildCandidateCognitionInput(input: {
       text: boundedText(entry.text, 500),
       verified: entry.verified,
       structural: entry.structural === true,
+      sourceKind: entry.sourceKind,
+      polarity: entry.polarity ?? claimPolarity(entry.text),
+      firstPersonPreferenceEvidence: entry.firstPersonPreferenceEvidence === true,
+      explicitCorrection: entry.explicitCorrection === true,
+      explicitCommitment: entry.explicitCommitment === true,
+      allowedScopeCeiling: entry.allowedScopeCeiling ?? "task",
     })),
   };
   const serialized = fitTextToModelTokens(JSON.stringify(payload), input.maxTokens);
@@ -250,31 +289,66 @@ function isUserPreference(text: string): boolean {
   return USER_PREFERENCE.test(text);
 }
 
+const NEGATIVE_CLAIM =
+  /(?:\b(?:not|never|no|without|fail(?:ed|s|ing)?)\b|不(?:是|会|能|再|通过|喜欢)?|未|无|失败)/iu;
+
+function claimPolarity(text: string): "positive" | "negative" {
+  return NEGATIVE_CLAIM.test(text) ? "negative" : "positive";
+}
+
+const SCOPE_RANK = { task: 0, repository: 1, project: 2, user: 3 } as const;
+
+function scopeCeiling(evidence: readonly CandidateEvidence[]): keyof typeof SCOPE_RANK {
+  return evidence.reduce<keyof typeof SCOPE_RANK>((ceiling, entry) => {
+    const next = entry.allowedScopeCeiling ?? "task";
+    return SCOPE_RANK[next] < SCOPE_RANK[ceiling] ? next : ceiling;
+  }, "user");
+}
+
 function proposedScope(
   source: MemoryCandidateObservationSource,
   proposal: MemoryCandidateProposal,
   context: PiScopeContext,
+  evidence: readonly CandidateEvidence[],
 ): MemoryScope {
+  const ceiling = scopeCeiling(evidence);
   if (
     source === "user_statement" &&
     isUserPreference(proposal.content) &&
-    proposal.scopeHint === "user"
+    proposal.scopeHint === "user" &&
+    ceiling === "user" &&
+    evidence.some((entry) => entry.firstPersonPreferenceEvidence === true)
   ) {
     return { kind: "user", id: context.userId };
   }
   if (source === "verified_tool" || source === "episode_consolidation") {
-    if (context.repositoryId !== undefined) return { kind: "repository", id: context.repositoryId };
-    if (context.projectId !== undefined) return { kind: "project", id: context.projectId };
+    if (ceiling !== "task" && context.repositoryId !== undefined)
+      return { kind: "repository", id: context.repositoryId };
+    if (SCOPE_RANK[ceiling] >= SCOPE_RANK.project && context.projectId !== undefined)
+      return { kind: "project", id: context.projectId };
     return { kind: "task", id: context.taskId ?? context.sessionId ?? context.userId };
   }
   if (source === "user_commitment" || source === "user_correction") {
-    if (proposal.scopeHint === "repository" && context.repositoryId !== undefined) {
+    if (
+      proposal.scopeHint === "repository" &&
+      SCOPE_RANK[ceiling] >= SCOPE_RANK.repository &&
+      context.repositoryId !== undefined
+    ) {
       return { kind: "repository", id: context.repositoryId };
     }
-    if (proposal.scopeHint === "project" && context.projectId !== undefined) {
+    if (
+      proposal.scopeHint === "project" &&
+      SCOPE_RANK[ceiling] >= SCOPE_RANK.project &&
+      context.projectId !== undefined
+    ) {
       return { kind: "project", id: context.projectId };
     }
-    if (proposal.scopeHint === "user" && isUserPreference(proposal.content)) {
+    if (
+      proposal.scopeHint === "user" &&
+      ceiling === "user" &&
+      isUserPreference(proposal.content) &&
+      evidence.some((entry) => entry.firstPersonPreferenceEvidence === true)
+    ) {
       return { kind: "user", id: context.userId };
     }
   }
@@ -295,6 +369,15 @@ function eligibility(
   policy: MemoryFormationPolicy,
 ): MemoryCandidateState {
   const observations = candidate.observations.length;
+  const independentObservations = new Set(
+    candidate.observations.map((entry) =>
+      entry.sessionId !== undefined
+        ? `session:${entry.sessionId}`
+        : entry.taskId !== undefined
+          ? `task:${entry.taskId}`
+          : `evidence:${[...entry.evidenceIds].sort().join(",")}`,
+    ),
+  ).size;
   const sources = new Set(candidate.observations.map((entry) => entry.source));
   if (
     (sources.has("user_commitment") || sources.has("user_correction")) &&
@@ -306,13 +389,13 @@ function eligibility(
   if (
     sources.has("user_statement") &&
     isUserPreference(candidate.content) &&
-    observations >= policy.minimumPreferenceObservations
+    independentObservations >= policy.minimumPreferenceObservations
   ) {
     return "eligible";
   }
   if (
     sources.has("repeated_behavior") &&
-    observations >= policy.minimumBehaviorObservations &&
+    independentObservations >= policy.minimumBehaviorObservations &&
     candidate.proposedScope.kind !== "user"
   ) {
     return "eligible";
@@ -323,7 +406,7 @@ function eligibility(
     ((sources.has("episode_consolidation") &&
       candidate.confidence >= 0.9 &&
       candidate.stability >= 0.85) ||
-      observations >= 2)
+      independentObservations >= 2)
   ) {
     return "eligible";
   }
@@ -377,7 +460,27 @@ export class MemoryCandidateService {
     const selectedEvidence = input.proposal.evidenceIds
       .map((id) => evidenceById.get(id))
       .filter((entry): entry is CandidateEvidence => entry !== undefined);
-    if (selectedEvidence.every((entry) => lexicalOverlap(content, entry.text) < 0.2)) {
+    const support = input.proposal.support ?? [];
+    const supportById = new Map(support.map((entry) => [entry.evidenceId, entry.relation]));
+    if (
+      support.some((entry) => entry.relation === "contradicted") ||
+      !selectedEvidence.some((entry) => supportById.get(entry.id) === "entailed")
+    ) {
+      return { outcome: "rejected", reason: "candidate_not_entailed_by_evidence" };
+    }
+    const polarity = claimPolarity(content);
+    if (
+      selectedEvidence.some((entry) => (entry.polarity ?? claimPolarity(entry.text)) !== polarity)
+    ) {
+      return { outcome: "rejected", reason: "candidate_polarity_conflicts_with_evidence" };
+    }
+    if (
+      isUserPreference(content) &&
+      !selectedEvidence.some((entry) => entry.firstPersonPreferenceEvidence === true)
+    ) {
+      return { outcome: "rejected", reason: "preference_not_explicit_in_source_evidence" };
+    }
+    if (selectedEvidence.every((entry) => lexicalOverlap(content, entry.text) < 0.35)) {
       return { outcome: "rejected", reason: "candidate_not_grounded_in_evidence" };
     }
     if (
@@ -386,7 +489,7 @@ export class MemoryCandidateService {
     ) {
       return { outcome: "rejected", reason: "unverified_tool_evidence" };
     }
-    const scope = proposedScope(input.source, input.proposal, input.scopeContext);
+    const scope = proposedScope(input.source, input.proposal, input.scopeContext, selectedEvidence);
     const normalizedContent = canonicalAssertion(content);
     const candidates = await this.list(namespace, { includeTerminal: false });
     const existing = candidates
@@ -413,59 +516,88 @@ export class MemoryCandidateService {
       ...(input.scopeContext.taskId === undefined ? {} : { taskId: input.scopeContext.taskId }),
       observedAt: now,
     };
-    if (existing?.observations.some((entry) => entry.id === observation.id)) {
-      return {
-        outcome: existing.state === "promoted" ? "promoted" : "reinforced",
-        candidate: existing,
-      };
-    }
-    const observations = [...(existing?.observations ?? []), observation].slice(-64);
-    const evidenceRefs = [
-      ...(existing?.evidenceRefs ?? []),
-      ...selectedEvidence.map((entry) => entry.ref),
-    ]
-      .filter(
-        (ref, index, all) =>
-          all.findIndex((item) => item.kind === ref.kind && item.id === ref.id) === index,
-      )
-      .slice(-64);
-    const base: MemoryCandidate = {
-      version: 1,
-      id:
-        existing?.id ??
-        stableHash("memory-candidate:v1", namespace, scope.kind, scope.id, normalizedContent),
+    const candidateId =
+      existing?.id ??
+      stableHash("memory-candidate:v1", namespace, scope.kind, scope.id, normalizedContent);
+    const stored = await this.#state.mutate<MemoryCandidate>({
+      id: candidateId,
+      kind: "memory-candidate-v1",
       namespace,
-      content,
-      normalizedContent,
-      proposedScope: scope,
-      scopeContext: input.scopeContext,
-      state: "observed",
-      observations,
-      evidenceRefs,
-      explicitness: Math.max(existing?.explicitness ?? 0, explicitness(input.source)),
-      stability: Math.max(
-        existing?.stability ?? 0,
-        Math.max(0, Math.min(1, input.proposal.durability)),
-      ),
-      utility: Math.max(existing?.utility ?? 0, Math.min(1, 0.4 + observations.length * 0.15)),
-      confidence: Math.max(
-        existing?.confidence ?? 0,
-        Math.max(0, Math.min(1, input.proposal.confidence)),
-      ),
-      firstObservedAt: existing?.firstObservedAt ?? now,
-      lastObservedAt: now,
-      expiresAt: now + this.#policy.candidateTtlMs,
-      ...(existing?.promotedMemoryId === undefined
-        ? {}
-        : { promotedMemoryId: existing.promotedMemoryId }),
-    };
-    let candidate: MemoryCandidate = { ...base, state: eligibility(base, this.#policy) };
-    await this.#put(candidate);
+      reduce: (record) => {
+        const current = record?.value ?? existing;
+        if (
+          current?.state === "promoted" ||
+          current?.state === "rejected" ||
+          current?.state === "expired"
+        ) {
+          return { value: current, status: current.state, now: current.lastObservedAt };
+        }
+        if (current?.observations.some((entry) => entry.id === observation.id)) {
+          return { value: current, status: current.state, now: current.lastObservedAt };
+        }
+        const observations = [...(current?.observations ?? []), observation].slice(-64);
+        const evidenceRefs = [
+          ...(current?.evidenceRefs ?? []),
+          ...selectedEvidence.map((entry) => entry.ref),
+        ]
+          .filter(
+            (ref, index, all) =>
+              all.findIndex((item) => item.kind === ref.kind && item.id === ref.id) === index,
+          )
+          .slice(-64);
+        const base: MemoryCandidate = {
+          version: 1,
+          id: candidateId,
+          namespace,
+          content,
+          normalizedContent,
+          proposedScope: scope,
+          scopeContext: input.scopeContext,
+          state: "observed",
+          observations,
+          evidenceRefs,
+          explicitness: Math.max(current?.explicitness ?? 0, explicitness(input.source)),
+          stability: Math.max(
+            current?.stability ?? 0,
+            Math.max(0, Math.min(1, input.proposal.durability)),
+          ),
+          utility: Math.max(current?.utility ?? 0, Math.min(1, 0.4 + observations.length * 0.15)),
+          confidence: Math.max(
+            current?.confidence ?? 0,
+            Math.max(0, Math.min(1, input.proposal.confidence)),
+          ),
+          derivedAuthority: Math.min(
+            current?.derivedAuthority ?? EvidenceAuthority.VerifiedToolObservation,
+            ...selectedEvidence.map((entry) => entry.authority ?? EvidenceAuthority.EpisodicMemory),
+            selectedEvidence.some((entry) => entry.sourceKind === "user")
+              ? EvidenceAuthority.UserHistoricalStatement
+              : EvidenceAuthority.VerifiedToolObservation,
+          ) as EvidenceAuthority,
+          firstObservedAt: current?.firstObservedAt ?? now,
+          lastObservedAt: now,
+          expiresAt: now + this.#policy.candidateTtlMs,
+          ...(current?.promotedMemoryId === undefined
+            ? {}
+            : { promotedMemoryId: current.promotedMemoryId }),
+        };
+        const candidate = { ...base, state: eligibility(base, this.#policy) };
+        return { value: candidate, status: candidate.state, now };
+      },
+    });
+    let candidate = stored.value;
+    if (candidate.state === "promoted") return { outcome: "promoted", candidate };
+    if (candidate.state === "rejected" || candidate.state === "expired") {
+      return { outcome: "rejected", reason: `candidate_is_${candidate.state}` };
+    }
     if (candidate.state === "eligible" && this.#policy.autoPromotion) {
       candidate = await this.promote(candidate.id, options);
       return { outcome: "promoted", candidate };
     }
-    return { outcome: existing === undefined ? "created" : "reinforced", candidate };
+    return {
+      outcome:
+        existing === undefined && candidate.observations.length === 1 ? "created" : "reinforced",
+      candidate,
+    };
   }
 
   async promote(id: string, options: OperationOptions = {}): Promise<MemoryCandidate> {
@@ -490,9 +622,12 @@ export class MemoryCandidateService {
         content: candidate.content,
         scope: candidate.proposedScope,
         scopeContext: candidate.scopeContext,
-        authority: userGrounded
-          ? EvidenceAuthority.UserHistoricalStatement
-          : EvidenceAuthority.VerifiedToolObservation,
+        authority: Math.min(
+          candidate.derivedAuthority ?? EvidenceAuthority.EpisodicMemory,
+          userGrounded
+            ? EvidenceAuthority.UserHistoricalStatement
+            : EvidenceAuthority.VerifiedToolObservation,
+        ) as EvidenceAuthority,
         confidence: candidate.confidence,
         importance: Math.max(0.5, candidate.utility),
         evidenceRefs: candidate.evidenceRefs,
@@ -507,17 +642,26 @@ export class MemoryCandidateService {
       },
       options,
     );
-    const promoted: MemoryCandidate = {
-      ...candidate,
-      state:
-        result.outcome === "rejected" || result.outcome === "rejected_sensitive"
-          ? "rejected"
-          : "promoted",
-      lastObservedAt: this.#clock.now(),
-      ...(result.record?.id === undefined ? {} : { promotedMemoryId: result.record.id }),
-    };
-    await this.#put(promoted);
-    return promoted;
+    const now = this.#clock.now();
+    const stored = await this.#state.mutate<MemoryCandidate>({
+      id: candidate.id,
+      kind: "memory-candidate-v1",
+      namespace: candidate.namespace,
+      reduce: (record) => {
+        const current = record?.value ?? candidate;
+        const promoted: MemoryCandidate = {
+          ...current,
+          state:
+            result.outcome === "rejected" || result.outcome === "rejected_sensitive"
+              ? "rejected"
+              : "promoted",
+          lastObservedAt: now,
+          ...(result.record?.id === undefined ? {} : { promotedMemoryId: result.record.id }),
+        };
+        return { value: promoted, status: promoted.state, now };
+      },
+    });
+    return stored.value;
   }
 
   async get(id: string): Promise<MemoryCandidate | undefined> {
@@ -543,8 +687,24 @@ export class MemoryCandidateService {
         candidate.state !== "rejected" &&
         candidate.state !== "expired"
       ) {
-        candidate = { ...candidate, state: "expired", lastObservedAt: now };
-        await this.#put(candidate);
+        const expired = await this.#state.mutate<MemoryCandidate>({
+          id: candidate.id,
+          kind: "memory-candidate-v1",
+          namespace: candidate.namespace,
+          reduce: (current) => {
+            const latest = current?.value ?? candidate;
+            if (
+              latest.expiresAt > now ||
+              latest.state === "promoted" ||
+              latest.state === "rejected"
+            ) {
+              return { value: latest, status: latest.state, now: latest.lastObservedAt };
+            }
+            const value: MemoryCandidate = { ...latest, state: "expired", lastObservedAt: now };
+            return { value, status: value.state, now };
+          },
+        });
+        candidate = expired.value;
       }
       if (
         options.includeTerminal === true ||
@@ -556,17 +716,5 @@ export class MemoryCandidateService {
       }
     }
     return candidates.sort((left, right) => right.lastObservedAt - left.lastObservedAt);
-  }
-
-  async #put(candidate: MemoryCandidate): Promise<void> {
-    await this.#state.put(
-      {
-        id: candidate.id,
-        kind: "memory-candidate-v1",
-        namespace: candidate.namespace,
-        value: candidate,
-      },
-      { status: candidate.state, now: candidate.lastObservedAt },
-    );
   }
 }

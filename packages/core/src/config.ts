@@ -71,6 +71,7 @@ export interface MemoryConfig {
 export interface RetrievalConfig {
   readonly automaticRecall: boolean;
   readonly automaticRecallTokens: number;
+  readonly totalAutomaticContextTokens: number;
   readonly autoRecallSoftTimeoutMs: number;
   readonly autoRecallHardTimeoutMs: number;
   readonly manualSearchTimeoutMs: number;
@@ -282,6 +283,7 @@ export function createDefaultConfig(
     retrieval: {
       automaticRecall: false,
       automaticRecallTokens: 800,
+      totalAutomaticContextTokens: 1_200,
       autoRecallSoftTimeoutMs: 25,
       autoRecallHardTimeoutMs: 50,
       manualSearchTimeoutMs: 3_000,
@@ -628,6 +630,12 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
     "retrieval.automaticRecallTokens",
     config.retrieval.automaticRecallTokens,
     64,
+    config.retrieval.contextTokens,
+  );
+  requireRange(
+    "retrieval.totalAutomaticContextTokens",
+    config.retrieval.totalAutomaticContextTokens,
+    config.intelligence.workingMemory.promptTokens,
     config.retrieval.contextTokens,
   );
   requireRange(

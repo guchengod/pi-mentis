@@ -217,7 +217,13 @@ describe("WorkingMemoryService", () => {
     state = await service.applyEpisode({
       scopeContext: scope(),
       episode: episode("e2", "继续验证"),
-      events: [event("verify", "verification", 1, { command: "pnpm test", status: "passed" })],
+      events: [
+        event("verify", "verification", 1, {
+          command: "pnpm test",
+          status: "passed",
+          targetEvidenceIds: ["failure"],
+        }),
+      ],
       outcome: {
         executionStatus: "success",
         verificationStatus: "passed",
@@ -308,10 +314,78 @@ describe("WorkingMemoryService", () => {
     ).restore(scope(), "session", "root");
     expect(restoredParent?.hypotheses.some((item) => item.state === "active")).toBe(true);
     expect(restoredParent?.goal?.text).toBe("parent goal");
+    expect(child.confirmed).not.toBe(restoredParent?.confirmed);
+    expect(Object.isFrozen(child.confirmed)).toBe(true);
+    expect(Object.isFrozen(child.confirmed[0])).toBe(true);
+  });
+
+  it("resets all task-local state while preserving ambient recalled resources", async () => {
+    const store = new ScalarStore();
+    const service = new WorkingMemoryService(
+      store as unknown as ZvecStore,
+      limits,
+      new TestClock(),
+    );
+    await service.applyEpisode({
+      scopeContext: scope(),
+      episode: episode("task-a", "finish task A"),
+      events: [event("verified-a", "verification", 1, { command: "test A", status: "passed" })],
+      outcome: {
+        executionStatus: "success",
+        verificationStatus: "passed",
+        taskStatus: "completed",
+      },
+      taskId: "task-a",
+    });
+    await service.recordRecalledMemory(scope(), ["durable-memory"]);
+    const next = await service.applyEpisode({
+      scopeContext: scope(),
+      episode: episode("task-b", "start task B"),
+      events: [event("goal-b", "goal", 1, { goal: "start task B" })],
+      outcome: partial,
+      taskId: "task-b",
+    });
+    expect(next.confirmed).toEqual([]);
+    expect(next.decisions).toEqual([]);
+    expect(next.openLoops).toEqual([]);
+    expect(next.recalledMemoryIds).toContain("durable-memory");
+  });
+
+  it("does not close an open loop for an unrelated passing verification", async () => {
+    const store = new ScalarStore();
+    const service = new WorkingMemoryService(
+      store as unknown as ZvecStore,
+      limits,
+      new TestClock(),
+    );
+    await service.applyEpisode({
+      scopeContext: scope(),
+      episode: episode("failure", "repair database migration"),
+      events: [
+        event(
+          "migration-failed",
+          "tool_result",
+          1,
+          { result: { tool: "migration", status: "failed", keyErrors: ["schema mismatch"] } },
+          { toolCallId: "migration-call" },
+        ),
+      ],
+      outcome: { executionStatus: "failed", verificationStatus: "failed", taskStatus: "failed" },
+      taskId: "task",
+    });
+    const state = await service.applyEpisode({
+      scopeContext: scope(),
+      episode: episode("lint", "run lint"),
+      events: [event("lint-passed", "verification", 1, { command: "pnpm lint", status: "passed" })],
+      outcome: { executionStatus: "success", verificationStatus: "passed", taskStatus: "partial" },
+      taskId: "task",
+    });
+    expect(state.openLoops.some((loop) => loop.state === "active")).toBe(true);
   });
 });
 
 describe("automatic memory candidates", () => {
+  const support = (evidenceId: string) => [{ evidenceId, relation: "entailed" as const }];
   const policy = {
     autoPromotion: false,
     maxCandidatesPerTurn: 3,
@@ -364,6 +438,9 @@ describe("automatic memory candidates", () => {
       namespace,
       text,
       verified: false,
+      sourceKind: "user" as const,
+      firstPersonPreferenceEvidence: true,
+      allowedScopeCeiling: "user" as const,
     });
     const proposal = {
       content: "我通常喜欢简洁回答",
@@ -371,6 +448,7 @@ describe("automatic memory candidates", () => {
       confidence: 0.95,
       durability: 0.9,
       evidenceIds: ["e1"],
+      support: support("e1"),
     };
     const first = await service.observe({
       proposal,
@@ -380,15 +458,21 @@ describe("automatic memory candidates", () => {
       observationId: "observation-1",
     });
     expect(first.outcome).toBe("created");
-    await service.observe({
+    const restarted = new MemoryCandidateService(
+      store as unknown as ZvecStore,
+      { commit } as unknown as MemoryService,
+      policy,
+      new TestClock(),
+    );
+    await restarted.observe({
       proposal,
       source: "user_statement",
       scopeContext: scope(),
       evidence: [evidence("e1", "我通常喜欢简洁回答")],
       observationId: "observation-1",
     });
-    const reinforced = await service.observe({
-      proposal: { ...proposal, evidenceIds: ["e2"] },
+    const reinforced = await restarted.observe({
+      proposal: { ...proposal, evidenceIds: ["e2"], support: support("e2") },
       source: "user_statement",
       scopeContext: scope({ sessionId: "session-2" }),
       evidence: [evidence("e2", "我一般喜欢简洁回答")],
@@ -416,6 +500,7 @@ describe("automatic memory candidates", () => {
       confidence: 0.9,
       durability: 0.9,
       evidenceIds: ["e"],
+      support: support("e"),
     };
     const evidence = [
       {
@@ -482,6 +567,7 @@ describe("automatic memory candidates", () => {
       confidence: 0.95,
       durability: 0.95,
       evidenceIds: ["tool"],
+      support: support("tool"),
     };
     const unverified = await service.observe({
       proposal,
@@ -494,6 +580,8 @@ describe("automatic memory candidates", () => {
           namespace: "tenant:user:pi:agent",
           text: "repository package manager is pnpm",
           verified: false,
+          sourceKind: "tool",
+          allowedScopeCeiling: "repository",
         },
       ],
       observationId: "tool-unverified",
@@ -512,6 +600,8 @@ describe("automatic memory candidates", () => {
           text: "repository package manager is pnpm",
           verified: true,
           structural: true,
+          sourceKind: "manifest",
+          allowedScopeCeiling: "repository",
         },
       ],
       observationId: "tool-verified",
@@ -539,6 +629,7 @@ describe("automatic memory candidates", () => {
           confidence: 0.95,
           durability: 0.95,
           evidenceIds: [evidenceId],
+          support: support(evidenceId),
         },
         source: "user_correction",
         scopeContext: scope({ projectId }),
@@ -549,6 +640,9 @@ describe("automatic memory candidates", () => {
             namespace: "tenant:user:pi:agent",
             text: "project default port is 51842",
             verified: false,
+            sourceKind: "user",
+            explicitCorrection: true,
+            allowedScopeCeiling: "project",
           },
         ],
         observationId: evidenceId,
@@ -583,6 +677,7 @@ describe("automatic memory candidates", () => {
         confidence: 0.95,
         durability: 0.95,
         evidenceIds: ["e"],
+        support: support("e"),
       },
       source: "user_commitment",
       scopeContext: scope(),
@@ -593,6 +688,9 @@ describe("automatic memory candidates", () => {
           namespace: "tenant:user:pi:agent",
           text: "以后这个项目统一使用 pnpm",
           verified: false,
+          sourceKind: "user",
+          explicitCommitment: true,
+          allowedScopeCeiling: "repository",
         },
       ],
       observationId: "commitment",
@@ -625,6 +723,7 @@ describe("automatic memory candidates", () => {
         confidence: 0.95,
         durability: 0.9,
         evidenceIds: ["verified"],
+        support: support("verified"),
       },
       source: "episode_consolidation",
       scopeContext: scope(),
@@ -635,6 +734,8 @@ describe("automatic memory candidates", () => {
           namespace: "tenant:user:pi:agent",
           text: "verification passed: repository uses pnpm workspaces",
           verified: true,
+          sourceKind: "verification",
+          allowedScopeCeiling: "repository",
         },
       ],
       observationId: "semantic-observation",
@@ -644,6 +745,153 @@ describe("automatic memory candidates", () => {
       expect.objectContaining({ scope: { kind: "repository", id: "repo" } }),
       expect.anything(),
     );
+  });
+
+  it("rejects polarity reversal and model-created user preferences", async () => {
+    const store = new ScalarStore();
+    const service = new MemoryCandidateService(
+      store as unknown as ZvecStore,
+      { commit: vi.fn() } as unknown as MemoryService,
+      policy,
+      new TestClock(),
+    );
+    const polarity = await service.observe({
+      proposal: {
+        content: "tests pass",
+        scopeHint: "repository",
+        confidence: 0.95,
+        durability: 0.9,
+        evidenceIds: ["negative"],
+        support: support("negative"),
+      },
+      source: "user_statement",
+      scopeContext: scope(),
+      evidence: [
+        {
+          id: "negative",
+          ref: { kind: "event", id: "negative", observedAt: 1 },
+          namespace: "tenant:user:pi:agent",
+          text: "tests do not pass",
+          verified: false,
+          polarity: "negative",
+          allowedScopeCeiling: "repository",
+        },
+      ],
+      observationId: "negative-observation",
+    });
+    expect(polarity).toMatchObject({
+      outcome: "rejected",
+      reason: "candidate_polarity_conflicts_with_evidence",
+    });
+
+    const widened = await service.observe({
+      proposal: {
+        content: "I usually prefer pnpm",
+        scopeHint: "user",
+        confidence: 0.95,
+        durability: 0.9,
+        evidenceIds: ["repo"],
+        support: support("repo"),
+      },
+      source: "user_statement",
+      scopeContext: scope(),
+      evidence: [
+        {
+          id: "repo",
+          ref: { kind: "event", id: "repo", observedAt: 1 },
+          namespace: "tenant:user:pi:agent",
+          text: "repository uses pnpm",
+          verified: false,
+          firstPersonPreferenceEvidence: false,
+          allowedScopeCeiling: "repository",
+        },
+      ],
+      observationId: "repo-observation",
+    });
+    expect(widened).toMatchObject({
+      outcome: "rejected",
+      reason: "preference_not_explicit_in_source_evidence",
+    });
+  });
+
+  it("does not treat repeated observations in one session as independent", async () => {
+    const store = new ScalarStore();
+    const service = new MemoryCandidateService(
+      store as unknown as ZvecStore,
+      { commit: vi.fn() } as unknown as MemoryService,
+      policy,
+      new TestClock(),
+    );
+    for (const evidenceId of ["same-session-1", "same-session-2"]) {
+      await service.observe({
+        proposal: {
+          content: "我通常喜欢简洁回答",
+          scopeHint: "user",
+          confidence: 0.95,
+          durability: 0.9,
+          evidenceIds: [evidenceId],
+          support: support(evidenceId),
+        },
+        source: "user_statement",
+        scopeContext: scope({ sessionId: "same-session" }),
+        evidence: [
+          {
+            id: evidenceId,
+            ref: { kind: "event", id: evidenceId, observedAt: 1 },
+            namespace: "tenant:user:pi:agent",
+            text: "我通常喜欢简洁回答",
+            verified: false,
+            firstPersonPreferenceEvidence: true,
+            allowedScopeCeiling: "user",
+          },
+        ],
+        observationId: evidenceId,
+      });
+    }
+    const candidates = await service.list("tenant:user:pi:agent");
+    expect(candidates[0]?.observations).toHaveLength(2);
+    expect(candidates[0]?.state).toBe("reinforced");
+  });
+
+  it("preserves concurrent candidate reinforcements through CAS retries", async () => {
+    const store = new ScalarStore();
+    const service = new MemoryCandidateService(
+      store as unknown as ZvecStore,
+      { commit: vi.fn() } as unknown as MemoryService,
+      policy,
+      new TestClock(),
+    );
+    const observe = (id: string) =>
+      service.observe({
+        proposal: {
+          content: "我通常喜欢简洁回答",
+          scopeHint: "user",
+          confidence: 0.95,
+          durability: 0.9,
+          evidenceIds: [id],
+          support: support(id),
+        },
+        source: "user_statement",
+        scopeContext: scope({ sessionId: `session-${id}` }),
+        evidence: [
+          {
+            id,
+            ref: { kind: "event", id, observedAt: 1 },
+            namespace: "tenant:user:pi:agent",
+            text: "我通常喜欢简洁回答",
+            verified: false,
+            firstPersonPreferenceEvidence: true,
+            allowedScopeCeiling: "user",
+          },
+        ],
+        observationId: id,
+      });
+    await Promise.all([observe("concurrent-1"), observe("concurrent-2")]);
+    const candidates = await service.list("tenant:user:pi:agent");
+    expect(candidates[0]?.observations.map((entry) => entry.id).sort()).toEqual([
+      "concurrent-1",
+      "concurrent-2",
+    ]);
   });
 });
 
@@ -766,6 +1014,60 @@ describe("TaskEpisode consolidation and Experience v2", () => {
     expect(digest.serialized).not.toContain("dangerous-old-plan");
   });
 
+  it("invalidates earlier TaskEpisode turns when a later turn steers the task", async () => {
+    const store = new ScalarStore();
+    const service = new TaskEpisodeService(store as unknown as ZvecStore, new TestClock());
+    await service.append({
+      taskId: "task",
+      scopeContext: scope(),
+      episode: episode("old-turn", "use old plan"),
+      events: [
+        event(
+          "old-call",
+          "tool_call",
+          1,
+          { toolName: "bash", input: { command: "dangerous-old-plan" } },
+          { toolCallId: "old" },
+        ),
+        event(
+          "old-result",
+          "tool_result",
+          2,
+          { result: { status: "completed" } },
+          { toolCallId: "old" },
+        ),
+      ],
+      outcome: partial,
+    });
+    const task = await service.append({
+      taskId: "task",
+      scopeContext: scope(),
+      episode: episode("new-turn", "use safe plan"),
+      events: [
+        event("later-steer", "steering", 1, { updatedGoal: "use safe plan" }),
+        event(
+          "new-call",
+          "tool_call",
+          2,
+          { toolName: "bash", input: { command: "safe-new-plan" } },
+          { toolCallId: "new" },
+        ),
+        event(
+          "new-result",
+          "tool_result",
+          3,
+          { result: { status: "completed" } },
+          { toolCallId: "new" },
+        ),
+      ],
+      outcome: partial,
+    });
+    const digest = createTaskEpisodeDigest(task, 1_600);
+    expect(digest.serialized).toContain("safe-new-plan");
+    expect(digest.serialized).not.toContain("dangerous-old-plan");
+    expect(task.episodeIds).toEqual(["new-turn"]);
+  });
+
   it("strictly rejects semantic assertions without evidence", () => {
     expect(() =>
       parseEpisodeConsolidationProposal(
@@ -793,6 +1095,7 @@ describe("TaskEpisode consolidation and Experience v2", () => {
               confidence: 0.99,
               durability: 0.99,
               evidenceIds: ["event"],
+              support: [{ evidenceId: "event", relation: "entailed" }],
             },
           ],
         },
@@ -960,16 +1263,28 @@ describe("TaskEpisode consolidation and Experience v2", () => {
     for (let index = 1; index <= 3; index++) {
       const evidence: EvidenceRef = { kind: "event", id: `verify-${index}`, observedAt: index };
       await service.recordOutcome(first.id, {
+        outcomeId: `outcome-${index}`,
+        taskEpisodeId: `task-episode-${index}`,
+        episodeIds: [`episode-${index}`],
+        sessionId: `session-${index}`,
+        branchId: "root",
         succeeded: true,
         evidence,
+        verificationEvidenceIds: [evidence.id],
         cost: 0,
         durationMs: 1,
         environment: base.environment,
       });
     }
     await service.recordOutcome(first.id, {
+      outcomeId: "outcome-3",
+      taskEpisodeId: "task-episode-3",
+      episodeIds: ["episode-3"],
+      sessionId: "session-3",
+      branchId: "root",
       succeeded: true,
       evidence: { kind: "event", id: "verify-3", observedAt: 3 },
+      verificationEvidenceIds: ["verify-3"],
       cost: 0,
       durationMs: 1,
       environment: base.environment,
@@ -988,13 +1303,147 @@ describe("TaskEpisode consolidation and Experience v2", () => {
     });
     for (const [index, succeeded] of [true, false, false].entries()) {
       await service.recordOutcome(unreliable.id, {
+        outcomeId: `unstable-outcome-${index}`,
+        taskEpisodeId: `unstable-task-${index}`,
+        episodeIds: [`unstable-episode-${index}`],
+        sessionId: `unstable-session-${index}`,
+        branchId: "root",
         succeeded,
         evidence: { kind: "event", id: `unstable-${index}`, observedAt: index },
+        verificationEvidenceIds: [`unstable-${index}`],
         cost: 0,
         durationMs: 1,
         environment: base.environment,
       });
     }
     await expect(service.qualify(unreliable.id)).rejects.toThrow(/Beta estimate/u);
+  });
+
+  it("counts at most one outcome per TaskEpisode", async () => {
+    const store = new ScalarStore();
+    const service = createExperienceLearningService({
+      store: store as unknown as ZvecStore,
+      memory: { commit: vi.fn(), tombstone: vi.fn() } as unknown as MemoryService,
+      minimumOutcomes: 2,
+      minimumSuccessEstimate: 0.5,
+      clock: new TestClock(),
+    });
+    const candidate = await service.observe({
+      version: 2,
+      goal: "repair writer",
+      scopeContext: scope(),
+      environment: { os: "darwin", runtime: "node" },
+      prerequisites: [],
+      steps: ["inspect writer", "verify repair"],
+      generalizedSteps: ["inspect writer", "verify repair"],
+      normalizedProblemCues: ["writer failure"],
+      rawEpisodeIds: ["episode"],
+      successCriteria: ["tests pass"],
+      applicabilityContext: { os: "darwin", runtime: "node" },
+      cost: 0,
+      durationMs: 1,
+      appliesWhen: ["writer fails"],
+      excludesWhen: [],
+      capabilityGaps: [],
+      generationContext: ["test"],
+      validationPlan: ["tests pass"],
+    });
+    for (const id of ["unit", "typecheck", "build"]) {
+      await service.recordOutcome(candidate.id, {
+        outcomeId: `outcome-${id}`,
+        taskEpisodeId: "same-task-episode",
+        episodeIds: ["same-episode"],
+        sessionId: "session",
+        branchId: "root",
+        succeeded: true,
+        evidence: { kind: "event", id, observedAt: 1 },
+        verificationEvidenceIds: [id],
+        cost: 0,
+        durationMs: 1,
+        environment: { os: "darwin", runtime: "node" },
+      });
+    }
+    const current = await service.get(candidate.id);
+    expect(current?.successes).toBe(1);
+    await expect(service.qualify(candidate.id)).rejects.toThrow(/1 independent outcomes/u);
+  });
+
+  it("degrades and retires promoted procedures after independent failures", async () => {
+    const store = new ScalarStore();
+    const commit = vi.fn().mockResolvedValue({
+      outcome: "created",
+      record: { id: "procedure-memory" },
+      relatedIds: [],
+      relationDecision: "unrelated",
+    });
+    const tombstone = vi.fn().mockResolvedValue(true);
+    const service = createExperienceLearningService({
+      store: store as unknown as ZvecStore,
+      memory: { commit, tombstone } as unknown as MemoryService,
+      minimumOutcomes: 1,
+      minimumSuccessEstimate: 0.6,
+      clock: new TestClock(),
+    });
+    const candidate = await service.observe({
+      version: 2,
+      goal: "repair writer",
+      scopeContext: scope(),
+      environment: { os: "darwin", runtime: "node" },
+      prerequisites: [],
+      steps: ["inspect writer", "verify repair"],
+      generalizedSteps: ["inspect writer", "verify repair"],
+      normalizedProblemCues: ["writer failure"],
+      rawEpisodeIds: ["success-episode"],
+      successCriteria: ["tests pass"],
+      applicabilityContext: { os: "darwin", runtime: "node" },
+      cost: 0,
+      durationMs: 1,
+      appliesWhen: ["writer fails"],
+      excludesWhen: [],
+      capabilityGaps: [],
+      generationContext: ["test"],
+      validationPlan: ["tests pass"],
+    });
+    await service.recordOutcome(candidate.id, {
+      outcomeId: "success",
+      taskEpisodeId: "success-task",
+      episodeIds: ["success-episode"],
+      sessionId: "success-session",
+      branchId: "root",
+      succeeded: true,
+      evidence: { kind: "event", id: "success", observedAt: 1 },
+      verificationEvidenceIds: ["success"],
+      cost: 0,
+      durationMs: 1,
+      environment: { os: "darwin", runtime: "node" },
+    });
+    await service.qualify(candidate.id);
+    await service.promote(candidate.id);
+    expect(commit).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: expect.stringMatching(/^experience-promotion:/u) }),
+      expect.anything(),
+    );
+    let current = await service.get(candidate.id);
+    expect(current?.state).toBe("promoted");
+    for (let index = 1; index <= 4; index++) {
+      current = await service.recordOutcome(candidate.id, {
+        outcomeId: `failure-${index}`,
+        taskEpisodeId: `failure-task-${index}`,
+        episodeIds: [`failure-episode-${index}`],
+        sessionId: `failure-session-${index}`,
+        branchId: "root",
+        succeeded: false,
+        evidence: { kind: "event", id: `failure-${index}`, observedAt: index + 1 },
+        verificationEvidenceIds: [`failure-${index}`],
+        cost: 0,
+        durationMs: 1,
+        environment: { os: "darwin", runtime: "node" },
+      });
+    }
+    expect(current?.state).toBe("retired");
+    expect(tombstone).toHaveBeenCalledWith(
+      "procedure-memory",
+      expect.objectContaining({ scopeContext: expect.objectContaining({ userId: "user" }) }),
+    );
   });
 });

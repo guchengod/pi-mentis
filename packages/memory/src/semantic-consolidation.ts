@@ -57,6 +57,7 @@ export function parseEpisodeConsolidationProposal(
     const proposalConfidence = confidence(entry?.["confidence"]);
     const durability = confidence(entry?.["durability"]);
     const evidenceIds = strings(entry?.["evidenceIds"], 16, 200);
+    const rawSupport = entry?.["support"];
     if (
       typeof content !== "string" ||
       typeof scopeHint !== "string" ||
@@ -64,7 +65,16 @@ export function parseEpisodeConsolidationProposal(
       proposalConfidence === undefined ||
       durability === undefined ||
       evidenceIds === undefined ||
-      evidenceIds.length === 0
+      evidenceIds.length === 0 ||
+      !Array.isArray(rawSupport) ||
+      rawSupport.length === 0 ||
+      rawSupport.some((raw) => {
+        const support = object(raw);
+        return (
+          typeof support?.["evidenceId"] !== "string" ||
+          !["entailed", "contradicted", "insufficient"].includes(String(support?.["relation"]))
+        );
+      })
     ) {
       throw new Error("Episode consolidation assertion is invalid");
     }
@@ -76,6 +86,13 @@ export function parseEpisodeConsolidationProposal(
       confidence: proposalConfidence,
       durability,
       evidenceIds,
+      support: rawSupport.map((raw) => {
+        const support = object(raw) as Readonly<Record<string, unknown>>;
+        return {
+          evidenceId: support["evidenceId"] as string,
+          relation: support["relation"] as "entailed" | "contradicted" | "insufficient",
+        };
+      }),
     });
   }
   const rawProcedure = object(root["procedure"]);

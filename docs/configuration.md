@@ -27,7 +27,8 @@ help from the knowledge command surface. After editing the file, run `/reload` o
   },
   "retrieval": {
     "automaticRecall": false,
-    "automaticRecallTokens": 800
+    "automaticRecallTokens": 800,
+    "totalAutomaticContextTokens": 1200
   },
   "performance": {
     "sidecar": {
@@ -70,8 +71,10 @@ help from the knowledge command surface. After editing the file, run `/reload` o
 }
 ```
 
-`retrieval.automaticRecall` defaults to `false`; `retrieval.automaticRecallTokens` independently
-limits model-visible capsule evidence and defaults to `800`. When `search_memory` is active for the turn, Pi
+`retrieval.automaticRecall` defaults to `false`; `retrieval.automaticRecallTokens` caps capsule
+evidence and defaults to `800`. `retrieval.totalAutomaticContextTokens` is the combined envelope
+for Working Memory plus Capsule and defaults to `1200`: Working Memory consumes its share first and
+Capsule receives only the remainder. When `search_memory` is active for the turn, Pi
 Mentis adds a compact system-prompt instruction telling Pi to search when information is unknown,
 uncertain, historical, indexed, or missing from current context. The instruction is omitted when
 the tool is not selected. This on-demand path keeps normal message submission independent of

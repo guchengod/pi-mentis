@@ -45,6 +45,7 @@ export type SidecarRequest =
         readonly clientSessionId: string;
         readonly cwd: string;
         readonly branchId: string;
+        readonly branchGeneration: number;
         readonly parentBranchId?: string;
         readonly sessionMode: MentisContextSnapshot["conversation"]["sessionMode"];
       };
@@ -97,10 +98,27 @@ export type SidecarRequest =
 
 export type SidecarNotification =
   | {
+      readonly method: "foreground.savings";
+      readonly params: {
+        readonly clientSessionId: string;
+        readonly avoidedModelTokens: number;
+      };
+    }
+  | {
+      readonly method: "foreground.tokens";
+      readonly params: {
+        readonly clientSessionId: string;
+        readonly activeContextVisibleTokens: number;
+        readonly capsuleVisibleTokens: number;
+        readonly combinedRecallTokens: number;
+      };
+    }
+  | {
       readonly method: "session.branch";
       readonly params: {
         readonly clientSessionId: string;
         readonly branchId: string;
+        readonly branchGeneration: number;
         readonly parentBranchId?: string;
       };
     }

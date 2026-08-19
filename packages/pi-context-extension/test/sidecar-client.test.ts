@@ -64,6 +64,7 @@ const session = {
   clientSessionId: "session-1",
   cwd: "/workspace",
   branchId: "root",
+  branchGeneration: 0,
   sessionMode: "persistent" as const,
 };
 
@@ -155,7 +156,11 @@ describe("Mentis Sidecar lifecycle", () => {
     children[0]?.exit(1);
     client.notify({
       method: "session.branch",
-      params: { clientSessionId: session.clientSessionId, branchId: "feature" },
+      params: {
+        clientSessionId: session.clientSessionId,
+        branchId: "feature",
+        branchGeneration: 1,
+      },
     });
     client.notify({
       method: "input.activity",
@@ -176,6 +181,7 @@ describe("Mentis Sidecar lifecycle", () => {
     expect(openMessage?.type).toBe("request");
     if (openMessage?.type === "request" && openMessage.request.method === "session.open") {
       expect(openMessage.request.params.branchId).toBe("feature");
+      expect(openMessage.request.params.branchGeneration).toBe(1);
     }
     expect(openIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBeGreaterThan(openIndex ?? -1);
