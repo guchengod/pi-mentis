@@ -600,11 +600,16 @@ export class MentisSidecarRuntime {
       memory === undefined
         ? undefined
         : {
+            scopeContext: sessionScope,
             getRelationshipLearning: async (id: string) => memory.getRelationshipLearning?.(id),
-            listPendingRelationshipLearning: (query?: { readonly limit?: number }) =>
-              memory.listPendingRelationshipLearning?.(query) ?? Promise.resolve([]),
-            get: (id: string) =>
-              memory.get(id, { scopeContext: sessionScope, accessIntent: "explicit_id" }),
+            listPendingRelationshipLearning: (query?: {
+              readonly limit?: number;
+              readonly scopeContext?: Pick<
+                PiScopeContext,
+                "tenantId" | "userId" | "appId" | "agentId"
+              >;
+            }) => memory.listPendingRelationshipLearning?.(query) ?? Promise.resolve([]),
+            get: (id: string) => memory.get(id, { scopeContext: sessionScope }),
           };
     if (
       pendingReader !== undefined &&
@@ -1098,7 +1103,12 @@ export class MentisSidecarRuntime {
 
   async #readCapsule(scope: PiScopeContext): Promise<MemoryCapsule | undefined> {
     const value = JSON.parse(await readFile(this.#capsulePath(scope), "utf8")) as MemoryCapsule;
-    return value.protocolVersion === SIDECAR_PROTOCOL_VERSION ? value : undefined;
+    return value.protocolVersion === SIDECAR_PROTOCOL_VERSION &&
+      value.entries.every(
+        (entry) => Number.isFinite(entry.estimatedTokens) && entry.estimatedTokens >= 0,
+      )
+      ? value
+      : undefined;
   }
 
   async #writeCapsule(scope: PiScopeContext, capsule: MemoryCapsule): Promise<void> {

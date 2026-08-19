@@ -28,6 +28,8 @@ export interface AdaptivePolicy {
   readonly createdAt: number;
   readonly activatedAt?: number;
   readonly reason?: string;
+  readonly policySchemaVersion?: number;
+  readonly baselineFingerprint?: string;
 }
 
 export interface PolicyReplayCase {
@@ -149,6 +151,7 @@ const DEFAULT_PARAMETERS: RetrievalPolicyParameters = {
   diversityLambda: 0.75,
   contextTokens: 1_600,
 };
+const POLICY_SCHEMA_VERSION = 2;
 
 function validateParameters(
   parameters: RetrievalPolicyParameters,
@@ -187,6 +190,8 @@ export class AdaptivePolicyService {
   readonly #clock: Clock;
   readonly #namespace: string;
   readonly #cooldownMs: number;
+  readonly #baselineOverrides: Partial<RetrievalPolicyParameters>;
+  readonly #baselineFingerprint: string;
   #active: AdaptivePolicy;
   #fallback: AdaptivePolicy;
   #ewma: CanaryMetrics | undefined;
@@ -213,6 +218,11 @@ export class AdaptivePolicyService {
       ...options.baselineParameters,
     };
     validateParameters(baselineParameters, DEFAULT_INVARIANTS);
+    this.#baselineOverrides = options.baselineParameters ?? {};
+    this.#baselineFingerprint = stableHash(
+      "adaptive-policy-baseline:v2",
+      JSON.stringify(baselineParameters),
+    );
     this.#active = {
       id: "policy:default",
       state: "active",
@@ -220,6 +230,8 @@ export class AdaptivePolicyService {
       invariants: DEFAULT_INVARIANTS,
       createdAt,
       activatedAt: createdAt,
+      policySchemaVersion: POLICY_SCHEMA_VERSION,
+      baselineFingerprint: this.#baselineFingerprint,
     };
     this.#fallback = { ...this.#active, id: "policy:fallback", state: "fallback" };
   }
@@ -234,8 +246,49 @@ export class AdaptivePolicyService {
         this.#state.get<AdaptivePolicy>(pointer.value.activeId),
         this.#state.get<AdaptivePolicy>(pointer.value.fallbackId),
       ]);
-      if (active !== undefined) this.#active = validatePolicy(active.value);
-      if (fallback !== undefined) this.#fallback = validatePolicy(fallback.value);
+      const loadedActive = active === undefined ? this.#active : validatePolicy(active.value);
+      const loadedFallback =
+        fallback === undefined ? this.#fallback : validatePolicy(fallback.value);
+      if (
+        loadedActive.policySchemaVersion !== POLICY_SCHEMA_VERSION ||
+        loadedActive.baselineFingerprint !== this.#baselineFingerprint ||
+        loadedFallback.policySchemaVersion !== POLICY_SCHEMA_VERSION ||
+        loadedFallback.baselineFingerprint !== this.#baselineFingerprint
+      ) {
+        const now = this.#clock.now();
+        this.#active = validatePolicy({
+          ...loadedActive,
+          id: `policy:rebase:${stableHash(
+            "adaptive-policy-rebase:v2",
+            loadedActive.id,
+            this.#baselineFingerprint,
+          )}`,
+          parentId: loadedActive.id,
+          state: "active",
+          parameters: { ...loadedActive.parameters, ...this.#baselineOverrides },
+          policySchemaVersion: POLICY_SCHEMA_VERSION,
+          baselineFingerprint: this.#baselineFingerprint,
+          createdAt: now,
+          activatedAt: now,
+          reason: "rebased to the current configured policy baseline",
+        });
+        this.#fallback = {
+          ...this.#active,
+          id: `policy:fallback:${this.#baselineFingerprint}`,
+          state: "fallback",
+        };
+        this.#shadow = undefined;
+        this.#canary = undefined;
+        this.#ewma = undefined;
+        this.#cooldownUntil = 0;
+        await this.#persist(this.#active);
+        await this.#persist(this.#fallback);
+        await this.#writePointer();
+        await this.#persistControl();
+        return;
+      }
+      this.#active = loadedActive;
+      this.#fallback = loadedFallback;
       const [shadow] = await this.#state.list<AdaptivePolicy>({
         kind: "adaptive-policy",
         namespace: this.#namespace,

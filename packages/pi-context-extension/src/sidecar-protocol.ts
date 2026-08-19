@@ -19,6 +19,7 @@ export interface MemoryCapsuleEntry {
   readonly text: string;
   readonly kind: SearchHit["kind"] | "profile";
   readonly authority: number;
+  readonly estimatedTokens: number;
   readonly scopeKind?: string;
   readonly updatedAt?: number;
   readonly terms: readonly string[];

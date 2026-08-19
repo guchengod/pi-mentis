@@ -66,8 +66,8 @@ function toolResultMode(
   return "artifact";
 }
 
-function capsuleMessage(capsule: MemoryCapsule, prompt: string) {
-  const entries = selectCapsuleEntries(capsule, prompt);
+function capsuleMessage(capsule: MemoryCapsule, prompt: string, maxTokens: number) {
+  const entries = selectCapsuleEntries(capsule, prompt, { maxTokens });
   if (entries.length === 0) return undefined;
   const evidence = entries
     .map(
@@ -166,6 +166,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let sessionReady: Promise<void> = Promise.resolve();
   let sidecarSessionReady = false;
   let automaticRecallWarningShown = false;
+  let currentTurnCanSearchMemory = false;
   const pendingInlineToolResults: ToolResultEnvelope[] = [];
   const completedLargeReads = new Map<string, string>();
   let sessionOpen:
@@ -407,6 +408,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   pi.on("session_start", (event, context) => {
     flushInlineToolResults();
     completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     clientSessionId = context.sessionManager.getSessionId();
     branchId = context.sessionManager.getLeafId() ?? "root";
     parentBranchId =
@@ -445,6 +447,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.on("session_tree", (event, context) => {
+    completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     branchId = event.newLeafId ?? "root";
     parentBranchId =
       event.newLeafId === null
@@ -505,6 +509,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     const searchMemoryActive = (event.systemPromptOptions.selectedTools ?? []).includes(
       "search_memory",
     );
+    currentTurnCanSearchMemory = searchMemoryActive;
     const systemPrompt =
       !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
         ? event.systemPrompt
@@ -512,7 +517,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) {
       return { systemPrompt };
     }
-    const recalled = capsuleMessage(capsule, event.prompt);
+    const recalled = capsuleMessage(capsule, event.prompt, config.retrieval.automaticRecallTokens);
     return recalled === undefined ? { systemPrompt } : { ...recalled, systemPrompt };
   });
 
@@ -592,9 +597,12 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       const currentReadHash =
         readKey === undefined ? undefined : readContentHash(recoveredEnvelope);
       const isFullRead = canReturnFullRead(recoveredEnvelope, result);
+      if (!currentTurnCanSearchMemory && !isFullRead) return;
       const resultText = !isFullRead
         ? result.modelText
-        : readKey !== undefined && completedLargeReads.get(readKey) === currentReadHash
+        : currentTurnCanSearchMemory &&
+            readKey !== undefined &&
+            completedLargeReads.get(readKey) === currentReadHash
           ? compactReadReference(recoveredEnvelope, result)
           : fullReadResult(recoveredEnvelope, result);
       if (isFullRead && readKey !== undefined && currentReadHash !== undefined) {
@@ -622,6 +630,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.on("session_compact", (event) => {
+    completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     if (clientSessionId === undefined || !config.memory.captureEnabled) return;
     sidecar.notify({
       method: "capture.compact",

@@ -129,10 +129,15 @@ describe("retrieval algorithms", () => {
       5,
       5,
     );
-    expect(selected.map((item) => item.id)).toEqual(["zero", "artifact", "k", "m"]);
+    expect(selected.map((item) => item.id)).toEqual(["artifact", "k", "m"]);
     expect(selectContext([hit("k", "knowledge", 1, 6)], 10, 5, 10)).toEqual([]);
-    expect(selectContext([hit("m", "memory", 1, 6)], 10, 10, 5)).toEqual([]);
+    expect(selectContext([hit("m", "memory", 1, 6)], 10, 10, 5)).toHaveLength(1);
     expect(selectContext([hit("x", "artifact", 1, 11)], 10, 10, 10)).toEqual([]);
+  });
+
+  it("packs large memories by their bounded public projection cost", () => {
+    const large = { ...hit("large-memory", "memory", 1, 3_000), text: "相关偏好".repeat(2_000) };
+    expect(selectContext([large], 500, 0, 500)).toEqual([large]);
   });
 
   it("keeps recall gate pure and skips command/no-signal turns", () => {

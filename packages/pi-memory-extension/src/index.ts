@@ -262,14 +262,11 @@ function registerMemoryTools(
           ? result
           : await projectDurablePendingAssertions(
               {
+                scopeContext: getScopeContext(),
                 getRelationshipLearning: async (id) => memory.getRelationshipLearning?.(id),
                 listPendingRelationshipLearning: (input) =>
                   memory.listPendingRelationshipLearning?.(input) ?? Promise.resolve([]),
-                get: (id) =>
-                  memory.get(id, {
-                    scopeContext: getScopeContext(),
-                    accessIntent: "explicit_id",
-                  }),
+                get: (id) => memory.get(id, { scopeContext: getScopeContext() }),
               },
               scopedRequest,
               result,
@@ -331,6 +328,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
   const completedLargeReads = new Map<string, string>();
+  let currentTurnCanSearchMemory = false;
   let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
   let contextRefreshSequence = 0;
   let evidenceStore: PiEvidenceStore | undefined;
@@ -453,6 +451,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
 
   pi.on("session_start", async (event, context) => {
     completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     sessionMode = event.reason === "fork" ? "forked" : "persistent";
     const storageStatus = getStorageStatus(context.cwd, config.storage.rootDir);
     if (storageStatus.inactiveAlternateStore !== undefined) {
@@ -784,6 +783,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     runtime.getRetrieval<RetrievalService>()?.warmup?.();
   });
   pi.on("session_tree", (event, context) => {
+    completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     branchId = event.newLeafId ?? "root";
     parentBranchId =
       event.newLeafId === null
@@ -1075,6 +1076,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     const searchMemoryActive = (event.systemPromptOptions.selectedTools ?? []).includes(
       "search_memory",
     );
+    currentTurnCanSearchMemory = searchMemoryActive;
     return {
       systemPrompt:
         !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
@@ -1116,9 +1118,12 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     const readKey = readRequestKey(envelope);
     const currentReadHash = readKey === undefined ? undefined : readContentHash(envelope);
     const isFullRead = canReturnFullRead(envelope, result);
+    if (!currentTurnCanSearchMemory && !isFullRead) return;
     const resultText = !isFullRead
       ? result.modelText
-      : readKey !== undefined && completedLargeReads.get(readKey) === currentReadHash
+      : currentTurnCanSearchMemory &&
+          readKey !== undefined &&
+          completedLargeReads.get(readKey) === currentReadHash
         ? compactReadReference(envelope, result)
         : fullReadResult(envelope, result);
     if (isFullRead && readKey !== undefined && currentReadHash !== undefined) {
@@ -1137,6 +1142,8 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     };
   });
   pi.on("session_compact", (event) => {
+    completedLargeReads.clear();
+    currentTurnCanSearchMemory = false;
     if (captureSession === undefined) return;
     const session = captureSession;
     captureQueue.enqueue(async () => {

@@ -18,12 +18,13 @@ import {
   type SearchResult,
   type MentisContextSnapshot,
 } from "@pi-mentis/pi-mentis-core";
-import type {
-  MemoryService,
-  MemoryScope,
-  PiScopeContext,
-  PiEvidenceStore,
-  ArtifactRecord,
+import {
+  projectMemoryRecallHit,
+  type MemoryRecord,
+  type MemoryService,
+  type PiScopeContext,
+  type PiEvidenceStore,
+  type ArtifactRecord,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { detectSecrets, safeSummary } from "@pi-mentis/pi-mentis-memory-core";
 import type { RetrievalService } from "./service.js";
@@ -141,48 +142,39 @@ function mapKind(sourceKind: SearchHit["kind"], _namespace: string): PublicRecal
   return "topic";
 }
 
-/**
- * Public projection of a stored MemoryScope kind. The public `kind` must
- * reflect the record's real ownership scope — NOT a hardcoded "topic".
- */
-function projectScopeKind(scope: MemoryScope): PublicRecallHit["kind"] {
-  switch (scope.kind) {
-    case "user":
-      return "user";
-    case "project":
-      return "project";
-    case "repository":
-      return "repository";
-    case "task":
-      return "task";
-    case "session":
-    case "branch":
-    case "run":
-      return "event";
-    case "topic":
-      return "topic";
-    default:
-      return "topic";
-  }
-}
-
 function trimContent(text: string, maxLength = MAX_CONTENT_LENGTH): string {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength) + "...";
 }
 
 function buildHits(result: SearchResult): readonly PublicRecallHit[] {
-  return result.hits.slice(0, MAX_HITS).map((hit) => {
+  return result.hits.slice(0, MAX_HITS).flatMap((hit): readonly PublicRecallHit[] => {
+    if (hit.kind === "memory") {
+      const metadata = (hit.metadata ?? {}) as Partial<MemoryRecord>;
+      const projected = projectMemoryRecallHit(
+        {
+          id: hit.id,
+          content: hit.text,
+          scope: metadata.scope ?? { kind: "user", id: "local" },
+          ...(metadata.status === undefined ? {} : { status: metadata.status }),
+          ...(metadata.scopeContext === undefined ? {} : { scopeContext: metadata.scopeContext }),
+        },
+        { match: "semantic" },
+      );
+      return projected === undefined ? [] : [projected.hit];
+    }
     const { text, sanitized: wasSanitized } = sanitize(hit.text);
-    return {
-      id: hit.id,
-      content: trimContent(text),
-      kind: mapKind(hit.kind, hit.namespace),
-      status: "current",
-      match: "semantic",
-      resourceType: hit.kind === "knowledge" ? ("knowledge" as const) : ("memory" as const),
-      sanitized: wasSanitized,
-    };
+    return [
+      {
+        id: hit.id,
+        content: trimContent(text),
+        kind: mapKind(hit.kind, hit.namespace),
+        status: "current" as const,
+        match: "semantic" as const,
+        resourceType: "knowledge" as const,
+        sanitized: wasSanitized,
+      },
+    ];
   });
 }
 
@@ -234,9 +226,10 @@ function resolverContext(
 async function exactMemoryRead(
   memory: MemoryService,
   recordId: string,
+  scopeContext: PiScopeContext,
 ): Promise<PublicRecallResult> {
   try {
-    const record = await memory.get(recordId);
+    const record = await memory.get(recordId, { scopeContext });
     if (record === undefined) {
       return {
         found: false,
@@ -250,21 +243,19 @@ async function exactMemoryRead(
       };
     }
 
-    const { text: sanitizedContent, sanitized: wasSanitized } = sanitize(record.content);
-    const hit: PublicRecallHit = {
-      id: record.id,
-      content: trimContent(sanitizedContent),
-      kind: projectScopeKind(record.scope),
-      status:
-        record.status === "conflicted"
-          ? "conflicted"
-          : ["superseded", "expired", "tombstoned", "rejected"].includes(record.status)
-            ? "historical"
-            : "current",
-      match: "exact",
-      resourceType: "memory",
-      sanitized: wasSanitized,
-    };
+    const hit = projectMemoryRecallHit(record, { scopeContext, match: "exact" })?.hit;
+    if (hit === undefined) {
+      return {
+        found: false,
+        entityFound: false,
+        contentFound: false,
+        lookupMode: "exact_id",
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
+    }
 
     return {
       found: true,
@@ -273,7 +264,7 @@ async function exactMemoryRead(
       lookupMode: "exact_id",
       resourceType: "memory",
       anchored: true,
-      summary: record.content.length > 150 ? record.content.slice(0, 150) + "..." : record.content,
+      summary: hit.content.length > 150 ? hit.content.slice(0, 150) + "..." : hit.content,
       hits: [hit],
     };
   } catch {
@@ -292,7 +283,7 @@ async function memoryEvolutionChain(
   signal?: AbortSignal,
 ): Promise<PublicRecallResult> {
   try {
-    const record = await memory.get(recordId);
+    const record = await memory.get(recordId, { scopeContext });
     if (record === undefined) {
       return {
         found: false,
@@ -309,72 +300,58 @@ async function memoryEvolutionChain(
     const hits: PublicRecallHit[] = [];
 
     // Current record
-    const { text: currentSanitized, sanitized: currentWasSanitized } = sanitize(record.content);
-    hits.push({
-      id: record.id,
-      content: trimContent(currentSanitized),
-      kind: projectScopeKind(record.scope),
-      status:
-        record.status === "conflicted"
-          ? "conflicted"
-          : ["superseded", "expired", "tombstoned", "rejected"].includes(record.status)
-            ? "historical"
-            : "current",
-      match: "exact",
-      resourceType: "memory",
-      sanitized: currentWasSanitized,
-    });
+    const current = projectMemoryRecallHit(record, { scopeContext, match: "exact" })?.hit;
+    if (current === undefined) {
+      return {
+        found: false,
+        resourceType: "unknown",
+        anchored: true,
+        reason: "not_found",
+        hits: [],
+      };
+    }
+    hits.push(current);
 
     // Superseded by
     if (record.supersededById !== undefined) {
-      const newer = await memory.get(record.supersededById).catch(() => undefined);
+      const newer = await memory
+        .get(record.supersededById, { scopeContext })
+        .catch(() => undefined);
       if (newer !== undefined) {
-        const { text: s, sanitized: sanitized } = sanitize(newer.content);
-        hits.push({
-          id: newer.id,
-          content: trimContent(s),
-          kind: projectScopeKind(newer.scope),
-          status: "current",
+        const projected = projectMemoryRecallHit(newer, {
+          scopeContext,
           match: "anchored",
-          resourceType: "memory",
-          sanitized,
-        });
+          status: "current",
+        })?.hit;
+        if (projected !== undefined) hits.push(projected);
       }
     }
 
     // Superseded records
     for (const supersededId of record.relationships.supersedesIds.slice(0, 3)) {
       if (hits.length >= MAX_HITS) break;
-      const old = await memory.get(supersededId).catch(() => undefined);
+      const old = await memory.get(supersededId, { scopeContext }).catch(() => undefined);
       if (old !== undefined) {
-        const { text: s, sanitized: sanitized } = sanitize(old.content);
-        hits.push({
-          id: old.id,
-          content: trimContent(s),
-          kind: projectScopeKind(old.scope),
-          status: "historical",
+        const projected = projectMemoryRecallHit(old, {
+          scopeContext,
           match: "anchored",
-          resourceType: "memory",
-          sanitized,
-        });
+          status: "historical",
+        })?.hit;
+        if (projected !== undefined) hits.push(projected);
       }
     }
 
     // Conflicts
     for (const conflictId of record.relationships.conflictsWithIds.slice(0, 3)) {
       if (hits.length >= MAX_HITS) break;
-      const conflict = await memory.get(conflictId).catch(() => undefined);
+      const conflict = await memory.get(conflictId, { scopeContext }).catch(() => undefined);
       if (conflict !== undefined) {
-        const { text: s, sanitized: sanitized } = sanitize(conflict.content);
-        hits.push({
-          id: conflict.id,
-          content: trimContent(s),
-          kind: projectScopeKind(conflict.scope),
-          status: "conflicted",
+        const projected = projectMemoryRecallHit(conflict, {
+          scopeContext,
           match: "anchored",
-          resourceType: "memory",
-          sanitized,
-        });
+          status: "conflicted",
+        })?.hit;
+        if (projected !== undefined) hits.push(projected);
       }
     }
 
@@ -662,7 +639,7 @@ export class DefaultRecallCoordinator implements RecallCoordinator {
             hits: [],
           };
         }
-        return exactMemoryRead(memory, id);
+        return exactMemoryRead(memory, id, scopeContext);
       }
 
       if (ref.type === "artifact") {

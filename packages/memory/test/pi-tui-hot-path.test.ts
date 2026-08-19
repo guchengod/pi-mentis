@@ -91,7 +91,9 @@ describe("Pi TUI foreground path", () => {
       handler.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false,
     ).toBe(false);
     expect(foregroundAwait).toBe(false);
-    expect(foreground).toContain("capsuleMessage(capsule, event.prompt)");
+    expect(foreground).toContain(
+      "capsuleMessage(capsule, event.prompt, config.retrieval.automaticRecallTokens)",
+    );
     expect(foreground).toContain("memorySystemPrompt");
     expect(foreground).not.toContain("createMentisMemorySystemPrompt");
     const supportFilename = fileURLToPath(
@@ -150,7 +152,33 @@ describe("Pi TUI foreground path", () => {
       "createToolResultSpool(config.storage.rootDir, recoveredEnvelope.text)",
     );
     expect(foreground).toContain('"capture.toolResultSpool"');
+    expect(foreground).toContain("!currentTurnCanSearchMemory && !isFullRead");
     expect(foreground).not.toContain('"capture.toolResult",');
+  });
+
+  it("binds large-read deduplication and replacement to the current context lineage", () => {
+    for (const relative of [
+      "../../pi-context-extension/src/index.ts",
+      "../../pi-memory-extension/src/index.ts",
+    ]) {
+      const filename = fileURLToPath(new URL(relative, import.meta.url));
+      const sourceFile = ts.createSourceFile(
+        filename,
+        readFileSync(filename, "utf8"),
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      expect(eventHandler(sourceFile, filename, "session_tree").body.getText(sourceFile)).toContain(
+        "completedLargeReads.clear()",
+      );
+      expect(
+        eventHandler(sourceFile, filename, "session_compact").body.getText(sourceFile),
+      ).toContain("completedLargeReads.clear()");
+      expect(eventHandler(sourceFile, filename, "tool_result").body.getText(sourceFile)).toContain(
+        "!currentTurnCanSearchMemory && !isFullRead",
+      );
+    }
   });
 
   it("keeps the standalone Sidecar free of Pi runtime imports", () => {

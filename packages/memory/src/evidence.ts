@@ -263,11 +263,11 @@ export class DefaultPiEvidenceStore implements PiEvidenceStore {
       throw new Error(`Artifact episode ${input.episodeId} does not exist`);
     const hash = contentHash(input.content);
     const id = stableHash(
-      "artifact:v1",
+      "artifact-content:v2",
       episode.securityNamespace,
-      input.episodeId,
-      input.toolCallId ?? "",
+      input.mediaType,
       hash,
+      JSON.stringify(input.captureIntegrity ?? {}),
     );
     const existing = await this.getArtifact(id, options);
     if (existing?.state === "ready" && existing.securityNamespace === episode.securityNamespace) {

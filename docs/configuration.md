@@ -26,7 +26,8 @@ help from the knowledge command surface. After editing the file, run `/reload` o
     }
   },
   "retrieval": {
-    "automaticRecall": false
+    "automaticRecall": false,
+    "automaticRecallTokens": 800
   },
   "performance": {
     "sidecar": {
@@ -52,7 +53,8 @@ help from the knowledge command surface. After editing the file, run `/reload` o
 }
 ```
 
-`retrieval.automaticRecall` defaults to `false`. When `search_memory` is active for the turn, Pi
+`retrieval.automaticRecall` defaults to `false`; `retrieval.automaticRecallTokens` independently
+limits model-visible capsule evidence and defaults to `800`. When `search_memory` is active for the turn, Pi
 Mentis adds a compact system-prompt instruction telling Pi to search when information is unknown,
 uncertain, historical, indexed, or missing from current context. The instruction is omitted when
 the tool is not selected. This on-demand path keeps normal message submission independent of

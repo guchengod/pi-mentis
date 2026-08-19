@@ -98,6 +98,26 @@ describe("Rerank planning", () => {
     expect(batches.every((batch) => batch.estimatedInputTokens < context)).toBe(true);
   });
 
+  it("uses the UTF-8 estimator as the final gate even when stored token counts are low", () => {
+    const approximate = new ApproximateModelTokenEstimator();
+    const conservative = new ConservativeUtf8TokenEstimator();
+    const budget = createRerankBudget("query", undefined, conservative, {
+      modelContextTokens: 8_192,
+    });
+    const batches = planRerankBatches(
+      Array.from({ length: 8 }, (_, index) => ({
+        id: String(index),
+        text: `${"🧠".repeat(500)}\n\n${"安全".repeat(500)}`,
+        tokenCount: 1,
+      })),
+      budget,
+      approximate,
+      conservative,
+    );
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.every((batch) => batch.estimatedInputTokens < 8_192)).toBe(true);
+  });
+
   it("normalizes scores independently across hierarchical batches", () => {
     expect(
       Object.fromEntries(

@@ -144,10 +144,22 @@ describe("real Zvec production loop", () => {
       cwd: "/workspace",
       completedAt: Date.now(),
     });
+    await capture.toolStarted("tool-2", "bash", { command: "pnpm build" });
+    const repeated = await capture.toolResult({
+      toolCallId: "tool-2",
+      toolName: "bash",
+      input: { command: "pnpm build" },
+      text: original,
+      details: { exitCode: 1 },
+      isError: true,
+      cwd: "/workspace",
+      completedAt: Date.now(),
+    });
     await capture.finish();
     expect(offloaded?.mode).toBe("artifact");
     const artifactId = offloaded?.artifact?.id;
     expect(artifactId).toBeDefined();
+    expect(repeated?.artifact?.id).toBe(artifactId);
     await store.close();
 
     const reopened = new ZvecStore(testStorage(root));

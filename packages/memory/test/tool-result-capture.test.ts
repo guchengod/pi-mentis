@@ -88,6 +88,25 @@ describe("Pi tool result capture", () => {
     }
   });
 
+  it("rejects read recovery when the current file no longer matches Pi's visible prefix", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-mentis-read-race-"));
+    const inputPath = path.join(directory, "changing.txt");
+    try {
+      await writeFile(inputPath, "new content\nsecond line");
+      const recovered = await recoverFullToolResult({
+        ...envelope("old content\n\n[Showing lines 1-1 of 2. Use offset=2 to continue.]", {
+          truncation: { truncated: true, totalBytes: 30 },
+        }),
+        toolName: "read",
+        input: { path: inputPath },
+      });
+      expect(recovered.text).toContain("old content");
+      expect(recovered.captureIntegrity).toMatchObject({ complete: false, lossy: true });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("persists recovered capture integrity with the artifact", async () => {
     const written: Array<Record<string, unknown>> = [];
     const artifact = {

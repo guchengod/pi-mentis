@@ -456,7 +456,10 @@ export class DefaultMemoryService implements MemoryService {
   }
 
   async listPendingRelationshipLearning(
-    input: { readonly limit?: number } = {},
+    input: {
+      readonly limit?: number;
+      readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+    } = {},
   ): Promise<readonly RelationshipLearningWork[]> {
     const limit = Math.max(1, Math.min(input.limit ?? 64, RELATIONSHIP_LEARNING_SCAN_LIMIT));
     await this.#repairMissingRelationshipLearningMarkers(limit);
@@ -464,7 +467,16 @@ export class DefaultMemoryService implements MemoryService {
       ["pending", "processing", "failed_retryable"],
       limit,
     );
-    const normalized = await this.#normalizeRelationshipLearningStates(states, this.#clock.now());
+    const scopedStates =
+      input.scopeContext === undefined
+        ? states
+        : states.filter(
+            (state) => boundaryKey(state.value.scopeContext) === boundaryKey(input.scopeContext),
+          );
+    const normalized = await this.#normalizeRelationshipLearningStates(
+      scopedStates,
+      this.#clock.now(),
+    );
     return [...normalized]
       .filter((work) => this.#isRelationshipLearningUnresolved(work))
       .sort((left, right) => right.updatedAt - left.updatedAt)
@@ -1574,13 +1586,13 @@ export class DefaultMemoryService implements MemoryService {
     const tenant = record.ownership?.tenantId ?? record.scopeContext?.tenantId ?? "local";
     if (options.securityMode === "multi_tenant" && tenant !== currentTenant) return undefined;
     if (owner !== currentUser) return undefined;
-    if (options.accessIntent === "explicit_id" && options.securityMode !== "multi_tenant")
-      return record;
     if (
       options.scopeContext !== undefined &&
       boundaryKey(record.scopeContext) !== boundaryKey(options.scopeContext)
     )
       return undefined;
+    if (options.accessIntent === "explicit_id" && options.securityMode !== "multi_tenant")
+      return record;
     return record;
   }
 

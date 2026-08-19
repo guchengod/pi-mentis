@@ -1,4 +1,8 @@
-import { estimateModelTokens } from "@pi-mentis/pi-mentis-core";
+import {
+  projectMemoryRecallHit,
+  type MemoryRecord,
+  type PiScopeContext,
+} from "@pi-mentis/pi-mentis-memory-core";
 
 import type { PublicRecallHit, PublicRecallResult } from "./memory-tools.js";
 
@@ -18,6 +22,7 @@ export interface RecentAssertionOverlayOptions {
 }
 
 export interface DurablePendingProjectionReader {
+  readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
   getRelationshipLearning?(incomingId: string): Promise<
     | {
         readonly incomingId: string;
@@ -26,7 +31,10 @@ export interface DurablePendingProjectionReader {
       }
     | undefined
   >;
-  listPendingRelationshipLearning?(input?: { readonly limit?: number }): Promise<
+  listPendingRelationshipLearning?(input?: {
+    readonly limit?: number;
+    readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+  }): Promise<
     readonly {
       readonly incomingId: string;
       readonly state: string;
@@ -41,10 +49,39 @@ export interface DurablePendingProjectionReader {
         readonly content: string;
         readonly observedAt: number;
         readonly authority?: number;
-        readonly scope?: { readonly kind?: string };
+        readonly status?: MemoryRecord["status"];
+        readonly sensitivity?: MemoryRecord["sensitivity"];
+        readonly contentHash?: string;
+        readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+        readonly scope?: MemoryRecord["scope"];
       }
     | undefined
   >;
+}
+
+type PendingProjectionRecord = NonNullable<
+  Awaited<ReturnType<DurablePendingProjectionReader["get"]>>
+>;
+
+function projectPendingRecord(
+  reader: DurablePendingProjectionReader,
+  id: string,
+  record: PendingProjectionRecord,
+  match: PublicRecallHit["match"],
+) {
+  return projectMemoryRecallHit(
+    {
+      id,
+      content: record.content,
+      scope: record.scope ?? { kind: "user", id: reader.scopeContext?.userId ?? "local" },
+      ...(record.status === undefined ? {} : { status: record.status }),
+      ...(record.scopeContext === undefined ? {} : { scopeContext: record.scopeContext }),
+    },
+    {
+      match,
+      ...(reader.scopeContext === undefined ? {} : { scopeContext: reader.scopeContext }),
+    },
+  );
 }
 
 export interface AutomaticRecallHit {
@@ -63,7 +100,11 @@ export interface AutomaticRecallHit {
 export async function projectDurablePendingAutomaticRecall<
   T extends { readonly hits: readonly AutomaticRecallHit[] },
 >(reader: DurablePendingProjectionReader, result: T): Promise<T> {
-  const listed = (await reader.listPendingRelationshipLearning?.({ limit: 32 })) ?? [];
+  const listed =
+    (await reader.listPendingRelationshipLearning?.({
+      limit: 32,
+      ...(reader.scopeContext === undefined ? {} : { scopeContext: reader.scopeContext }),
+    })) ?? [];
   const unresolved = listed.filter(
     (work) =>
       work.state === "pending" || work.state === "processing" || work.state === "failed_retryable",
@@ -116,36 +157,29 @@ export async function projectDurablePendingAutomaticRecall<
   if (fallback === undefined) return result;
   const provisional: AutomaticRecallHit[] = records
     .toSorted((left, right) => right.record.observedAt - left.record.observedAt)
-    .map(({ work, record }, index) => ({
-      id: work.incomingId,
-      kind: "memory",
-      text: record.content,
-      score: bestScore + 1 - index / 100,
-      tokenCount: estimateModelTokens(record.content),
-      authority: record.authority ?? fallback.authority,
-      namespace: fallback.namespace,
-      contentHash: `pending:${work.incomingId}`,
-      metadata: {
-        pendingRelationship: true,
-        provisionalLatest: true,
-        shadowedCandidateIds: work.candidates.map((candidate) => candidate.id),
-      },
-    }));
+    .flatMap(({ work, record }, index) => {
+      const projected = projectPendingRecord(reader, work.incomingId, record, "semantic");
+      if (projected === undefined) return [];
+      return [
+        {
+          id: work.incomingId,
+          kind: "memory" as const,
+          text: projected.hit.content,
+          score: bestScore + 1 - index / 100,
+          tokenCount: projected.tokenCount,
+          authority: record.authority ?? fallback.authority,
+          namespace: fallback.namespace,
+          contentHash: `pending:${work.incomingId}`,
+          metadata: {
+            pendingRelationship: true,
+            provisionalLatest: true,
+            sanitized: projected.hit.sanitized,
+            shadowedCandidateIds: work.candidates.map((candidate) => candidate.id),
+          },
+        },
+      ];
+    });
   return { ...result, hits: [...provisional, ...retained] };
-}
-
-function publicKind(scopeKind: string | undefined): PublicRecallHit["kind"] {
-  switch (scopeKind) {
-    case "agent":
-    case "project":
-    case "repository":
-    case "task":
-    case "topic":
-    case "event":
-      return scopeKind;
-    default:
-      return "user";
-  }
 }
 
 function normalizedBigrams(value: string): ReadonlySet<string> {
@@ -178,7 +212,11 @@ export async function projectDurablePendingAssertions(
   if (reader.getRelationshipLearning === undefined) return result;
   const overlay = new RecentAssertionOverlay({ ttlMs: Number.MAX_SAFE_INTEGER });
   const hitIds = new Set(result.hits.map((hit) => hit.id));
-  const listed = (await reader.listPendingRelationshipLearning?.({ limit: 32 })) ?? [];
+  const listed =
+    (await reader.listPendingRelationshipLearning?.({
+      limit: 32,
+      ...(reader.scopeContext === undefined ? {} : { scopeContext: reader.scopeContext }),
+    })) ?? [];
   const listedRecords = new Map(
     (
       await Promise.all(
@@ -212,15 +250,9 @@ export async function projectDurablePendingAssertions(
     const record = listedRecords.get(work.incomingId) ?? (await reader.get(work.incomingId));
     if (record === undefined) continue;
     if (!hitIds.has(work.incomingId)) {
-      augmentedHits.push({
-        id: work.incomingId,
-        content: record.content,
-        kind: publicKind(record.scope?.kind),
-        status: "current",
-        match: "semantic",
-        resourceType: "memory",
-        sanitized: false,
-      });
+      const projected = projectPendingRecord(reader, work.incomingId, record, "semantic");
+      if (projected === undefined) continue;
+      augmentedHits.push({ ...projected.hit, status: "current" });
       hitIds.add(work.incomingId);
     }
     overlay.record({

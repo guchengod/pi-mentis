@@ -6,13 +6,130 @@
  * Secrets are never returned in plaintext through public paths.
  */
 
+import { estimateModelTokens } from "@pi-mentis/pi-mentis-core";
+
 import type {
   MemoryRecord,
   ArtifactRecord,
   ArtifactQueryHit,
   RelevanceScope,
   Sensitivity,
+  PiScopeContext,
 } from "./types.js";
+import { detectSecrets, safeSummary } from "./secret-detector.js";
+
+const MAX_PUBLIC_MEMORY_CONTENT_LENGTH = 300;
+
+export type PublicMemoryProjectionRecord = Pick<MemoryRecord, "id" | "content" | "scope"> &
+  Partial<Pick<MemoryRecord, "status" | "scopeContext">>;
+
+export interface PublicMemoryRecallHit {
+  readonly id: string;
+  readonly content: string;
+  readonly kind:
+    | "user"
+    | "agent"
+    | "project"
+    | "repository"
+    | "task"
+    | "topic"
+    | "event"
+    | "procedure"
+    | "knowledge"
+    | "artifact";
+  readonly status: "current" | "historical" | "conflicted";
+  readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
+  readonly resourceType: "memory";
+  readonly sanitized: boolean;
+}
+
+export interface PublicMemoryProjectionOptions {
+  readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
+  readonly match: PublicMemoryRecallHit["match"];
+  readonly status?: PublicMemoryRecallHit["status"];
+  readonly maxContentLength?: number;
+}
+
+export interface ProjectedMemoryRecallHit {
+  readonly hit: PublicMemoryRecallHit;
+  readonly tokenCount: number;
+}
+
+function projectionBoundaryKey(
+  context: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId"> | undefined,
+): string {
+  return [
+    context?.tenantId ?? "local",
+    context?.userId ?? "local",
+    context?.appId ?? "pi",
+    context?.agentId ?? "pi-mentis",
+  ]
+    .map(encodeURIComponent)
+    .join(":");
+}
+
+function publicRecallKind(scopeKind: string | undefined): PublicMemoryRecallHit["kind"] {
+  switch (scopeKind) {
+    case "user":
+    case "agent":
+    case "project":
+    case "repository":
+    case "task":
+    case "topic":
+      return scopeKind;
+    case "session":
+    case "branch":
+    case "run":
+    case "event":
+      return "event";
+    default:
+      return "user";
+  }
+}
+
+function publicRecallStatus(
+  status: MemoryRecord["status"] | undefined,
+): PublicMemoryRecallHit["status"] {
+  if (status === "conflicted") return "conflicted";
+  if (["superseded", "expired", "tombstoned", "rejected"].includes(status ?? "")) {
+    return "historical";
+  }
+  return "current";
+}
+
+/** The sole public projection for Memory content across every recall path. */
+export function projectMemoryRecallHit(
+  record: PublicMemoryProjectionRecord,
+  options: PublicMemoryProjectionOptions,
+): ProjectedMemoryRecallHit | undefined {
+  if (
+    options.scopeContext !== undefined &&
+    record.scopeContext !== undefined &&
+    projectionBoundaryKey(record.scopeContext) !== projectionBoundaryKey(options.scopeContext)
+  ) {
+    return undefined;
+  }
+  const detection = detectSecrets(record.content);
+  const sanitized = detection.sensitive;
+  const safeContent = sanitized
+    ? safeSummary(record.content, record.content.length)
+    : record.content;
+  const maximum = Math.max(1, options.maxContentLength ?? MAX_PUBLIC_MEMORY_CONTENT_LENGTH);
+  const content =
+    safeContent.length <= maximum ? safeContent : `${safeContent.slice(0, maximum)}...`;
+  return {
+    hit: {
+      id: record.id,
+      content,
+      kind: publicRecallKind(record.scope.kind),
+      status: options.status ?? publicRecallStatus(record.status),
+      match: options.match,
+      resourceType: "memory",
+      sanitized,
+    },
+    tokenCount: estimateModelTokens(content),
+  };
+}
 
 // ─── Public result types ──────────────────────────────────────────
 

@@ -11,6 +11,7 @@ import {
   type RelationshipLearningWork,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { StateRevisionConflictError, ZvecStateStore, ZvecStore } from "@pi-mentis/pi-mentis-zvec";
+import { AdaptivePolicyService } from "@pi-mentis/pi-mentis-retrieval";
 
 import { DeterministicEmbeddingProvider, embeddingSpace, testStorage } from "./helpers.js";
 
@@ -76,6 +77,28 @@ function replacementEvidence(targetId: string, oldValue: string, newValue: strin
 }
 
 describe("V2 intelligence state on real Zvec", () => {
+  it("rebases persisted adaptive policy when the configured baseline changes", async () => {
+    const { store } = await temporaryStore();
+    const namespace = "tenant:user:pi:mentis";
+    const original = new AdaptivePolicyService(store, namespace, {
+      baselineParameters: { contextTokens: 1_600, rerankCandidateLimit: 40 },
+    });
+    await original.initialize();
+    const originalFingerprint = original.active().baselineFingerprint;
+
+    const upgraded = new AdaptivePolicyService(store, namespace, {
+      baselineParameters: { contextTokens: 3_000, rerankCandidateLimit: 60 },
+    });
+    await upgraded.initialize();
+
+    expect(upgraded.active()).toMatchObject({
+      parameters: { contextTokens: 3_000, rerankCandidateLimit: 60 },
+      parentId: original.active().id,
+      policySchemaVersion: 2,
+    });
+    expect(upgraded.active().baselineFingerprint).not.toBe(originalFingerprint);
+  });
+
   it("persists revisioned state and rejects stale CAS", async () => {
     const { root, store } = await temporaryStore();
     const state = new ZvecStateStore(store);
@@ -378,6 +401,27 @@ describe("V2 intelligence state on real Zvec", () => {
       lastError: "pairwise provider timeout",
       operationKeys: [],
     });
+    const crossScope = { ...scope, agentId: "other-agent" };
+    const crossNamespace = "tenant:user:pi:other-agent::user:user";
+    await state.put(
+      {
+        id: state.id("memory-relationship-learning-v1", crossNamespace, "cross-agent-work"),
+        kind: "memory-relationship-learning-v1",
+        namespace: crossNamespace,
+        value: {
+          incomingId: "cross-agent-work",
+          namespace: crossNamespace,
+          scopeContext: crossScope,
+          state: "pending",
+          candidates: [],
+          attempts: 0,
+          maxAttempts: 4,
+          updatedAt: now,
+          operationKeys: [],
+        },
+      },
+      { status: "pending", now },
+    );
     expect(
       await state.list<RelationshipLearningWork>({
         kind: "memory-relationship-learning-v1",
@@ -389,10 +433,14 @@ describe("V2 intelligence state on real Zvec", () => {
     expect(recoverable?.map((work) => work.incomingId)).toContain(reclaimable.id);
     expect(recoverable?.map((work) => work.incomingId)).not.toContain(exhausted.id);
     expect(recoverable?.map((work) => work.incomingId)).not.toContain(retryExhausted.id);
-    const startupPending = await memory.listPendingRelationshipLearning?.({ limit: 32 });
+    const startupPending = await memory.listPendingRelationshipLearning?.({
+      limit: 32,
+      scopeContext: scope,
+    });
     expect(startupPending?.map((work) => work.incomingId)).toContain(reclaimable.id);
     expect(startupPending?.map((work) => work.incomingId)).not.toContain(exhausted.id);
     expect(startupPending?.map((work) => work.incomingId)).not.toContain(retryExhausted.id);
+    expect(startupPending?.map((work) => work.incomingId)).not.toContain("cross-agent-work");
     expect(await memory.getRelationshipLearning?.(exhausted.id)).toMatchObject({
       state: "failed_terminal",
       attempts: 4,

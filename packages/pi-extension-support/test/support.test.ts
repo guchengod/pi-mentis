@@ -317,6 +317,59 @@ describe("Pi extension support", () => {
     ).resolves.toMatchObject({ found: false, contentFound: false, hits: [] });
   });
 
+  it("sanitizes, bounds, and scope-checks durable pending projection", async () => {
+    const scopeContext = {
+      tenantId: "tenant",
+      userId: "user",
+      appId: "pi",
+      agentId: "agent-a",
+    };
+    const listPendingRelationshipLearning = vi.fn(async () => [
+      { incomingId: "safe", state: "pending", candidates: [] },
+      { incomingId: "cross-agent", state: "pending", candidates: [] },
+    ]);
+    const projected = await projectDurablePendingAssertions(
+      {
+        scopeContext,
+        async getRelationshipLearning() {
+          return undefined;
+        },
+        listPendingRelationshipLearning,
+        async get(id) {
+          if (id === "safe") {
+            return {
+              content: `GitHub token ghp_abcdefghijklmnopqrstuvwxyz123456 ${"long".repeat(500)}`,
+              observedAt: 2_000,
+              scope: { kind: "user" as const, id: "user" },
+              scopeContext,
+            };
+          }
+          return {
+            content: "cross-agent private value",
+            observedAt: 1_000,
+            scope: { kind: "user" as const, id: "user" },
+            scopeContext: { ...scopeContext, agentId: "agent-b" },
+          };
+        },
+      },
+      { query: "GitHub token long cross-agent private value" },
+      {
+        found: false,
+        contentFound: false,
+        lookupMode: "global_query",
+        resourceType: "search",
+        anchored: false,
+        hits: [],
+      },
+    );
+
+    expect(listPendingRelationshipLearning).toHaveBeenCalledWith({ limit: 32, scopeContext });
+    expect(projected.hits).toHaveLength(1);
+    expect(projected.hits[0]).toMatchObject({ id: "safe", sanitized: true });
+    expect(projected.hits[0]?.content).not.toContain("ghp_");
+    expect(projected.hits[0]?.content.length).toBeLessThanOrEqual(303);
+  });
+
   it("does not turn an exact metadata-only entity lookup into a miss", async () => {
     const id = "8".repeat(64);
     const projected = await projectDurablePendingAssertions(

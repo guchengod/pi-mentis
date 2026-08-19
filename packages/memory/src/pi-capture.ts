@@ -26,6 +26,7 @@ const VERIFICATION_COMMAND =
   /(?:^|\s)(?:test|typecheck|lint|check|build|verify|go\s+test|cargo\s+test|pytest|vitest|jest|tsc)(?:\s|$)/i;
 const MAX_RECOVERED_TOOL_RESULT_BYTES = 256 * 1024 * 1024;
 const PI_BASH_OUTPUT_FILE = /^pi-bash-[a-f0-9]{16}\.log$/;
+const PI_READ_TRUNCATION_NOTICE = /\n*\[(?:Showing|显示)[^\]]+\]\s*$/u;
 
 function objectValue(input: unknown, key: string): unknown {
   return typeof input === "object" && input !== null
@@ -100,6 +101,10 @@ async function recoverFullReadResult(
         ? Math.min(startLine + Math.max(0, limit), lines.length)
         : lines.length;
     const text = lines.slice(startLine, endLine).join("\n");
+    const visiblePrefix = envelope.text.replace(PI_READ_TRUNCATION_NOTICE, "").trimEnd();
+    if (visiblePrefix !== "" && !text.startsWith(visiblePrefix)) {
+      throw new Error("The read source changed after Pi produced the visible prefix");
+    }
     return {
       ...envelope,
       text,

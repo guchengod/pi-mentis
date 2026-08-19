@@ -61,4 +61,26 @@ describe("memory capsule", () => {
 
     expect(selectCapsuleEntries(capsule, "Render the landing page header")).toEqual([]);
   });
+
+  it("enforces a model-token budget for CJK capsule entries", () => {
+    const capsule = {
+      ...emptyCapsule("session-1"),
+      entries: [
+        capsuleEntry({
+          id: "first",
+          text: `数据库偏好：${"中文".repeat(200)}`,
+          kind: "memory" as const,
+          authority: 100,
+        }),
+        capsuleEntry({
+          id: "second",
+          text: `数据库备份：${"中文".repeat(200)}`,
+          kind: "memory" as const,
+          authority: 90,
+        }),
+      ],
+    };
+    const firstCost = capsule.entries[0]?.estimatedTokens ?? 0;
+    expect(selectCapsuleEntries(capsule, "数据库 中文", { maxTokens: firstCost })).toHaveLength(1);
+  });
 });

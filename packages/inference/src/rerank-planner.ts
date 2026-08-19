@@ -105,17 +105,26 @@ function truncateAtParagraph(
 export function planRerankBatches(
   documents: readonly RerankDocument[],
   budget: RerankBudget,
-  estimator: TokenEstimator,
+  packingEstimator: TokenEstimator,
+  hardLimitEstimator: TokenEstimator = packingEstimator,
 ): readonly RerankBatch[] {
   const batches: RerankBatch[] = [];
   let current: RerankDocument[] = [];
   let tokens = 0;
   for (const rawDocument of documents) {
     let document = rawDocument;
-    let documentTokens = rawDocument.tokenCount ?? estimator.count(rawDocument.text);
+    let documentTokens = Math.max(
+      rawDocument.tokenCount ?? packingEstimator.count(rawDocument.text),
+      hardLimitEstimator.count(rawDocument.text),
+    );
     if (documentTokens > budget.availableDocumentTokens) {
-      document = truncateAtParagraph(rawDocument, budget.availableDocumentTokens, estimator);
-      documentTokens = document.tokenCount ?? estimator.count(document.text);
+      document = truncateAtParagraph(
+        rawDocument,
+        budget.availableDocumentTokens,
+        hardLimitEstimator,
+      );
+      documentTokens = hardLimitEstimator.count(document.text);
+      document = { ...document, tokenCount: packingEstimator.count(document.text) };
     }
     if (current.length > 0 && tokens + documentTokens > budget.availableDocumentTokens) {
       batches.push({

@@ -500,6 +500,7 @@ export interface MemoryService {
   }): Promise<readonly RelationshipLearningWork[]>;
   listPendingRelationshipLearning?(input?: {
     readonly limit?: number;
+    readonly scopeContext?: Pick<PiScopeContext, "tenantId" | "userId" | "appId" | "agentId">;
   }): Promise<readonly RelationshipLearningWork[]>;
   getRelationshipLearning?(incomingId: string): Promise<RelationshipLearningWork | undefined>;
   getView?(

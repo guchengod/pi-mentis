@@ -1,4 +1,4 @@
-import { systemClock, type SearchHit } from "@pi-mentis/pi-mentis-core";
+import { estimateModelTokens, systemClock, type SearchHit } from "@pi-mentis/pi-mentis-core";
 
 export interface RankedList {
   readonly weight: number;
@@ -264,17 +264,25 @@ export function selectContext(
   let memory = 0;
   const ordered = [...hits].sort(
     (left, right) =>
-      authorityAndFreshness(right) / Math.max(1, right.tokenCount) -
-      authorityAndFreshness(left) / Math.max(1, left.tokenCount),
+      authorityAndFreshness(right) / Math.max(1, projectedContextTokenCost(right)) -
+      authorityAndFreshness(left) / Math.max(1, projectedContextTokenCost(left)),
   );
   for (const hit of ordered) {
-    if (total + hit.tokenCount > totalTokens) continue;
-    if (hit.kind === "knowledge" && knowledge + hit.tokenCount > knowledgeTokens) continue;
-    if (hit.kind === "memory" && memory + hit.tokenCount > memoryTokens) continue;
+    const cost = projectedContextTokenCost(hit);
+    if (total + cost > totalTokens) continue;
+    if (hit.kind === "knowledge" && knowledge + cost > knowledgeTokens) continue;
+    if (hit.kind === "memory" && memory + cost > memoryTokens) continue;
     selected.push(hit);
-    total += hit.tokenCount;
-    if (hit.kind === "knowledge") knowledge += hit.tokenCount;
-    if (hit.kind === "memory") memory += hit.tokenCount;
+    total += cost;
+    if (hit.kind === "knowledge") knowledge += cost;
+    if (hit.kind === "memory") memory += cost;
   }
   return selected;
+}
+
+/** Cost of the bounded content that can actually reach the public Memory API. */
+export function projectedContextTokenCost(hit: SearchHit): number {
+  if (hit.kind !== "memory") return hit.tokenCount;
+  const projected = hit.text.length <= 300 ? hit.text : `${hit.text.slice(0, 300)}...`;
+  return estimateModelTokens(projected);
 }

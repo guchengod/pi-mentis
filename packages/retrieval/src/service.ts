@@ -10,6 +10,7 @@ import {
 } from "@pi-mentis/pi-mentis-core";
 import {
   ApproximateModelTokenEstimator,
+  ConservativeUtf8TokenEstimator,
   BoundedTtlCache,
   createRerankBudget,
   normalizeBatchScores,
@@ -183,6 +184,7 @@ export class DefaultRetrievalService implements RetrievalService {
   readonly #rerankCache: BoundedTtlCache<RerankCacheValue>;
   readonly #telemetry: InMemoryTelemetry;
   readonly #estimator = new ApproximateModelTokenEstimator();
+  readonly #hardLimitEstimator = new ConservativeUtf8TokenEstimator();
   readonly #contextTokens: number;
   readonly #knowledgeTokens: number;
   readonly #memoryTokens: number;
@@ -730,10 +732,10 @@ export class DefaultRetrievalService implements RetrievalService {
     });
     const cached = this.#rerankCache.get(cacheKey);
     if (cached !== undefined) return this.#applyRerank(hits, cached);
-    const budget = createRerankBudget(query, instruction, this.#estimator, {
+    const budget = createRerankBudget(query, instruction, this.#hardLimitEstimator, {
       modelContextTokens: this.#rerankContextTokens,
     });
-    const batches = planRerankBatches(documents, budget, this.#estimator);
+    const batches = planRerankBatches(documents, budget, this.#estimator, this.#hardLimitEstimator);
     const firstRound = await Promise.all(
       batches.map(async (batch) => {
         const response = await this.#reranker?.rerank(
@@ -758,7 +760,12 @@ export class DefaultRetrievalService implements RetrievalService {
           ? []
           : [{ id: hit.id, text: hit.text, tokenCount: hit.tokenCount }];
       });
-      const finalBatches = planRerankBatches(winnerDocuments, budget, this.#estimator);
+      const finalBatches = planRerankBatches(
+        winnerDocuments,
+        budget,
+        this.#estimator,
+        this.#hardLimitEstimator,
+      );
       if (finalBatches.length === 1 && finalBatches[0] !== undefined) {
         const final = await this.#reranker.rerank(
           {
