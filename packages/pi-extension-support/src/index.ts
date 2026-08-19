@@ -170,6 +170,12 @@ export {
   type PiRecalledMemoryEvidence,
 } from "./pairwise-memory-reasoner.js";
 export {
+  createPiCognitionReasoner,
+  type PiCognitionReasoner,
+  type PiCognitionRequest,
+  type PiCognitionTask,
+} from "./pi-cognition.js";
+export {
   RecentAssertionOverlay,
   projectDurablePendingAssertions,
   projectDurablePendingAutomaticRecall,

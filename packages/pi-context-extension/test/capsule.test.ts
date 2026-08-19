@@ -83,4 +83,23 @@ describe("memory capsule", () => {
     const firstCost = capsule.entries[0]?.estimatedTokens ?? 0;
     expect(selectCapsuleEntries(capsule, "数据库 中文", { maxTokens: firstCost })).toHaveLength(1);
   });
+
+  it("deduplicates memories already referenced by active context", () => {
+    const capsule = {
+      ...emptyCapsule("session-1"),
+      entries: [
+        capsuleEntry({
+          id: "already-active",
+          text: "The repository uses pnpm for package management.",
+          kind: "memory" as const,
+          authority: 90,
+        }),
+      ],
+    };
+    expect(
+      selectCapsuleEntries(capsule, "Which package manager does the repository use?", {
+        excludeIds: new Set(["already-active"]),
+      }),
+    ).toEqual([]);
+  });
 });

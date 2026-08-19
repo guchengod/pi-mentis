@@ -76,6 +76,39 @@ async function eventually(check: () => boolean, timeoutMs = 1_000): Promise<void
 }
 
 describe("Mentis Sidecar lifecycle", () => {
+  it("accepts immutable active-context snapshots without requesting foreground I/O", async () => {
+    const child = new FakeChild(9_999);
+    childProcessMock.fork.mockReturnValue(child);
+    const snapshots: unknown[] = [];
+    const client = new MentisSidecarClient({
+      onActiveContext: (_sessionId, snapshot) => snapshots.push(snapshot),
+    });
+    await client.start(session.cwd, "/pi", session);
+    child.emit("message", {
+      type: "event",
+      protocolVersion: 1,
+      event: {
+        name: "active-context.updated",
+        clientSessionId: "session-1",
+        snapshot: {
+          version: 1,
+          stateId: "working-1",
+          namespace: "local:local:pi:pi-mentis",
+          sessionId: "session-1",
+          branchId: "root",
+          revision: 2,
+          generatedAt: 10,
+          content: "<pi-mentis-active-context />",
+          estimatedTokens: 12,
+          recalledMemoryIds: [],
+          artifactRefs: [],
+        },
+      },
+    });
+    expect(snapshots).toEqual([expect.objectContaining({ stateId: "working-1", revision: 2 })]);
+    await client.close();
+  });
+
   it("single-flights concurrent starts and opens the session once", async () => {
     const children: FakeChild[] = [];
     childProcessMock.fork.mockImplementation(() => {

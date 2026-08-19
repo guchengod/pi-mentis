@@ -18,6 +18,7 @@ import {
   toolResultTokenAccounting,
   type PiScopeContext,
   type ToolResultEnvelope,
+  type WorkingMemorySnapshot,
 } from "@pi-mentis/pi-mentis-memory-core";
 import {
   formatPiToolJson,
@@ -66,8 +67,13 @@ function toolResultMode(
   return "artifact";
 }
 
-function capsuleMessage(capsule: MemoryCapsule, prompt: string, maxTokens: number) {
-  const entries = selectCapsuleEntries(capsule, prompt, { maxTokens });
+function capsuleMessage(
+  capsule: MemoryCapsule,
+  prompt: string,
+  maxTokens: number,
+  excludeIds: ReadonlySet<string> = new Set(),
+) {
+  const entries = selectCapsuleEntries(capsule, prompt, { maxTokens, excludeIds });
   if (entries.length === 0) return undefined;
   const evidence = entries
     .map(
@@ -151,6 +157,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   }
 
   let capsule = emptyCapsule("uninitialized");
+  let activeContext: WorkingMemorySnapshot | undefined;
   let scopeContext: PiScopeContext = {
     tenantId: "local",
     userId: "local",
@@ -185,6 +192,15 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     onCapsule: (updated) => {
       capsule = updated;
     },
+    onActiveContext: (updatedSessionId, snapshot) => {
+      if (
+        updatedSessionId === clientSessionId &&
+        snapshot.sessionId === clientSessionId &&
+        snapshot.branchId === branchId
+      ) {
+        activeContext = snapshot;
+      }
+    },
     onWarning: (message) => {
       sidecarError = message;
       if (message.includes("stopped")) sidecarSessionReady = false;
@@ -205,6 +221,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     if (opened === undefined) throw new Error("Mentis sidecar did not open the Pi session");
     scopeContext = opened.scopeContext;
     if (opened.capsule !== undefined) capsule = opened.capsule;
+    activeContext = opened.activeContext;
     sidecarSessionReady = true;
     sidecarError = undefined;
   };
@@ -409,6 +426,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     flushInlineToolResults();
     completedLargeReads.clear();
     currentTurnCanSearchMemory = false;
+    activeContext = undefined;
     clientSessionId = context.sessionManager.getSessionId();
     branchId = context.sessionManager.getLeafId() ?? "root";
     parentBranchId =
@@ -449,6 +467,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   pi.on("session_tree", (event, context) => {
     completedLargeReads.clear();
     currentTurnCanSearchMemory = false;
+    activeContext = undefined;
     branchId = event.newLeafId ?? "root";
     parentBranchId =
       event.newLeafId === null
@@ -514,11 +533,40 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
         ? event.systemPrompt
         : `${event.systemPrompt}\n\n${memorySystemPrompt}`;
-    if (!config.retrieval.automaticRecall || event.prompt.startsWith("/")) {
+    if (event.prompt.startsWith("/")) {
       return { systemPrompt };
     }
-    const recalled = capsuleMessage(capsule, event.prompt, config.retrieval.automaticRecallTokens);
-    return recalled === undefined ? { systemPrompt } : { ...recalled, systemPrompt };
+    const currentActiveContext =
+      config.intelligence.workingMemory.enabled &&
+      activeContext?.sessionId === clientSessionId &&
+      activeContext?.branchId === branchId
+        ? activeContext
+        : undefined;
+    const recalled = config.retrieval.automaticRecall
+      ? capsuleMessage(
+          capsule,
+          event.prompt,
+          config.retrieval.automaticRecallTokens,
+          new Set(currentActiveContext?.recalledMemoryIds ?? []),
+        )
+      : undefined;
+    const activeContent = currentActiveContext?.content;
+    if (activeContent === undefined && recalled === undefined) return { systemPrompt };
+    const content = [activeContent, recalled?.message.content].filter(Boolean).join("\n\n");
+    return {
+      systemPrompt,
+      message: {
+        customType: "pi-mentis-active-context",
+        content,
+        display: false,
+        details: {
+          source: "sidecar-active-context",
+          activeContextRevision: currentActiveContext?.revision,
+          activeContextGeneratedAt: currentActiveContext?.generatedAt,
+          capsuleRevision: recalled?.message.details.capsuleRevision,
+        },
+      },
+    };
   });
 
   pi.on("tool_execution_start", (event) => {

@@ -38,6 +38,7 @@ import {
   MentisBackgroundQueue,
   MentisSerialWorkQueue,
   PiCaptureSession,
+  WorkingMemoryService,
   fullReadResult,
   createExperienceLearningService,
   createPiEvidenceStore,
@@ -57,6 +58,8 @@ import {
   type PiEvidenceStore,
   type PiProjectIdentity,
   type PiScopeContext,
+  type WorkingMemorySnapshot,
+  type WorkingMemoryState,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
@@ -327,6 +330,9 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   let branchId = "root";
   let parentBranchId: string | undefined;
   let captureSession: PiCaptureSession | undefined;
+  let workingMemoryService: WorkingMemoryService | undefined;
+  let workingMemoryState: WorkingMemoryState | undefined;
+  let activeContext: WorkingMemorySnapshot | undefined;
   const completedLargeReads = new Map<string, string>();
   let currentTurnCanSearchMemory = false;
   let activeProjectIdentity = fallbackProjectIdentity(process.cwd());
@@ -621,6 +627,24 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     };
     evidenceStore ??= createPiEvidenceStore(storeHandle.store);
     contextState ??= new ContextStateService(storeHandle.store);
+    if (config.intelligence.workingMemory.enabled) {
+      workingMemoryService ??= new WorkingMemoryService(
+        storeHandle.store,
+        config.intelligence.workingMemory,
+      );
+      workingMemoryState = await workingMemoryService
+        .loadOrCreate(
+          scopeContext,
+          scopeContext.sessionId ?? context.sessionManager.getSessionId(),
+          scopeContext.branchId ?? branchId,
+          scopeContext.parentBranchId,
+        )
+        .catch(() => undefined);
+      activeContext =
+        workingMemoryState === undefined
+          ? undefined
+          : workingMemoryService.snapshot(workingMemoryState);
+    }
     const repair = scheduler.schedule({
       id: `memory-maintenance:${scopeContext.userId}`,
       deduplicationKey: `memory-maintenance:${scopeContext.userId}`,
@@ -696,6 +720,36 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
         evidenceStore,
         config.memory.offload,
         (episode, events, outcome) => {
+          if (workingMemoryService !== undefined) {
+            const service = workingMemoryService;
+            const capturedScope = scopeContext;
+            const workingJob = scheduler.schedule({
+              id: `working-memory:${episode.id}`,
+              deduplicationKey: `working-memory:${episode.id}`,
+              priority: TaskPriority.SessionMaintenance,
+              estimatedBytes: 2_048,
+              run: async (signal) => {
+                const state = await service.applyEpisode(
+                  {
+                    scopeContext: capturedScope,
+                    episode,
+                    events,
+                    outcome,
+                    ...(capturedScope.taskId === undefined ? {} : { taskId: capturedScope.taskId }),
+                  },
+                  { signal },
+                );
+                if (
+                  capturedScope.sessionId === scopeContext.sessionId &&
+                  (capturedScope.branchId ?? "root") === (scopeContext.branchId ?? "root")
+                ) {
+                  workingMemoryState = state;
+                  activeContext = service.snapshot(state);
+                }
+              },
+            });
+            void workingJob.promise.catch(() => undefined);
+          }
           if (episode.taskId !== undefined && contextState !== undefined) {
             const episodeTaskId = episode.taskId;
             const taskState =
@@ -785,6 +839,7 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
   pi.on("session_tree", (event, context) => {
     completedLargeReads.clear();
     currentTurnCanSearchMemory = false;
+    activeContext = undefined;
     branchId = event.newLeafId ?? "root";
     parentBranchId =
       event.newLeafId === null
@@ -795,6 +850,29 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       branchId,
       ...(parentBranchId === undefined ? {} : { parentBranchId }),
     };
+    if (workingMemoryService !== undefined && scopeContext.sessionId !== undefined) {
+      const service = workingMemoryService;
+      const branchScope = scopeContext;
+      const branchJob = scheduler.schedule({
+        id: `working-memory-branch:${scopeContext.sessionId}:${branchId}`,
+        deduplicationKey: `working-memory-branch:${scopeContext.sessionId}:${branchId}`,
+        priority: TaskPriority.SessionMaintenance,
+        estimatedBytes: 1_024,
+        run: async () => {
+          const state = await service.loadOrCreate(
+            branchScope,
+            branchScope.sessionId as string,
+            branchId,
+            parentBranchId,
+          );
+          if ((scopeContext.branchId ?? "root") === branchId) {
+            workingMemoryState = state;
+            activeContext = service.snapshot(state);
+          }
+        },
+      });
+      void branchJob.promise.catch(() => undefined);
+    }
   });
   pi.on("input", (event) => {
     deferredRelationships?.activity();
@@ -1077,12 +1155,30 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
       "search_memory",
     );
     currentTurnCanSearchMemory = searchMemoryActive;
-    return {
-      systemPrompt:
-        !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
-          ? event.systemPrompt
-          : `${event.systemPrompt}\n\n${memorySystemPrompt}`,
-    };
+    const systemPrompt =
+      !searchMemoryActive || event.systemPrompt.includes("<pi-mentis-tools>")
+        ? event.systemPrompt
+        : `${event.systemPrompt}\n\n${memorySystemPrompt}`;
+    const currentActiveContext =
+      config.intelligence.workingMemory.enabled &&
+      activeContext?.sessionId === context.sessionManager.getSessionId() &&
+      activeContext?.branchId === branchId
+        ? activeContext
+        : undefined;
+    return currentActiveContext === undefined
+      ? { systemPrompt }
+      : {
+          systemPrompt,
+          message: {
+            customType: "pi-mentis-active-context",
+            content: currentActiveContext.content,
+            display: false,
+            details: {
+              source: "memory-extension-active-context",
+              revision: currentActiveContext.revision,
+            },
+          },
+        };
   });
   pi.on("tool_execution_start", (event) => {
     if (captureSession === undefined) return;
@@ -1148,6 +1244,9 @@ export default async function piMentisMemoryExtension(pi: ExtensionAPI): Promise
     const session = captureSession;
     captureQueue.enqueue(async () => {
       await session.compact(event.compactionEntry.summary, event.reason, event.willRetry);
+      if (workingMemoryState !== undefined) {
+        await workingMemoryService?.checkpoint(workingMemoryState).catch(() => undefined);
+      }
     });
   });
   pi.on("agent_settled", () => {

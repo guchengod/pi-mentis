@@ -44,6 +44,23 @@ help from the knowledge command surface. After editing the file, run `/reload` o
   },
   "intelligence": {
     "context": { "persistSnapshots": true, "capabilityMaxAgeMs": 60000 },
+    "workingMemory": {
+      "enabled": true,
+      "promptTokens": 900,
+      "hardMaxTokens": 1200
+    },
+    "memoryFormation": {
+      "enabled": true,
+      "autoPromotion": false,
+      "maxInputTokens": 900,
+      "maxOutputTokens": 700
+    },
+    "consolidation": {
+      "enabled": true,
+      "maxDigestTokens": 1600,
+      "procedureMinimumOutcomes": 3,
+      "procedureMinimumSuccessEstimate": 0.7
+    },
     "temporal": { "enabled": true },
     "views": { "enabled": true, "ttlMs": 300000 },
     "effectiveness": { "enabled": true, "flushIntervalMs": 250, "maxBatch": 64 },
@@ -72,6 +89,33 @@ Automatic recall does not perform storage or network I/O in `before_agent_start`
 additional evidence into the model prompt and enables post-turn semantic capsule refresh. That
 extra prompt/background work can produce perceptible TUI latency after sending a message. The
 extension displays a warning once per process when this option is enabled.
+
+`intelligence.workingMemory` is independent of automatic recall and defaults to enabled. Its
+snapshot tracks the current goal, subgoals, confirmed facts, model hypotheses, decisions, open
+loops, resources, outcomes, memory IDs, and Artifact IDs. `promptTokens` is the normal injection
+budget; `hardMaxTokens` is the absolute reducer/rendering ceiling. Collection limits default to
+`maxConfirmed: 24`, `maxHypotheses: 12`, `maxOpenLoops: 16`, `maxRecentOutcomes: 20`, and
+`maxActiveResources: 24`; they bound persistent state as well as prompt projection. State is keyed
+by the security namespace, Pi Session, and Pi Branch.
+
+`intelligence.memoryFormation.enabled` enables post-turn Candidate analysis. Cheap local triggers
+and Secret filtering run before the current Pi model is asked for strict structured output.
+`maxInputTokens`, `maxOutputTokens`, `maxCandidatesPerTurn`, and `candidateMaxCharacters` bound the
+request and result. Defaults are three candidates per turn, 500 characters per candidate, and a
+30-day `candidateTtlMs`. Stable preferences and behavior require two
+`minimumPreferenceObservations` and three `minimumBehaviorObservations` independent Evidence
+observations. `autoPromotion` defaults to `false`; while false, candidates cannot enter retrieval.
+When explicitly enabled, only candidates passing source, scope, evidence, confidence, durability,
+and repetition gates are committed through the existing Memory service with lower authority than
+an explicit current user instruction.
+
+`intelligence.consolidation` controls TaskEpisode semantic and procedural learning. Digests are
+bounded by `maxDigestTokens`; model output is bounded by `maxOutputTokens` and
+`maxSemanticCandidates` (defaults: 1,600 input tokens, 1,200 output tokens, five candidates).
+`longTaskCheckpointTurns` defaults to 12 turns. Semantic
+assertions enter the same Candidate gates. Procedures require at least `procedureMinimumOutcomes`
+unique evidence-backed outcomes and a Beta estimate at or above
+`procedureMinimumSuccessEstimate`; aborted and unverified tasks do not qualify.
 
 Set the credential in the environment, never the JSON file. Validation enforces Pi
 0.84.0 or newer, HTTPS (except localhost tests), 768–4096 dimensions, 8K–32K Rerank context,

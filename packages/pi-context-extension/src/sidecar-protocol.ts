@@ -3,6 +3,7 @@ import type {
   PiScopeContext,
   ToolResultEnvelope,
   OffloadedToolResult,
+  WorkingMemorySnapshot,
 } from "@pi-mentis/pi-mentis-memory-core";
 export type { PiScopeContext } from "@pi-mentis/pi-mentis-memory-core";
 import type {
@@ -171,6 +172,14 @@ export type SidecarNotification =
         readonly error?: string;
       };
     }
+  | {
+      readonly method: "cognition.response";
+      readonly params: {
+        readonly requestId: string;
+        readonly result?: unknown;
+        readonly error?: string;
+      };
+    }
   | { readonly method: "shutdown"; readonly params: Record<string, never> };
 
 export interface SidecarRequestMessage {
@@ -201,6 +210,11 @@ export interface SidecarEventMessage {
     | { readonly name: "ready"; readonly version: string }
     | { readonly name: "capsule.updated"; readonly capsule: MemoryCapsule }
     | {
+        readonly name: "active-context.updated";
+        readonly clientSessionId: string;
+        readonly snapshot: WorkingMemorySnapshot;
+      }
+    | {
         readonly name: "context.updated";
         readonly clientSessionId: string;
         readonly scopeContext: PiScopeContext;
@@ -216,6 +230,17 @@ export interface SidecarEventMessage {
           readonly match: "exact" | "profile" | "view" | "lexical" | "semantic" | "anchored";
         };
       }
+    | {
+        readonly name: "cognition.request";
+        readonly requestId: string;
+        readonly task: "memory_candidate" | "episode_consolidation";
+        readonly payload: Readonly<Record<string, unknown>>;
+        readonly maxOutputTokens: number;
+      }
+    | {
+        readonly name: "cognition.cancel";
+        readonly requestId: string;
+      }
     | { readonly name: "warning"; readonly message: string };
 }
 
@@ -225,6 +250,7 @@ export type SidecarOutboundMessage = SidecarRequestMessage | SidecarNotification
 export interface SessionOpenResult {
   readonly scopeContext: PiScopeContext;
   readonly capsule?: MemoryCapsule;
+  readonly activeContext?: WorkingMemorySnapshot;
 }
 
 export type SidecarMethodResult<M extends SidecarRequest["method"]> = M extends "initialize"

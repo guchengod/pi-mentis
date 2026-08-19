@@ -6,7 +6,15 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { EvidenceAuthority } from "@pi-mentis/pi-mentis-core";
 import {
+  MemoryCandidateService,
+  TaskEpisodeService,
+  WorkingMemoryService,
+  createExperienceLearningService,
   createMemoryService,
+  securityNamespaceForScope,
+  type OutcomeStatus,
+  type PiEpisode,
+  type PiEvent,
   type PiScopeContext,
   type RelationshipLearningWork,
 } from "@pi-mentis/pi-mentis-memory-core";
@@ -77,6 +85,208 @@ function replacementEvidence(targetId: string, oldValue: string, newValue: strin
 }
 
 describe("V2 intelligence state on real Zvec", () => {
+  it("promotes reinforced natural preferences and repeatedly verified procedures into retrievable memory", async () => {
+    const { store } = await temporaryStore(64);
+    const memory = createMemoryService({
+      store,
+      embedding: new DeterministicEmbeddingProvider(64),
+      embeddingSpace: embeddingSpace(64),
+      dimensions: 64,
+      viewsEnabled: false,
+    });
+    const candidates = new MemoryCandidateService(store, memory, {
+      autoPromotion: true,
+      maxCandidatesPerTurn: 3,
+      candidateMaxCharacters: 500,
+      candidateTtlMs: 86_400_000,
+      minimumPreferenceObservations: 2,
+      minimumBehaviorObservations: 3,
+    });
+    const namespace = securityNamespaceForScope(scope);
+    const proposal = (evidenceId: string) => ({
+      content: "I usually prefer minimal repairs",
+      scopeHint: "user" as const,
+      confidence: 0.95,
+      durability: 0.9,
+      evidenceIds: [evidenceId],
+    });
+    const observePreference = (sessionId: string, evidenceId: string) =>
+      candidates.observe({
+        proposal: proposal(evidenceId),
+        source: "user_statement",
+        scopeContext: { ...scope, sessionId },
+        evidence: [
+          {
+            id: evidenceId,
+            ref: { kind: "event", id: evidenceId, observedAt: Date.now() },
+            namespace,
+            text: "I usually prefer minimal repairs",
+            verified: false,
+          },
+        ],
+        observationId: `preference:${sessionId}`,
+      });
+    expect((await observePreference("session:a", "preference:a")).outcome).toBe("created");
+    expect((await observePreference("session:b", "preference:b")).outcome).toBe("promoted");
+    const preferenceRecall = await memory.search({
+      text: "minimal repair preference",
+      scopes: [{ kind: "user", id: "user" }],
+      scopeContext: scope,
+      temporalMode: "current",
+    });
+    expect(preferenceRecall.hits.some((hit) => hit.text.includes("minimal repairs"))).toBe(true);
+
+    const experience = createExperienceLearningService({
+      store,
+      memory,
+      minimumOutcomes: 3,
+      minimumSuccessEstimate: 0.7,
+    });
+    const procedure = await experience.observe({
+      version: 2,
+      goal: "repair shared writer coordination",
+      scopeContext: scope,
+      environment: { os: "darwin", runtime: "node" },
+      prerequisites: ["shared writer failure"],
+      steps: ["inspect writer ownership", "repair lifecycle", "run focused tests"],
+      generalizedSteps: [
+        "inspect writer ownership",
+        "repair writer lifecycle",
+        "run focused tests",
+      ],
+      normalizedProblemCues: ["shared writer coordination failure"],
+      rawEpisodeIds: ["episode:1"],
+      successCriteria: ["focused shared writer tests pass"],
+      applicabilityContext: { repositoryId: "repo:a", runtime: "node" },
+      cost: 0,
+      durationMs: 1,
+      appliesWhen: ["shared writer coordination fails"],
+      excludesWhen: [],
+      capabilityGaps: [],
+      generationContext: ["pi-task-episode-cognition-v1"],
+      validationPlan: ["run focused shared writer tests"],
+    });
+    for (let index = 1; index <= 3; index++) {
+      await experience.recordOutcome(procedure.id, {
+        succeeded: true,
+        evidence: { kind: "event", id: `procedure:${index}`, observedAt: index },
+        cost: 0,
+        durationMs: 1,
+        environment: { os: "darwin", runtime: "node", repositoryId: "repo:a" },
+      });
+    }
+    await experience.qualify(procedure.id);
+    await experience.promote(procedure.id);
+    const procedureRecall = await memory.search({
+      text: "shared writer coordination failure",
+      scopes: [{ kind: "repository", id: "repo:a" }],
+      scopeContext: scope,
+      temporalMode: "current",
+    });
+    expect(procedureRecall.hits.some((hit) => hit.text.includes("Procedure:"))).toBe(true);
+    await store.close();
+  }, 60_000);
+
+  it("persists branch-local working memory and task episodes without crossing security namespaces", async () => {
+    const { root, store } = await temporaryStore(64);
+    const limits = {
+      promptTokens: 220,
+      hardMaxTokens: 1_200,
+      maxConfirmed: 4,
+      maxHypotheses: 3,
+      maxOpenLoops: 3,
+      maxRecentOutcomes: 4,
+      maxActiveResources: 4,
+    } as const;
+    const partial: OutcomeStatus = {
+      executionStatus: "partial",
+      verificationStatus: "not_run",
+      taskStatus: "partial",
+    };
+    const makeEpisode = (id: string, goal: string, branchId: string): PiEpisode => ({
+      id,
+      sessionId: "session:a",
+      securityNamespace: securityNamespaceForScope(scope),
+      branchId,
+      taskId: "task:a",
+      topicIds: [],
+      goal,
+      startedAt: 1_000,
+      endedAt: 1_100,
+      status: "partial",
+      firstSequence: 1,
+      lastSequence: 1,
+    });
+    const makeGoalEvent = (id: string, goal: string): PiEvent => ({
+      id,
+      episodeId: id,
+      securityNamespace: securityNamespaceForScope(scope),
+      sequence: 1,
+      kind: "goal",
+      timestamp: 1_000,
+      payload: { goal },
+    });
+    const working = new WorkingMemoryService(store, limits);
+    const tasks = new TaskEpisodeService(store);
+    const parentEpisode = makeEpisode("episode:parent", "repair durable context", "feature");
+    const parentEvent = makeGoalEvent("event:parent", parentEpisode.goal);
+    const parent = await working.applyEpisode({
+      scopeContext: scope,
+      episode: parentEpisode,
+      events: [parentEvent],
+      outcome: partial,
+      taskId: "task:a",
+    });
+    await tasks.append({
+      taskId: "task:a",
+      scopeContext: scope,
+      episode: parentEpisode,
+      events: [parentEvent],
+      outcome: partial,
+      workingMemory: parent,
+    });
+    const childScope = { ...scope, branchId: "child", parentBranchId: "feature" };
+    const child = await working.loadOrCreate(childScope, "session:a", "child", "feature");
+    expect(child.goal?.text).toBe("repair durable context");
+    await working.applyEpisode({
+      scopeContext: childScope,
+      episode: makeEpisode("episode:child", "continue child-only repair", "child"),
+      events: [makeGoalEvent("event:child", "continue child-only repair")],
+      outcome: partial,
+      taskId: "task:a",
+    });
+    await store.close();
+
+    const reopened = new ZvecStore(testStorage(root));
+    const space = embeddingSpace(64);
+    await reopened.start({ knowledge: space, memory: space, capability: space });
+    const restoredWorking = new WorkingMemoryService(reopened, limits);
+    const restoredTasks = new TaskEpisodeService(reopened);
+    expect((await restoredWorking.restore(scope, "session:a", "feature"))?.goal?.text).toBe(
+      "repair durable context",
+    );
+    expect((await restoredWorking.restore(childScope, "session:a", "child"))?.branchId).toBe(
+      "child",
+    );
+    expect(
+      await restoredWorking.restore({ ...scope, agentId: "other-agent" }, "session:a", "feature"),
+    ).toBeUndefined();
+    expect(
+      await restoredWorking.restore({ ...scope, appId: "other-app" }, "session:a", "feature"),
+    ).toBeUndefined();
+    expect(
+      await restoredTasks.get(securityNamespaceForScope(scope), "task:a", "feature"),
+    ).toMatchObject({ taskId: "task:a", branchId: "feature", episodeIds: ["episode:parent"] });
+    expect(
+      await restoredTasks.get(
+        securityNamespaceForScope({ ...scope, agentId: "other-agent" }),
+        "task:a",
+        "feature",
+      ),
+    ).toBeUndefined();
+    await reopened.close();
+  }, 60_000);
+
   it("rebases persisted adaptive policy when the configured baseline changes", async () => {
     const { store } = await temporaryStore();
     const namespace = "tenant:user:pi:mentis";

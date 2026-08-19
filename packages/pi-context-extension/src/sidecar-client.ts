@@ -2,7 +2,11 @@ import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createPiPairwiseRelationshipReasoner } from "@pi-mentis/pi-mentis-pi-extension-support";
+import type { WorkingMemorySnapshot } from "@pi-mentis/pi-mentis-memory-core";
+import {
+  createPiCognitionReasoner,
+  createPiPairwiseRelationshipReasoner,
+} from "@pi-mentis/pi-mentis-pi-extension-support";
 
 import {
   SIDECAR_PROTOCOL_VERSION,
@@ -33,6 +37,7 @@ export interface MentisSidecarClientOptions {
   readonly restartBaseDelayMs?: number;
   readonly restartMaxDelayMs?: number;
   readonly onCapsule?: (capsule: MemoryCapsule) => void;
+  readonly onActiveContext?: (clientSessionId: string, snapshot: WorkingMemorySnapshot) => void;
   readonly onWarning?: (message: string) => void;
   readonly onScopeContext?: (scopeContext: PiScopeContext) => void;
   readonly onStateChange?: (state: MentisSidecarLifecycleState) => void;
@@ -54,6 +59,7 @@ export class MentisSidecarClient {
   readonly #restartBaseDelayMs: number;
   readonly #restartMaxDelayMs: number;
   readonly #onCapsule: (capsule: MemoryCapsule) => void;
+  readonly #onActiveContext: (clientSessionId: string, snapshot: WorkingMemorySnapshot) => void;
   readonly #onWarning: (message: string) => void;
   readonly #onScopeContext: (scopeContext: PiScopeContext) => void;
   readonly #onStateChange: (state: MentisSidecarLifecycleState) => void;
@@ -84,6 +90,7 @@ export class MentisSidecarClient {
       options.restartMaxDelayMs ?? 5_000,
     );
     this.#onCapsule = options.onCapsule ?? (() => undefined);
+    this.#onActiveContext = options.onActiveContext ?? (() => undefined);
     this.#onWarning = options.onWarning ?? (() => undefined);
     this.#onScopeContext = options.onScopeContext ?? (() => undefined);
     this.#onStateChange = options.onStateChange ?? (() => undefined);
@@ -414,6 +421,10 @@ export class MentisSidecarClient {
       this.#onCapsule(message.event.capsule);
       return;
     }
+    if (message.event.name === "active-context.updated") {
+      this.#onActiveContext(message.event.clientSessionId, message.event.snapshot);
+      return;
+    }
     if (message.event.name === "context.updated") {
       this.#onScopeContext(message.event.scopeContext);
       return;
@@ -422,7 +433,45 @@ export class MentisSidecarClient {
       this.#onWarning(message.event.message);
       return;
     }
-    void this.#reason(message.event);
+    if (message.event.name === "cognition.cancel") {
+      this.#reasonControllers.get(message.event.requestId)?.abort("Sidecar cognition cancelled");
+      return;
+    }
+    if (message.event.name === "reason.request") void this.#reason(message.event);
+    else void this.#cognition(message.event);
+  }
+
+  async #cognition(
+    event: Extract<SidecarEventMessage["event"], { name: "cognition.request" }>,
+  ): Promise<void> {
+    const context = this.#reasonContext;
+    const reasoner = context === undefined ? undefined : createPiCognitionReasoner(context);
+    if (reasoner === undefined) {
+      this.notify({
+        method: "cognition.response",
+        params: { requestId: event.requestId, error: "Pi model unavailable" },
+      });
+      return;
+    }
+    const controller = new AbortController();
+    this.#reasonControllers.set(event.requestId, controller);
+    try {
+      const result = await reasoner.complete(
+        { task: event.task, payload: event.payload, maxOutputTokens: event.maxOutputTokens },
+        controller.signal,
+      );
+      this.notify({ method: "cognition.response", params: { requestId: event.requestId, result } });
+    } catch (error) {
+      this.notify({
+        method: "cognition.response",
+        params: {
+          requestId: event.requestId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    } finally {
+      this.#reasonControllers.delete(event.requestId);
+    }
   }
 
   async #reason(event: Extract<SidecarEventMessage["event"], { name: "reason.request" }>) {

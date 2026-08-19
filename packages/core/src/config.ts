@@ -155,6 +155,36 @@ export interface ObservabilityConfig {
 }
 
 export interface IntelligenceConfig {
+  readonly workingMemory: {
+    readonly enabled: boolean;
+    readonly promptTokens: number;
+    readonly hardMaxTokens: number;
+    readonly maxConfirmed: number;
+    readonly maxHypotheses: number;
+    readonly maxOpenLoops: number;
+    readonly maxRecentOutcomes: number;
+    readonly maxActiveResources: number;
+  };
+  readonly memoryFormation: {
+    readonly enabled: boolean;
+    readonly autoPromotion: boolean;
+    readonly maxCandidatesPerTurn: number;
+    readonly candidateMaxCharacters: number;
+    readonly maxInputTokens: number;
+    readonly maxOutputTokens: number;
+    readonly candidateTtlMs: number;
+    readonly minimumPreferenceObservations: number;
+    readonly minimumBehaviorObservations: number;
+  };
+  readonly consolidation: {
+    readonly enabled: boolean;
+    readonly maxDigestTokens: number;
+    readonly maxOutputTokens: number;
+    readonly maxSemanticCandidates: number;
+    readonly longTaskCheckpointTurns: number;
+    readonly procedureMinimumOutcomes: number;
+    readonly procedureMinimumSuccessEstimate: number;
+  };
   readonly context: {
     readonly persistSnapshots: boolean;
     readonly capabilityMaxAgeMs: number;
@@ -361,6 +391,36 @@ export function createDefaultConfig(
       logLevel: "warn",
     },
     intelligence: {
+      workingMemory: {
+        enabled: true,
+        promptTokens: 900,
+        hardMaxTokens: 1_200,
+        maxConfirmed: 24,
+        maxHypotheses: 12,
+        maxOpenLoops: 16,
+        maxRecentOutcomes: 20,
+        maxActiveResources: 24,
+      },
+      memoryFormation: {
+        enabled: true,
+        autoPromotion: false,
+        maxCandidatesPerTurn: 3,
+        candidateMaxCharacters: 500,
+        maxInputTokens: 900,
+        maxOutputTokens: 700,
+        candidateTtlMs: 30 * 24 * 60 * 60 * 1_000,
+        minimumPreferenceObservations: 2,
+        minimumBehaviorObservations: 3,
+      },
+      consolidation: {
+        enabled: true,
+        maxDigestTokens: 1_600,
+        maxOutputTokens: 1_200,
+        maxSemanticCandidates: 5,
+        longTaskCheckpointTurns: 12,
+        procedureMinimumOutcomes: 3,
+        procedureMinimumSuccessEstimate: 0.7,
+      },
       context: { persistSnapshots: true, capabilityMaxAgeMs: 60_000 },
       temporal: { enabled: true },
       views: { enabled: true, ttlMs: 5 * 60_000 },
@@ -395,6 +455,126 @@ export function validateConfig(config: PiMentisConfig): PiMentisConfig {
       { operation: "configuration-validate", retryable: false },
     );
   }
+  requireRange(
+    "intelligence.workingMemory.promptTokens",
+    config.intelligence.workingMemory.promptTokens,
+    128,
+    config.intelligence.workingMemory.hardMaxTokens,
+  );
+  requireRange(
+    "intelligence.workingMemory.hardMaxTokens",
+    config.intelligence.workingMemory.hardMaxTokens,
+    128,
+    4_096,
+  );
+  requireRange(
+    "intelligence.workingMemory.maxConfirmed",
+    config.intelligence.workingMemory.maxConfirmed,
+    1,
+    256,
+  );
+  requireRange(
+    "intelligence.workingMemory.maxHypotheses",
+    config.intelligence.workingMemory.maxHypotheses,
+    1,
+    128,
+  );
+  requireRange(
+    "intelligence.workingMemory.maxOpenLoops",
+    config.intelligence.workingMemory.maxOpenLoops,
+    1,
+    128,
+  );
+  requireRange(
+    "intelligence.workingMemory.maxRecentOutcomes",
+    config.intelligence.workingMemory.maxRecentOutcomes,
+    1,
+    256,
+  );
+  requireRange(
+    "intelligence.workingMemory.maxActiveResources",
+    config.intelligence.workingMemory.maxActiveResources,
+    1,
+    256,
+  );
+  requireRange(
+    "intelligence.memoryFormation.maxCandidatesPerTurn",
+    config.intelligence.memoryFormation.maxCandidatesPerTurn,
+    1,
+    10,
+  );
+  requireRange(
+    "intelligence.memoryFormation.candidateMaxCharacters",
+    config.intelligence.memoryFormation.candidateMaxCharacters,
+    80,
+    2_000,
+  );
+  requireRange(
+    "intelligence.memoryFormation.maxInputTokens",
+    config.intelligence.memoryFormation.maxInputTokens,
+    128,
+    4_096,
+  );
+  requireRange(
+    "intelligence.memoryFormation.maxOutputTokens",
+    config.intelligence.memoryFormation.maxOutputTokens,
+    128,
+    2_000,
+  );
+  requireRange(
+    "intelligence.memoryFormation.candidateTtlMs",
+    config.intelligence.memoryFormation.candidateTtlMs,
+    60_000,
+    365 * 24 * 60 * 60 * 1_000,
+  );
+  requireRange(
+    "intelligence.memoryFormation.minimumPreferenceObservations",
+    config.intelligence.memoryFormation.minimumPreferenceObservations,
+    2,
+    20,
+  );
+  requireRange(
+    "intelligence.memoryFormation.minimumBehaviorObservations",
+    config.intelligence.memoryFormation.minimumBehaviorObservations,
+    3,
+    50,
+  );
+  requireRange(
+    "intelligence.consolidation.maxDigestTokens",
+    config.intelligence.consolidation.maxDigestTokens,
+    512,
+    8_192,
+  );
+  requireRange(
+    "intelligence.consolidation.maxOutputTokens",
+    config.intelligence.consolidation.maxOutputTokens,
+    256,
+    4_096,
+  );
+  requireRange(
+    "intelligence.consolidation.maxSemanticCandidates",
+    config.intelligence.consolidation.maxSemanticCandidates,
+    1,
+    20,
+  );
+  requireRange(
+    "intelligence.consolidation.longTaskCheckpointTurns",
+    config.intelligence.consolidation.longTaskCheckpointTurns,
+    2,
+    100,
+  );
+  requireRange(
+    "intelligence.consolidation.procedureMinimumOutcomes",
+    config.intelligence.consolidation.procedureMinimumOutcomes,
+    2,
+    20,
+  );
+  requireRange(
+    "intelligence.consolidation.procedureMinimumSuccessEstimate",
+    config.intelligence.consolidation.procedureMinimumSuccessEstimate,
+    0.5,
+    0.99,
+  );
   requireRange(
     "inference.siliconflow.embedding.dimensions",
     config.inference.siliconflow.embedding.dimensions,

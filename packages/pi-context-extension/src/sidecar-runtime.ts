@@ -19,6 +19,9 @@ import type { EmbeddingSpaceIdentity } from "@pi-mentis/pi-mentis-inference";
 import { createKnowledgeService, type KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
 import {
   ContextStateService,
+  MemoryCandidateService,
+  TaskEpisodeService,
+  WorkingMemoryService,
   DefaultRememberCoordinator,
   DurableRelationshipLearningCoordinator,
   MentisBackgroundQueue,
@@ -29,7 +32,16 @@ import {
   createMemoryService,
   createPiEvidenceStore,
   createTaskGraphService,
-  deriveExperienceObservation,
+  deriveTaskEpisodeExperienceObservation,
+  buildCandidateCognitionInput,
+  candidateObservationSource,
+  createTaskEpisodeDigest,
+  detectMemoryCandidateTrigger,
+  detectSecrets,
+  parseEpisodeConsolidationProposal,
+  parseMemoryCandidateProposals,
+  securityNamespaceForScope,
+  validateConsolidationEvidence,
   referencedMemoryIds,
   type MemoryService,
   type PairwiseRelationshipJudgment,
@@ -38,6 +50,12 @@ import {
   type PiScopeContext,
   type RelationshipLearningWork,
   type RecalledMemoryEvidence,
+  type CandidateEvidence,
+  type OutcomeStatus,
+  type PiEpisode,
+  type PiEvent,
+  type TaskEpisode,
+  type WorkingMemoryState,
 } from "@pi-mentis/pi-mentis-memory-core";
 import { InMemoryTelemetry } from "@pi-mentis/pi-mentis-observability";
 import {
@@ -93,12 +111,43 @@ interface SidecarSession {
   lastPrompt?: string;
   readonly recallGuard: CurrentTurnRecallGuard;
   readonly recentAssertions: RecentAssertionOverlay;
+  readonly finishedTurns: Array<{
+    readonly episode: PiEpisode;
+    readonly events: readonly PiEvent[];
+    readonly outcome: OutcomeStatus;
+  }>;
+  workingMemory?: WorkingMemoryState;
+  taskEpisode?: TaskEpisode;
 }
 
 interface ReasonRequest {
   readonly resolve: (value: PairwiseRelationshipJudgment) => void;
   readonly reject: (error: Error) => void;
   readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface CognitionRequest {
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+  readonly removeAbortListener: () => void;
+}
+
+interface CognitiveTelemetry {
+  workingMemoryVisibleTokens: number;
+  candidateTriggerCount: number;
+  candidateCognitionCount: number;
+  candidatesCreated: number;
+  candidatesPromoted: number;
+  candidatesRejected: number;
+  consolidationRuns: number;
+  semanticAssertionsProposed: number;
+  semanticAssertionsPromoted: number;
+  procedureObservations: number;
+  procedureQualified: number;
+  procedurePromoted: number;
+  cognitionFailures: number;
+  cognitionCancellations: number;
 }
 
 function embeddingSpace(config: PiMentisConfig): EmbeddingSpaceIdentity {
@@ -212,6 +261,23 @@ export class MentisSidecarRuntime {
   readonly #sendEvent: EventSender;
   readonly #sessions = new Map<string, SidecarSession>();
   readonly #reasonRequests = new Map<string, ReasonRequest>();
+  readonly #cognitionRequests = new Map<string, CognitionRequest>();
+  readonly #cognitiveTelemetry: CognitiveTelemetry = {
+    workingMemoryVisibleTokens: 0,
+    candidateTriggerCount: 0,
+    candidateCognitionCount: 0,
+    candidatesCreated: 0,
+    candidatesPromoted: 0,
+    candidatesRejected: 0,
+    consolidationRuns: 0,
+    semanticAssertionsProposed: 0,
+    semanticAssertionsPromoted: 0,
+    procedureObservations: 0,
+    procedureQualified: 0,
+    procedurePromoted: 0,
+    cognitionFailures: 0,
+    cognitionCancellations: 0,
+  };
   readonly #pendingRelationships = new Map<
     string,
     Array<{
@@ -234,6 +300,9 @@ export class MentisSidecarRuntime {
   #policy: AdaptivePolicyService | undefined;
   #remember: DefaultRememberCoordinator | undefined;
   #experience: ReturnType<typeof createExperienceLearningService> | undefined;
+  #workingMemory: WorkingMemoryService | undefined;
+  #candidates: MemoryCandidateService | undefined;
+  #taskEpisodes: TaskEpisodeService | undefined;
   #recall: DefaultRecallCoordinator | undefined;
   #relationshipQueue: MentisBackgroundQueue | undefined;
   #relationships: DurableRelationshipLearningCoordinator | undefined;
@@ -276,9 +345,14 @@ export class MentisSidecarRuntime {
       this.#resolveReason(notification.params);
       return;
     }
+    if (notification.method === "cognition.response") {
+      this.#resolveCognition(notification.params);
+      return;
+    }
     const session = this.#sessions.get(notification.params.clientSessionId);
     if (session === undefined) return;
     if (notification.method === "session.branch") {
+      const previousBranchId = session.scopeContext.branchId ?? "root";
       session.scopeContext = {
         ...session.scopeContext,
         branchId: notification.params.branchId,
@@ -286,6 +360,12 @@ export class MentisSidecarRuntime {
           ? {}
           : { parentBranchId: notification.params.parentBranchId }),
       };
+      void this.#switchWorkingMemoryBranch(
+        notification.params.clientSessionId,
+        previousBranchId,
+        notification.params.branchId,
+        notification.params.parentBranchId,
+      );
       return;
     }
     if (notification.method === "input.activity") {
@@ -337,13 +417,19 @@ export class MentisSidecarRuntime {
       return;
     }
     if (notification.method === "capture.compact") {
-      this.#enqueueSession(session, () =>
-        this.#captureFor(session).compact(
+      this.#enqueueSession(session, async () => {
+        await this.#captureFor(session).compact(
           notification.params.summary,
           notification.params.reason,
           notification.params.willRetry,
-        ),
-      );
+        );
+        if (session.workingMemory !== undefined) {
+          await this.#workingMemory?.checkpoint(session.workingMemory).catch(() => undefined);
+        }
+        if (session.taskEpisode !== undefined) {
+          await this.#taskEpisodes?.checkpoint(session.taskEpisode).catch(() => undefined);
+        }
+      });
       return;
     }
     if (notification.method === "agent.settled") {
@@ -464,7 +550,22 @@ export class MentisSidecarRuntime {
     this.#effectiveness = effectiveness;
     this.#policy = policy;
     this.#remember = new DefaultRememberCoordinator(memory, scopePlanner);
-    this.#experience = createExperienceLearningService({ store: storeHandle.store, memory });
+    this.#experience = createExperienceLearningService({
+      store: storeHandle.store,
+      memory,
+      minimumOutcomes: config.intelligence.consolidation.procedureMinimumOutcomes,
+      minimumSuccessEstimate: config.intelligence.consolidation.procedureMinimumSuccessEstimate,
+    });
+    this.#workingMemory = new WorkingMemoryService(
+      storeHandle.store,
+      config.intelligence.workingMemory,
+    );
+    this.#candidates = new MemoryCandidateService(
+      storeHandle.store,
+      memory,
+      config.intelligence.memoryFormation,
+    );
+    this.#taskEpisodes = new TaskEpisodeService(storeHandle.store);
     const evidence = createPiEvidenceStore(storeHandle.store);
     this.#recall = new DefaultRecallCoordinator({
       getMemory: () => memory,
@@ -521,6 +622,19 @@ export class MentisSidecarRuntime {
     const capsule = automaticRecall
       ? await this.#readCapsule(scopeContext).catch(() => undefined)
       : undefined;
+    const workingMemory =
+      this.#config?.intelligence.workingMemory.enabled === true
+        ? await this.#workingMemory
+            ?.loadOrCreate(
+              scopeContext,
+              input.clientSessionId,
+              input.branchId,
+              input.parentBranchId,
+            )
+            .catch(() => undefined)
+        : undefined;
+    const activeContext =
+      workingMemory === undefined ? undefined : this.#workingMemory?.snapshot(workingMemory);
     this.#sessions.set(input.clientSessionId, {
       scopeContext,
       cwd: input.cwd,
@@ -531,9 +645,15 @@ export class MentisSidecarRuntime {
       capsuleRevision: capsule?.revision ?? 0,
       recallGuard: new CurrentTurnRecallGuard(),
       recentAssertions: new RecentAssertionOverlay(),
+      finishedTurns: [],
+      ...(workingMemory === undefined ? {} : { workingMemory }),
     });
     if (automaticRecall) void this.#refreshCapsule(input.clientSessionId, "");
-    return { scopeContext, ...(capsule === undefined ? {} : { capsule }) };
+    return {
+      scopeContext,
+      ...(capsule === undefined ? {} : { capsule }),
+      ...(activeContext === undefined ? {} : { activeContext }),
+    };
   }
 
   async #rememberMemory(
@@ -561,6 +681,9 @@ export class MentisSidecarRuntime {
             }),
       },
     );
+    if (result.id !== undefined) {
+      await this.#recordWorkingMemoryReferences(session, [result.id]).catch(() => undefined);
+    }
     if (result.id !== undefined && result.outcome === "remembered") {
       const work = await memory.getRelationshipLearning?.(result.id);
       if (work !== undefined) {
@@ -643,6 +766,10 @@ export class MentisSidecarRuntime {
     if (session !== undefined) {
       if (projected.traceId === undefined) delete session.latestTraceId;
       else session.latestTraceId = projected.traceId;
+      const memoryIds = projected.hits
+        .filter((hit) => hit.resourceType === "memory")
+        .map((hit) => hit.id);
+      await this.#recordWorkingMemoryReferences(session, memoryIds).catch(() => undefined);
     }
     return session?.recallGuard.record(scopedRequest, projected) ?? projected;
   }
@@ -748,6 +875,15 @@ export class MentisSidecarRuntime {
       effectiveness: this.#effectiveness?.bufferStatus(),
       policy: this.#policy?.status(),
       automaticRecall: config.retrieval.automaticRecall,
+      workingMemory:
+        session?.workingMemory === undefined
+          ? undefined
+          : {
+              stateId: session.workingMemory.id,
+              revision: session.workingMemory.revision,
+              branchId: session.workingMemory.branchId,
+            },
+      cognitiveTelemetry: { ...this.#cognitiveTelemetry },
       capsule: session?.capsule,
     };
   }
@@ -805,30 +941,8 @@ export class MentisSidecarRuntime {
           });
           void job?.promise.catch(() => undefined);
         }
-        const observation = deriveExperienceObservation(
-          episode,
-          events,
-          outcome,
-          {
-            embeddingModel: config.inference.siliconflow.embedding.model,
-            embeddingDimensions: String(config.inference.siliconflow.embedding.dimensions),
-            rerankModel: config.inference.siliconflow.rerank.model,
-          },
-          session.scopeContext,
-        );
-        if (observation === undefined || this.#experience === undefined) return;
-        const experience = this.#experience;
-        const job = this.#scheduler?.schedule({
-          id: `episode-learning:${episode.id}`,
-          deduplicationKey: `episode-learning:${episode.id}`,
-          priority: TaskPriority.SessionMaintenance,
-          estimatedBytes: Buffer.byteLength(JSON.stringify(events), "utf8"),
-          run: async (signal) => {
-            const candidate = await experience.observe(observation.candidate, { signal });
-            await experience.recordOutcome(candidate.id, observation.outcome, { signal });
-          },
-        });
-        void job?.promise.catch(() => undefined);
+        session.finishedTurns.push({ episode, events, outcome });
+        if (session.finishedTurns.length > 32) session.finishedTurns.shift();
       },
       createTaskGraphService(store),
     );
@@ -851,6 +965,13 @@ export class MentisSidecarRuntime {
     if (session === undefined) return;
     await session.queue;
     await session.capture?.finish("partial").catch(() => undefined);
+    await this.#drainFinishedTurns(clientSessionId, false).catch(() => undefined);
+    if (session.workingMemory !== undefined) {
+      await this.#workingMemory?.checkpoint(session.workingMemory).catch(() => undefined);
+    }
+    if (session.taskEpisode !== undefined) {
+      await this.#taskEpisodes?.checkpoint(session.taskEpisode).catch(() => undefined);
+    }
     this.#sessions.delete(clientSessionId);
     this.#pendingRelationships.delete(clientSessionId);
   }
@@ -958,6 +1079,14 @@ export class MentisSidecarRuntime {
     if (session === undefined) return;
     await session.queue;
     await this.#refreshContext(clientSessionId, prompt).catch(() => undefined);
+    await this.#drainFinishedTurns(clientSessionId).catch((error) => {
+      this.#sendEvent({
+        name: "warning",
+        message: `Mentis immediate cognition update failed open: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      });
+    });
     this.#scheduleRelationships(clientSessionId);
     if (this.#relationshipRecoveryPending && this.#relationships !== undefined) {
       this.#relationshipRecoveryPending = false;
@@ -967,6 +1096,333 @@ export class MentisSidecarRuntime {
       await this.#refreshCapsule(clientSessionId, prompt).catch(() => undefined);
     }
     this.#scheduleMaintenance();
+  }
+
+  async #drainFinishedTurns(clientSessionId: string, scheduleBackground = true): Promise<void> {
+    const session = this.#sessions.get(clientSessionId);
+    const config = this.#config;
+    if (session === undefined || config === undefined) return;
+    const turns = session.finishedTurns.splice(0);
+    for (const turn of turns) {
+      const taskId = session.scopeContext.taskId ?? turn.episode.taskId;
+      if (config.intelligence.workingMemory.enabled && this.#workingMemory !== undefined) {
+        try {
+          session.workingMemory = await this.#workingMemory.applyEpisode({
+            scopeContext: session.scopeContext,
+            episode: turn.episode,
+            events: turn.events,
+            outcome: turn.outcome,
+            ...(taskId === undefined ? {} : { taskId }),
+          });
+        } catch (error) {
+          const inMemoryState = await this.#workingMemory.restore(
+            session.scopeContext,
+            session.scopeContext.sessionId ?? turn.episode.sessionId,
+            session.scopeContext.branchId ?? turn.episode.branchId ?? "root",
+          );
+          if (inMemoryState !== undefined) session.workingMemory = inMemoryState;
+          this.#sendEvent({
+            name: "warning",
+            message: `Mentis Working Memory checkpoint failed; continuing from the in-memory state: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          });
+        }
+        if (session.workingMemory !== undefined)
+          this.#publishActiveContext(clientSessionId, session);
+      }
+      if (taskId !== undefined && this.#taskEpisodes !== undefined) {
+        session.taskEpisode = await this.#taskEpisodes.append({
+          taskId,
+          scopeContext: session.scopeContext,
+          episode: turn.episode,
+          events: turn.events,
+          outcome: turn.outcome,
+          ...(session.workingMemory === undefined ? {} : { workingMemory: session.workingMemory }),
+        });
+      }
+      if (scheduleBackground) this.#scheduleCandidateFormation(clientSessionId, turn);
+      if (scheduleBackground && session.taskEpisode !== undefined) {
+        this.#scheduleEpisodeConsolidation(clientSessionId, session.taskEpisode);
+      }
+    }
+  }
+
+  #scheduleCandidateFormation(
+    clientSessionId: string,
+    turn: {
+      readonly episode: PiEpisode;
+      readonly events: readonly PiEvent[];
+      readonly outcome: OutcomeStatus;
+    },
+  ): void {
+    const session = this.#sessions.get(clientSessionId);
+    const config = this.#config;
+    const scheduler = this.#scheduler;
+    const candidates = this.#candidates;
+    if (
+      session === undefined ||
+      config === undefined ||
+      scheduler === undefined ||
+      candidates === undefined ||
+      !config.intelligence.memoryFormation.enabled
+    ) {
+      return;
+    }
+    const signals = detectMemoryCandidateTrigger(turn.episode.goal);
+    if (!signals.shouldAnalyze) return;
+    this.#cognitiveTelemetry.candidateTriggerCount++;
+    if (detectSecrets(turn.episode.goal).sensitive) {
+      this.#cognitiveTelemetry.candidatesRejected++;
+      return;
+    }
+    const namespace = securityNamespaceForScope(session.scopeContext);
+    const scheduledScope: PiScopeContext = Object.freeze({
+      ...session.scopeContext,
+      ...(session.scopeContext.topicIds === undefined
+        ? {}
+        : { topicIds: Object.freeze([...session.scopeContext.topicIds]) }),
+    });
+    const evidence: CandidateEvidence[] = turn.events
+      .filter((event) => event.kind === "goal" || event.kind === "verification")
+      .map((event) => ({
+        id: event.id,
+        ref: { kind: "event", id: event.id, observedAt: event.timestamp },
+        namespace,
+        text:
+          event.kind === "goal"
+            ? String(event.payload["goal"] ?? turn.episode.goal)
+            : `${String(event.payload["command"] ?? "verification")}: ${String(event.payload["status"] ?? "unknown")}`,
+        verified: event.kind === "verification" && event.payload["status"] === "passed",
+      }));
+    const payload = buildCandidateCognitionInput({
+      statement: turn.episode.goal,
+      scopeContext: scheduledScope,
+      signals,
+      evidence,
+      maxTokens: config.intelligence.memoryFormation.maxInputTokens,
+    });
+    const job = scheduler.schedule({
+      id: `memory-candidate:${turn.episode.id}`,
+      deduplicationKey: `memory-candidate:${turn.episode.id}`,
+      priority: TaskPriority.SessionMaintenance,
+      estimatedBytes: Buffer.byteLength(JSON.stringify(payload), "utf8"),
+      run: async (signal) => {
+        this.#cognitiveTelemetry.candidateCognitionCount++;
+        try {
+          const result = await this.#requestCognition(
+            "memory_candidate",
+            payload,
+            config.intelligence.memoryFormation.maxOutputTokens,
+            signal,
+          );
+          const proposals = parseMemoryCandidateProposals(result, {
+            maximum: config.intelligence.memoryFormation.maxCandidatesPerTurn,
+            maxCharacters: config.intelligence.memoryFormation.candidateMaxCharacters,
+          });
+          for (const proposal of proposals) {
+            const observed = await candidates.observe(
+              {
+                proposal,
+                source: candidateObservationSource(signals),
+                scopeContext: scheduledScope,
+                evidence,
+                observationId: stableHash(
+                  "memory-candidate-observation:v1",
+                  namespace,
+                  turn.episode.id,
+                  ...proposal.evidenceIds,
+                ),
+              },
+              { signal },
+            );
+            if (observed.outcome === "rejected") this.#cognitiveTelemetry.candidatesRejected++;
+            else if (observed.outcome === "promoted") this.#cognitiveTelemetry.candidatesPromoted++;
+            else this.#cognitiveTelemetry.candidatesCreated++;
+          }
+        } catch (error) {
+          if (signal.aborted) this.#cognitiveTelemetry.cognitionCancellations++;
+          else this.#cognitiveTelemetry.cognitionFailures++;
+          throw error;
+        }
+      },
+    });
+    void job.promise.catch(() => undefined);
+  }
+
+  #scheduleEpisodeConsolidation(clientSessionId: string, task: TaskEpisode): void {
+    const session = this.#sessions.get(clientSessionId);
+    const config = this.#config;
+    const scheduler = this.#scheduler;
+    if (
+      session === undefined ||
+      config === undefined ||
+      scheduler === undefined ||
+      !config.intelligence.consolidation.enabled
+    ) {
+      return;
+    }
+    const terminalVerified = task.state === "completed" && task.verification === "passed";
+    const checkpoint =
+      task.state === "active" &&
+      task.turns.length > 0 &&
+      task.turns.length % config.intelligence.consolidation.longTaskCheckpointTurns === 0;
+    if (!terminalVerified && !checkpoint && task.verification !== "failed") return;
+    const scheduledScope: PiScopeContext = Object.freeze({
+      ...session.scopeContext,
+      ...(session.scopeContext.topicIds === undefined
+        ? {}
+        : { topicIds: Object.freeze([...session.scopeContext.topicIds]) }),
+    });
+    const packageManager = session.identity.packageManager;
+    const digest = createTaskEpisodeDigest(task, config.intelligence.consolidation.maxDigestTokens);
+    const job = scheduler.schedule({
+      id: `task-consolidation:${task.id}:${task.turns.length}`,
+      deduplicationKey: `task-consolidation:${task.id}:${task.turns.length}`,
+      priority: TaskPriority.SessionMaintenance,
+      estimatedBytes: Buffer.byteLength(digest.serialized, "utf8"),
+      run: async (signal) => {
+        this.#cognitiveTelemetry.consolidationRuns++;
+        try {
+          const raw = await this.#requestCognition(
+            "episode_consolidation",
+            { digest: digest.serialized },
+            config.intelligence.consolidation.maxOutputTokens,
+            signal,
+          );
+          const proposal = parseEpisodeConsolidationProposal(raw, {
+            maxAssertions: config.intelligence.consolidation.maxSemanticCandidates,
+            candidateMaxCharacters: config.intelligence.memoryFormation.candidateMaxCharacters,
+          });
+          this.#cognitiveTelemetry.semanticAssertionsProposed += proposal.assertions.length;
+          const evidence: CandidateEvidence[] = digest.evidence.map((entry) => ({
+            id: entry.id,
+            ref: { kind: entry.kind, id: entry.id, observedAt: task.updatedAt },
+            namespace: task.namespace,
+            text: entry.text,
+            verified: entry.verified,
+          }));
+          for (const assertion of proposal.assertions) {
+            if (!validateConsolidationEvidence(digest, assertion.evidenceIds, true)) {
+              this.#cognitiveTelemetry.candidatesRejected++;
+              continue;
+            }
+            const observed = await this.#candidates?.observe(
+              {
+                proposal: assertion,
+                source: "episode_consolidation",
+                scopeContext: scheduledScope,
+                evidence,
+                observationId: stableHash(
+                  "semantic-consolidation-observation:v1",
+                  task.id,
+                  ...assertion.evidenceIds,
+                ),
+              },
+              { signal },
+            );
+            if (observed?.outcome === "promoted") {
+              this.#cognitiveTelemetry.semanticAssertionsPromoted++;
+            } else if (observed?.outcome === "rejected") {
+              this.#cognitiveTelemetry.candidatesRejected++;
+            }
+          }
+          if (
+            proposal.procedure !== undefined &&
+            validateConsolidationEvidence(
+              digest,
+              proposal.procedure.evidenceIds,
+              task.verification === "passed",
+            ) &&
+            this.#experience !== undefined
+          ) {
+            const observation = deriveTaskEpisodeExperienceObservation(
+              task,
+              digest,
+              proposal.procedure,
+              {
+                os: platform(),
+                architecture: arch(),
+                runtime: "node",
+                runtimeVersion: process.version,
+                ...(packageManager === undefined ? {} : { packageManager }),
+              },
+              scheduledScope,
+            );
+            if (observation !== undefined) {
+              const experience = await this.#experience.observe(observation.candidate, { signal });
+              const updated = await this.#experience.recordOutcome(
+                experience.id,
+                observation.outcome,
+                { signal },
+              );
+              this.#cognitiveTelemetry.procedureObservations++;
+              try {
+                const qualified = await this.#experience.qualify(updated.id, { signal });
+                this.#cognitiveTelemetry.procedureQualified++;
+                await this.#experience.promote(qualified.id, { signal });
+                this.#cognitiveTelemetry.procedurePromoted++;
+              } catch {
+                // Repeated verified outcomes have not reached the qualification gate yet.
+              }
+            }
+          }
+        } catch (error) {
+          if (signal.aborted) this.#cognitiveTelemetry.cognitionCancellations++;
+          else this.#cognitiveTelemetry.cognitionFailures++;
+          throw error;
+        }
+      },
+    });
+    void job.promise.catch(() => undefined);
+  }
+
+  async #recordWorkingMemoryReferences(
+    session: SidecarSession | undefined,
+    memoryIds: readonly string[],
+  ): Promise<void> {
+    if (
+      session === undefined ||
+      memoryIds.length === 0 ||
+      this.#config?.intelligence.workingMemory.enabled !== true ||
+      this.#workingMemory === undefined
+    ) {
+      return;
+    }
+    const updated = await this.#workingMemory.recordRecalledMemory(session.scopeContext, memoryIds);
+    if (updated === undefined) return;
+    session.workingMemory = updated;
+    this.#publishActiveContext(session.scopeContext.sessionId ?? "unknown", session);
+  }
+
+  #publishActiveContext(clientSessionId: string, session: SidecarSession): void {
+    if (session.workingMemory === undefined || this.#workingMemory === undefined) return;
+    const snapshot = this.#workingMemory.snapshot(session.workingMemory);
+    this.#cognitiveTelemetry.workingMemoryVisibleTokens = snapshot.estimatedTokens;
+    this.#sendEvent({ name: "active-context.updated", clientSessionId, snapshot });
+  }
+
+  async #switchWorkingMemoryBranch(
+    clientSessionId: string,
+    previousBranchId: string,
+    branchId: string,
+    parentBranchId?: string,
+  ): Promise<void> {
+    const session = this.#sessions.get(clientSessionId);
+    if (
+      session === undefined ||
+      this.#config?.intelligence.workingMemory.enabled !== true ||
+      this.#workingMemory === undefined
+    ) {
+      return;
+    }
+    session.workingMemory = await this.#workingMemory.loadOrCreate(
+      session.scopeContext,
+      clientSessionId,
+      branchId,
+      parentBranchId ?? previousBranchId,
+    );
+    this.#publishActiveContext(clientSessionId, session);
   }
 
   async #refreshContext(clientSessionId: string, prompt: string): Promise<void> {
@@ -1140,6 +1596,46 @@ export class MentisSidecarRuntime {
     });
   }
 
+  async #requestCognition(
+    task: "memory_candidate" | "episode_consolidation",
+    payload: Readonly<Record<string, unknown>>,
+    maxOutputTokens: number,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const requestId = `cognition:${process.pid}:${operationId("operation")}`;
+    return await new Promise<unknown>((resolve, reject) => {
+      const onAbort = () => {
+        const pending = this.#cognitionRequests.get(requestId);
+        if (pending === undefined) return;
+        clearTimeout(pending.timer);
+        pending.removeAbortListener();
+        this.#cognitionRequests.delete(requestId);
+        this.#sendEvent({ name: "cognition.cancel", requestId });
+        reject(new Error(`Pi ${task} cognition cancelled`));
+      };
+      const removeAbortListener = () => signal?.removeEventListener("abort", onAbort);
+      const timer = setTimeout(() => {
+        this.#cognitionRequests.delete(requestId);
+        removeAbortListener();
+        this.#sendEvent({ name: "cognition.cancel", requestId });
+        reject(new Error(`Pi ${task} cognition timed out`));
+      }, 20_000);
+      this.#cognitionRequests.set(requestId, { resolve, reject, timer, removeAbortListener });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted === true) {
+        onAbort();
+        return;
+      }
+      this.#sendEvent({
+        name: "cognition.request",
+        requestId,
+        task,
+        payload,
+        maxOutputTokens,
+      });
+    });
+  }
+
   #resolveReason(
     input: Extract<SidecarNotification, { method: "reason.response" }>["params"],
   ): void {
@@ -1158,12 +1654,30 @@ export class MentisSidecarRuntime {
     }
   }
 
+  #resolveCognition(
+    input: Extract<SidecarNotification, { method: "cognition.response" }>["params"],
+  ): void {
+    const pending = this.#cognitionRequests.get(input.requestId);
+    if (pending === undefined) return;
+    clearTimeout(pending.timer);
+    pending.removeAbortListener();
+    this.#cognitionRequests.delete(input.requestId);
+    if (input.error !== undefined) pending.reject(new Error(input.error));
+    else pending.resolve(input.result);
+  }
+
   #cancelReasonRequests(reason: string): void {
     for (const pending of this.#reasonRequests.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
     }
     this.#reasonRequests.clear();
+    for (const pending of this.#cognitionRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.removeAbortListener();
+      pending.reject(new Error(reason));
+    }
+    this.#cognitionRequests.clear();
   }
 
   #scheduleRelationships(clientSessionId: string): void {

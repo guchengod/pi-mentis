@@ -21,6 +21,29 @@ Separate Pi OS processes intentionally have separate Sidecars and coordinate thr
 storage writer lock. Within one Pi extension process, lifecycle states are
 `stopped → starting → ready → restarting → stopping → closed` and only one child may be active.
 
+Working Memory is enabled independently of automatic recall. The Sidecar reduces completed Pi
+Events into state keyed by security namespace + Session + Branch and publishes an immutable,
+token-bounded projection to the adapter. `before_agent_start` reads only that in-memory projection,
+so the foreground hook remains synchronous and performs no filesystem, Zvec, network, model, or
+IPC operation. Session compaction and shutdown checkpoint state; restart restores it. A Branch fork
+copies the parent checkpoint once, then persists under a different key. Steering invalidates only
+active model hypotheses and abandoned plans, not confirmed evidence.
+
+After a completed turn, cheap deterministic triggers may schedule automatic memory formation.
+Secret-bearing or transient input is rejected before cognition. The Sidecar sends a bounded,
+cancellable request to the current Pi model through versioned IPC and treats the strict JSON result
+as an untrusted proposal. Candidate persistence is separate from Memory records: namespace,
+Evidence, verified-tool, Scope, durability, repetition, and Secret gates run before optional
+promotion, and unpromoted candidates are never retrievable. Explicit `commit_memory` remains the
+stronger authority.
+
+TaskEpisode state aggregates multiple Episodes for the same task and Branch. Its digest contains
+symbolic actions, failures, verification and Artifact IDs rather than raw outputs. Consolidation
+can propose semantic candidates and generalized procedures. Semantic output reuses Candidate gates;
+procedures reuse Experience outcome deduplication and Beta qualification. Failed verification is
+negative procedure evidence, successful procedure evidence must be verified, and paths abandoned
+before the latest Steering event do not contribute to successful generalization.
+
 Automatic recall is disabled by default. When enabled, the Sidecar builds the next immutable capsule after `agent_settled`, writes it through atomic
 rename, and publishes it to the adapter over IPC. `before_agent_start` performs bounded lexical
 selection over that already-loaded capsule. It is synchronous and performs no filesystem access,

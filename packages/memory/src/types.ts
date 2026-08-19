@@ -879,6 +879,8 @@ export interface PiEvidenceStore {
 }
 
 export interface ExperienceCandidate {
+  /** V2 separates semantic family identity from the model used to propose it. */
+  readonly version?: 1 | 2;
   readonly id: string;
   readonly goal: string;
   readonly scopeContext?: PiScopeContext;
@@ -897,6 +899,11 @@ export interface ExperienceCandidate {
   readonly capabilityGaps: readonly string[];
   readonly generationContext: readonly string[];
   readonly validationPlan: readonly string[];
+  readonly rawEpisodeIds?: readonly string[];
+  readonly normalizedProblemCues?: readonly string[];
+  readonly generalizedSteps?: readonly string[];
+  readonly successCriteria?: readonly string[];
+  readonly applicabilityContext?: Readonly<Record<string, string>>;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

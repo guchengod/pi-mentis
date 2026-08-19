@@ -8,6 +8,8 @@ import type {
   PiEvent,
   PiScopeContext,
 } from "./types.js";
+import type { ProcedureProposal } from "./semantic-consolidation.js";
+import type { TaskEpisode, TaskEpisodeDigest } from "./task-episode.js";
 
 type CandidateInput = Omit<
   ExperienceCandidate,
@@ -102,6 +104,66 @@ export function deriveExperienceObservation(
       evidence,
       cost: 0,
       durationMs: Math.max(0, (episode.endedAt ?? episode.startedAt) - episode.startedAt),
+      environment,
+    },
+  };
+}
+
+export function deriveTaskEpisodeExperienceObservation(
+  task: TaskEpisode,
+  digest: TaskEpisodeDigest,
+  procedure: ProcedureProposal,
+  environment: Readonly<Record<string, string>>,
+  scopeContext: PiScopeContext,
+): DerivedExperienceObservation | undefined {
+  if (task.state === "aborted" || digest.verification === "unknown") return undefined;
+  const evidence = digest.evidence.find(
+    (entry) => procedure.evidenceIds.includes(entry.id) && entry.verified,
+  );
+  if (evidence === undefined && digest.verification === "passed") return undefined;
+  const fallbackEvidence = digest.evidence.find((entry) =>
+    procedure.evidenceIds.includes(entry.id),
+  );
+  const selected = evidence ?? fallbackEvidence;
+  if (selected === undefined) return undefined;
+  const evidenceRef: EvidenceRef = {
+    kind: selected.kind,
+    id: selected.id,
+    observedAt: task.updatedAt,
+  };
+  const applicabilityContext = {
+    ...(task.repositoryId === undefined ? {} : { repositoryId: task.repositoryId }),
+    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    ...Object.fromEntries(
+      Object.entries(environment).filter(([key]) => !/(embedding|rerank|model)/iu.test(key)),
+    ),
+  };
+  return {
+    candidate: {
+      version: 2,
+      goal: procedure.problemCues.join("; "),
+      scopeContext,
+      environment,
+      prerequisites: procedure.prerequisites,
+      steps: procedure.generalizedSteps,
+      generalizedSteps: procedure.generalizedSteps,
+      normalizedProblemCues: procedure.problemCues,
+      rawEpisodeIds: task.episodeIds,
+      successCriteria: procedure.successCriteria,
+      applicabilityContext,
+      cost: 0,
+      durationMs: Math.max(0, (task.endedAt ?? task.updatedAt) - task.startedAt),
+      appliesWhen: procedure.appliesWhen,
+      excludesWhen: procedure.excludesWhen,
+      capabilityGaps: [],
+      generationContext: ["pi-task-episode-cognition-v1", `taskEpisode=${task.id}`],
+      validationPlan: procedure.successCriteria,
+    },
+    outcome: {
+      succeeded: task.state === "completed" && digest.verification === "passed",
+      evidence: evidenceRef,
+      cost: 0,
+      durationMs: Math.max(0, (task.endedAt ?? task.updatedAt) - task.startedAt),
       environment,
     },
   };

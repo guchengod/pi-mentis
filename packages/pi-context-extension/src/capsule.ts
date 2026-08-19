@@ -64,7 +64,11 @@ export function emptyCapsule(sessionId: string): MemoryCapsule {
 export function selectCapsuleEntries(
   capsule: MemoryCapsule,
   prompt: string,
-  options: { readonly maxEntries?: number; readonly maxTokens?: number } = {},
+  options: {
+    readonly maxEntries?: number;
+    readonly maxTokens?: number;
+    readonly excludeIds?: ReadonlySet<string>;
+  } = {},
 ): readonly MemoryCapsuleEntry[] {
   const queryTerms = new Set(capsuleTerms(prompt));
   if (queryTerms.size === 0) return [];
@@ -90,6 +94,7 @@ export function selectCapsuleEntries(
   const fingerprints = new Set<string>();
   let tokens = 0;
   for (const { entry } of ranked) {
+    if (options.excludeIds?.has(entry.id) === true) continue;
     const fingerprint = stableHash("capsule-entry:v1", entry.text.normalize("NFKC").toLowerCase());
     if (fingerprints.has(fingerprint)) continue;
     if (selected.length >= maxEntries || tokens + entry.estimatedTokens > maxTokens) break;

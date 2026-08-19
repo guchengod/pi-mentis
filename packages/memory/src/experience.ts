@@ -16,6 +16,7 @@ import {
   type ExperienceOutcome,
   type MemoryService,
 } from "./types.js";
+import { boundedText, lexicalTerms, securityNamespaceForScope } from "./cognitive-shared.js";
 
 export interface CreateExperienceLearningServiceOptions {
   readonly store: ZvecStore;
@@ -77,10 +78,11 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     options: OperationOptions = {},
   ): Promise<ExperienceCandidate> {
     throwIfAborted(options.signal, "experience-observe");
+    const v2 = input.version === 2 || (input.normalizedProblemCues?.length ?? 0) > 0;
     if (
-      input.environment["embeddingModel"] === undefined ||
-      input.environment["embeddingDimensions"] === undefined ||
-      input.environment["rerankModel"] === undefined
+      (!v2 && input.environment["embeddingModel"] === undefined) ||
+      (!v2 && input.environment["embeddingDimensions"] === undefined) ||
+      (!v2 && input.environment["rerankModel"] === undefined)
     ) {
       throw new Error(
         "Experience environment must include embeddingModel, embeddingDimensions, and rerankModel",
@@ -88,26 +90,65 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     }
     const now = this.#clock.now();
     const namespace = input.scopeContext
-      ? [
-          input.scopeContext.tenantId,
-          input.scopeContext.userId,
-          input.scopeContext.appId,
-          input.scopeContext.agentId,
-        ]
-          .map(encodeURIComponent)
-          .join(":")
+      ? securityNamespaceForScope(input.scopeContext)
       : "local:local:pi:pi-mentis";
-    const id = stableHash(
-      "experience:v1",
-      namespace,
-      input.goal,
-      JSON.stringify(Object.entries(input.environment).sort(([a], [b]) => a.localeCompare(b))),
-      contentHash(input.steps.join("\n")),
-    );
+    const cueSignature = [
+      ...new Set(
+        (input.normalizedProblemCues ?? [input.goal]).flatMap((cue) => [...lexicalTerms(cue)]),
+      ),
+    ]
+      .sort()
+      .slice(0, 48)
+      .join("|");
+    const operationSignature = [
+      ...new Set(
+        (input.generalizedSteps ?? input.steps).flatMap((step) => [...lexicalTerms(step)]),
+      ),
+    ]
+      .sort()
+      .slice(0, 64)
+      .join("|");
+    const applicability =
+      input.applicabilityContext ??
+      Object.fromEntries(
+        Object.entries(input.environment).filter(
+          ([key]) => !/(embedding|rerank|model|generation)/iu.test(key),
+        ),
+      );
+    const id = v2
+      ? stableHash(
+          "experience:v2",
+          namespace,
+          cueSignature,
+          operationSignature,
+          JSON.stringify(Object.entries(applicability).sort(([a], [b]) => a.localeCompare(b))),
+        )
+      : stableHash(
+          "experience:v1",
+          namespace,
+          input.goal,
+          JSON.stringify(Object.entries(input.environment).sort(([a], [b]) => a.localeCompare(b))),
+          contentHash(input.steps.join("\n")),
+        );
     const existing = await this.get(id, options);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      if (!v2) return existing;
+      const updated: ExperienceCandidate = {
+        ...existing,
+        rawEpisodeIds: [
+          ...new Set([...(existing.rawEpisodeIds ?? []), ...(input.rawEpisodeIds ?? [])]),
+        ].slice(-256),
+        generationContext: [
+          ...new Set([...existing.generationContext, ...input.generationContext]),
+        ].slice(-64),
+        updatedAt: now,
+      };
+      await this.#store.upsertScalar("relationships_v1", [recordOf(updated)]);
+      return updated;
+    }
     const candidate: ExperienceCandidate = {
       ...input,
+      version: v2 ? 2 : (input.version ?? 1),
       id,
       successEvidence: [],
       failureEvidence: [],
@@ -131,12 +172,20 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     if (candidate.state === "promoted" || candidate.state === "rejected") {
       throw new Error(`Experience ${id} is terminal (${candidate.state})`);
     }
-    const sameEnvironment = Object.entries(candidate.environment).every(
+    const comparableEnvironment =
+      candidate.version === 2
+        ? (candidate.applicabilityContext ?? candidate.environment)
+        : candidate.environment;
+    const sameEnvironment = Object.entries(comparableEnvironment).every(
       ([key, value]) => outcome.environment[key] === value,
     );
     if (!sameEnvironment) {
       throw new Error("Experience outcome environment does not match the candidate conditions");
     }
+    const alreadyObserved = [...candidate.successEvidence, ...candidate.failureEvidence].some(
+      (evidence) => evidence.kind === outcome.evidence.kind && evidence.id === outcome.evidence.id,
+    );
+    if (alreadyObserved) return candidate;
     const updated: ExperienceCandidate = {
       ...candidate,
       successes: candidate.successes + (outcome.succeeded ? 1 : 0),
@@ -187,6 +236,7 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
     if (candidate.state !== "qualified") {
       throw new Error(`Experience ${id} must be explicitly qualified before promotion`);
     }
+    const steps = candidate.generalizedSteps ?? candidate.steps;
     const content = [
       `Goal: ${candidate.goal}`,
       `Applies when: ${candidate.appliesWhen.join("; ")}`,
@@ -194,14 +244,25 @@ export class DefaultExperienceLearningService implements ExperienceLearningServi
       "Prerequisites:",
       ...candidate.prerequisites.map((item) => `- ${item}`),
       "Procedure:",
-      ...candidate.steps.map((item, index) => `${index + 1}. ${item}`),
-      `Validated environment: ${JSON.stringify(candidate.environment)}`,
+      ...steps.map((item, index) => `${index + 1}. ${boundedText(item, 500)}`),
+      ...(candidate.successCriteria === undefined
+        ? []
+        : [
+            "Success criteria:",
+            ...candidate.successCriteria.map((item) => `- ${boundedText(item, 400)}`),
+          ]),
+      `Validated environment: ${JSON.stringify(candidate.applicabilityContext ?? candidate.environment)}`,
       `Validation plan: ${candidate.validationPlan.join("; ")}`,
     ].join("\n");
     const result = await this.#memory.commit(
       {
         content,
-        scope: { kind: "user", id: "experience" },
+        scope:
+          candidate.version === 2 && candidate.scopeContext?.repositoryId !== undefined
+            ? { kind: "repository", id: candidate.scopeContext.repositoryId }
+            : candidate.version === 2 && candidate.scopeContext?.projectId !== undefined
+              ? { kind: "project", id: candidate.scopeContext.projectId }
+              : { kind: "user", id: "experience" },
         ...(candidate.scopeContext === undefined ? {} : { scopeContext: candidate.scopeContext }),
         provenance: {
           origin: "tool",

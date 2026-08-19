@@ -91,9 +91,9 @@ describe("Pi TUI foreground path", () => {
       handler.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false,
     ).toBe(false);
     expect(foregroundAwait).toBe(false);
-    expect(foreground).toContain(
-      "capsuleMessage(capsule, event.prompt, config.retrieval.automaticRecallTokens)",
-    );
+    expect(foreground).toContain("capsuleMessage(");
+    expect(foreground).toContain("activeContext");
+    expect(foreground).toContain("config.intelligence.workingMemory.enabled");
     expect(foreground).toContain("memorySystemPrompt");
     expect(foreground).not.toContain("createMentisMemorySystemPrompt");
     const supportFilename = fileURLToPath(

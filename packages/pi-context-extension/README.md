@@ -6,7 +6,7 @@
 
 > 面向 [Pi](https://github.com/badlogic/pi-mono) 的本地优先长期记忆与知识库：让 Agent 记住偏好、决策和项目上下文，并在需要时检索，而不是把所有历史一直塞进模型上下文。
 
-Pi Mentis 为 Pi `>= 0.84.0` 提供三件事：跨会话的个人长期记忆、可导入文件和网页的知识库，以及针对大工具输出的 Artifact 按需检索。它复用 Pi 原生的 Session 和 Branch 语义，不维护第二套会话树。
+Pi Mentis 为 Pi `>= 0.84.0` 提供持续工作记忆、跨会话长期记忆、可导入文件和网页的知识库，以及针对大工具输出的 Artifact 按需检索。它复用 Pi 原生的 Session 和 Branch 语义，不维护第二套会话树。
 
 ## 安装
 
@@ -59,6 +59,12 @@ pi
 
 ## 使用
 
+### 连续推进当前任务
+
+Working Memory 默认开启。你可以连续说“继续”“按刚才的方向修复”“先处理剩余失败项”，Pi Mentis 会保留当前目标、已确认事实、决策、假设、未完成事项、最近结果和 Artifact 引用。它按原生 Session + Branch 隔离，重启或压缩后恢复；分叉会复制起点，但子分支之后的变化不会污染父分支。
+
+这条能力不依赖自动召回，即使 `retrieval.automaticRecall` 为 `false` 也会工作。每轮开始只注入 Sidecar 已发布到内存中的有界快照，不读取磁盘、不查询 Zvec、也不发起模型或 IPC 请求。
+
 ### 让 Agent 记住长期信息
 
 直接用自然语言告诉 Pi；只有你明确要求记住、更新、纠正或忘记时，Pi 才应写入长期记忆。
@@ -102,6 +108,14 @@ Pi 会调用 `search_memory`。集成版的搜索会同时检索个人记忆和�
 
 每条记忆先以带来源和时间的原子陈述保存。后续的强化、替代、撤回或冲突判断在后台进行；相似度只用于寻找候选，不能单独改变记忆状态。这样既能支持偏好和决策的演进，也能保留可追溯的原始记录。
 
+### 自动记忆形成：候选先行、默认不落库
+
+显式 `commit_memory` 仍是最高优先级写入入口。除此之外，Sidecar 会先用廉价规则识别明确承诺、纠正和稳定偏好，再调用当前 Pi 模型生成结构化 Memory Candidate。候选必须通过来源、Evidence、Secret、Scope 和稳定性门控；默认 `autoPromotion: false`，因此只在隔离的候选状态中观察和强化，不参与召回，也不会静默写入长期记忆。
+
+### Episode Consolidation：从任务结果学习
+
+同一 Task 的多个 Episode 会聚合为有界摘要，只引用 Artifact ID，不复制大结果。成功验证或失败验证可触发后台归纳：语义结论仍进入 Candidate 管线；程序经验需要不同 Evidence 的重复结果，并通过 Beta 成功率门槛后，才由 Experience 服务提交为可复用过程。Steering 之前被放弃的执行路径不会被当成成功经验。
+
 ### 知识库：混合检索、按预算返回
 
 知识与记忆候选会经过全文检索、向量检索、RRF 融合、权限/时效门控、可选 Rerank、去重和 MMR 多样性选择。最后按上下文预算挑选信息密度最高的内容，而不是简单塞入固定数量的片段。
@@ -135,17 +149,27 @@ Pi 会调用 `search_memory`。集成版的搜索会同时检索个人记忆和�
 ```mermaid
 flowchart LR
   User[用户] --> Pi[Pi Agent / 原生 Session 与 Branch]
-  Pi --> Adapter[Pi Mentis 轻量适配器\n工具、事件、Capsule]
+  Pi --> Adapter[Pi Mentis 轻量适配器\n工具、事件、内存快照]
   Adapter <-->|版本化 IPC\n请求、通知、大结果一次性文件交接| Sidecar[Mentis Sidecar]
 
+  Adapter -->|每轮同步注入| WMView[不可变 Working Memory 快照]
   Adapter -->|可选：自动召回| Capsule[内存中的不可变\nMemory Capsule]
 
+  Sidecar --> WM[Working Memory\nSession + Branch 隔离]
+  Sidecar --> Candidate[Memory Candidate\nEvidence / Secret / Scope 门控]
+  Sidecar --> Episode[TaskEpisode Consolidation\n语义候选 + 程序经验]
   Sidecar --> Memory[长期记忆\n原子陈述与关系整合]
   Sidecar --> Knowledge[知识导入\n文件、目录、网页]
   Sidecar --> Retrieval[检索管线\n全文 + 向量 + RRF + Rerank + MMR]
   Sidecar --> Capture[工具结果捕获\n摘要与 Artifact]
 
-  Memory --> Zvec[(本机 Zvec\n记忆、知识、证据、Artifact)]
+  WM --> Zvec[(本机 Zvec\n状态、记忆、知识、证据、Artifact)]
+  Candidate --> Zvec
+  Episode --> Zvec
+  Candidate -->|仅通过资格门槛| Memory
+  Episode -->|Experience 资格门槛| Memory
+  Sidecar <-->|受限结构化认知请求| Pi
+  Memory --> Zvec
   Knowledge --> Zvec
   Retrieval <--> Zvec
   Capture --> Zvec
@@ -179,7 +203,7 @@ pnpm build
 pnpm pack:extensions
 ```
 
-更多设计细节见 [系统架构](https://github.com/guchengod/pi-mentis/blob/main/docs/architecture.md)、[数据模型](https://github.com/guchengod/pi-mentis/blob/main/docs/data-model.md)、[检索机制](https://github.com/guchengod/pi-mentis/blob/main/docs/retrieval.md)、[测试说明](https://github.com/guchengod/pi-mentis/blob/main/docs/testing.md) 和各 npm 包：
+更多设计细节见 [认知记忆](https://github.com/guchengod/pi-mentis/blob/main/docs/cognitive-memory.md)、[系统架构](https://github.com/guchengod/pi-mentis/blob/main/docs/architecture.md)、[数据模型](https://github.com/guchengod/pi-mentis/blob/main/docs/data-model.md)、[检索机制](https://github.com/guchengod/pi-mentis/blob/main/docs/retrieval.md)、[测试说明](https://github.com/guchengod/pi-mentis/blob/main/docs/testing.md) 和各 npm 包：
 
 - [集成版 `@galvinsan/pi-mentis`](https://www.npmjs.com/package/@galvinsan/pi-mentis)
 - [记忆版 `@galvinsan/pi-mentis-memory`](https://www.npmjs.com/package/@galvinsan/pi-mentis-memory)

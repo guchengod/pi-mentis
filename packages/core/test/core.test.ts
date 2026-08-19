@@ -236,6 +236,21 @@ describe("Pi compatibility and tool surface", () => {
       });
       expect(config.storage.rootDir).toBe(path.join(root, "mentis", "zvec"));
       expect(config.retrieval.automaticRecall).toBe(false);
+      expect(config.intelligence.workingMemory).toMatchObject({
+        enabled: true,
+        promptTokens: 900,
+        hardMaxTokens: 1_200,
+      });
+      expect(config.intelligence.memoryFormation).toMatchObject({
+        enabled: true,
+        autoPromotion: false,
+        maxCandidatesPerTurn: 3,
+      });
+      expect(config.intelligence.consolidation).toMatchObject({
+        enabled: true,
+        maxDigestTokens: 1_600,
+        procedureMinimumOutcomes: 3,
+      });
       expect(config.performance.sidecar).toEqual({
         cpuNice: 10,
         knowledgeJobConcurrency: 2,
