@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 import type { ProcedureProposal } from "./semantic-consolidation.js";
 import type { TaskEpisode, TaskEpisodeDigest } from "./task-episode.js";
+import { canonicalProcedureFamily, procedureFamilyKey } from "./procedure-family.js";
 
 type CandidateInput = Omit<
   ExperienceCandidate,
@@ -156,9 +157,12 @@ export function deriveTaskEpisodeExperienceObservation(
           runtimeConstraint: `${environment["runtime"] ?? "runtime"}>=${environment["runtimeVersion"].replace(/^v/u, "").split(".")[0] ?? environment["runtimeVersion"]}`,
         }),
   };
+  const family =
+    procedure.family === undefined ? undefined : canonicalProcedureFamily(procedure.family);
   return {
     candidate: {
       version: 2,
+      ...(family === undefined ? {} : { family, familyKey: procedureFamilyKey(family) }),
       goal: procedure.problemCues.join("; "),
       scopeContext,
       environment,

@@ -31,7 +31,13 @@ import {
   type PublicRememberResult,
 } from "@pi-mentis/pi-mentis-pi-extension-support";
 
-import { emptyCapsule, selectCapsuleEntries } from "./capsule.js";
+import {
+  emptyCapsule,
+  formatProcedureBlock,
+  procedureContextBudget,
+  selectCapsuleEntries,
+  selectProcedureEntry,
+} from "./capsule.js";
 import { shouldAcceptActiveContext } from "./active-context.js";
 import { MentisSidecarClient } from "./sidecar-client.js";
 import type { MemoryCapsule, SessionOpenResult } from "./sidecar-protocol.js";
@@ -181,6 +187,7 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   let sidecarSessionReady = false;
   let automaticRecallWarningShown = false;
   let currentTurnCanSearchMemory = false;
+  let foregroundTurnSequence = 0;
   const pendingInlineToolResults: ToolResultEnvelope[] = [];
   const completedLargeReads = new Map<string, string>();
   let sessionOpen:
@@ -577,11 +584,25 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         ? activeContext
         : undefined;
     const activeContextVisibleTokens = currentActiveContext?.estimatedTokens ?? 0;
+    const procedureBudget = procedureContextBudget(
+      activeContextVisibleTokens,
+      config.retrieval.totalAutomaticContextTokens,
+    );
+    const procedureSelection =
+      procedureBudget > 0 ? selectProcedureEntry(capsule, event.prompt, scopeContext) : undefined;
+    const procedureContent =
+      procedureSelection === undefined
+        ? undefined
+        : formatProcedureBlock(procedureSelection.entry, procedureBudget);
+    const procedureVisibleTokens =
+      procedureContent === undefined ? 0 : estimateModelTokens(procedureContent);
     const capsuleBudget = Math.max(
       0,
       Math.min(
         config.retrieval.automaticRecallTokens,
-        config.retrieval.totalAutomaticContextTokens - activeContextVisibleTokens,
+        config.retrieval.totalAutomaticContextTokens -
+          activeContextVisibleTokens -
+          procedureVisibleTokens,
       ),
     );
     const recalled =
@@ -590,7 +611,10 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
             capsule,
             event.prompt,
             capsuleBudget,
-            new Set(currentActiveContext?.recalledMemoryIds ?? []),
+            new Set([
+              ...(currentActiveContext?.recalledMemoryIds ?? []),
+              ...(procedureSelection === undefined ? [] : [procedureSelection.entry.id]),
+            ]),
           )
         : undefined;
     const activeContent = currentActiveContext?.content;
@@ -602,13 +626,38 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
         params: {
           clientSessionId,
           activeContextVisibleTokens,
+          procedureVisibleTokens,
           capsuleVisibleTokens,
-          combinedRecallTokens: activeContextVisibleTokens + capsuleVisibleTokens,
+          combinedRecallTokens:
+            activeContextVisibleTokens + procedureVisibleTokens + capsuleVisibleTokens,
         },
       });
+      if (procedureSelection !== undefined && procedureContent !== undefined) {
+        const procedure = procedureSelection.entry.procedure;
+        if (procedure !== undefined) {
+          sidecar.notify({
+            method: "foreground.procedure",
+            params: {
+              clientSessionId,
+              turnId: `${clientSessionId}:foreground:${++foregroundTurnSequence}`,
+              candidateId: procedure.candidateId,
+              familyKey: procedure.familyKey,
+              memoryId: procedureSelection.entry.id,
+              rank: procedureSelection.rank,
+              score: procedureSelection.score,
+              gateDecision: procedureSelection.gateDecision,
+              tokenCost: procedureVisibleTokens,
+            },
+          });
+        }
+      }
     }
-    if (activeContent === undefined && recalled === undefined) return { systemPrompt };
-    const content = [activeContent, recalled?.message.content].filter(Boolean).join("\n\n");
+    if (activeContent === undefined && procedureContent === undefined && recalled === undefined) {
+      return { systemPrompt };
+    }
+    const content = [activeContent, procedureContent, recalled?.message.content]
+      .filter(Boolean)
+      .join("\n\n");
     return {
       systemPrompt,
       message: {

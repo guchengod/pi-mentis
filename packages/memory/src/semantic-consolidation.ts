@@ -2,8 +2,10 @@ import { boundedText } from "./cognitive-shared.js";
 import { detectSecrets } from "./secret-detector.js";
 import type { MemoryCandidateProposal } from "./memory-candidates.js";
 import type { TaskEpisodeDigest } from "./task-episode.js";
+import type { ProcedureFamily } from "./types.js";
 
 export interface ProcedureProposal {
+  readonly family?: ProcedureFamily;
   readonly problemCues: readonly string[];
   readonly generalizedSteps: readonly string[];
   readonly prerequisites: readonly string[];
@@ -38,6 +40,29 @@ function confidence(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
     ? value
     : undefined;
+}
+
+function procedureFamily(value: unknown): ProcedureFamily | undefined {
+  const entry = object(value);
+  if (entry === undefined) return undefined;
+  const domain = entry["domain"];
+  const failureMode = entry["failureMode"];
+  const trigger = entry["trigger"];
+  const semanticRole = entry["semanticRole"];
+  const intendedBehavior = entry["intendedBehavior"];
+  if (
+    typeof domain !== "string" ||
+    typeof failureMode !== "string" ||
+    typeof trigger !== "string" ||
+    typeof semanticRole !== "string" ||
+    typeof intendedBehavior !== "string" ||
+    [domain, failureMode, trigger, semanticRole, intendedBehavior].some(
+      (item) => item.trim().length === 0 || item.length > 80,
+    )
+  ) {
+    return undefined;
+  }
+  return { domain, failureMode, trigger, semanticRole, intendedBehavior };
 }
 
 export function parseEpisodeConsolidationProposal(
@@ -97,6 +122,7 @@ export function parseEpisodeConsolidationProposal(
   }
   const rawProcedure = object(root["procedure"]);
   if (rawProcedure === undefined) return { assertions };
+  const family = procedureFamily(rawProcedure["family"]);
   const problemCues = strings(rawProcedure["problemCues"], 12, 300);
   const generalizedSteps = strings(rawProcedure["generalizedSteps"], 16, 400);
   const prerequisites = strings(rawProcedure["prerequisites"], 12, 300);
@@ -127,6 +153,7 @@ export function parseEpisodeConsolidationProposal(
   return {
     assertions,
     procedure: {
+      ...(family === undefined ? {} : { family }),
       problemCues,
       generalizedSteps,
       prerequisites,

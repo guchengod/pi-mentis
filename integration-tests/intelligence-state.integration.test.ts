@@ -160,6 +160,13 @@ describe("V2 intelligence state on real Zvec", () => {
         "run focused tests",
       ],
       normalizedProblemCues: ["shared writer coordination failure"],
+      family: {
+        domain: "coordination",
+        failureMode: "ownership_failure",
+        trigger: "shared_writer_conflict",
+        semanticRole: "shared_resource",
+        intendedBehavior: "single_owner_lifecycle",
+      },
       rawEpisodeIds: ["episode:1"],
       successCriteria: ["focused shared writer tests pass"],
       applicabilityContext: { repositoryId: "repo:a", runtime: "node" },
@@ -188,6 +195,21 @@ describe("V2 intelligence state on real Zvec", () => {
     }
     await experience.qualify(procedure.id);
     await experience.promote(procedure.id);
+    const promoted = await experience.get(procedure.id);
+    expect(promoted?.promotedMemoryId).toBeDefined();
+    const typedProcedure = await memory.get(promoted!.promotedMemoryId!, {
+      scopeContext: { ...scope, sessionId: "session:new", branchId: "root" },
+    });
+    expect(typedProcedure).toEqual(
+      expect.objectContaining({
+        role: "procedure",
+        procedure: expect.objectContaining({
+          candidateId: procedure.id,
+          independentSuccesses: 3,
+          lifecycle: "promoted",
+        }),
+      }),
+    );
     const procedureRecall = await memory.search({
       text: "shared writer coordination failure",
       scopes: [{ kind: "repository", id: "repo:a" }],

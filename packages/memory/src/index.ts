@@ -12,6 +12,7 @@ export * from "./memory-candidates.js";
 export * from "./offload.js";
 export * from "./performance-trace.js";
 export * from "./pi-capture.js";
+export * from "./procedure-family.js";
 export * from "./project-identity-cache.js";
 export * from "./project-identity.js";
 export * from "./projection.js";

@@ -56,6 +56,7 @@ import {
   type OutcomeStatus,
   type PiEpisode,
   type PiEvent,
+  type ProcedureLifecycleEvent,
   type TaskEpisode,
   type WorkingMemoryState,
 } from "@pi-mentis/pi-mentis-memory-core";
@@ -96,6 +97,7 @@ import {
   type SidecarRequest,
 } from "./sidecar-protocol.js";
 import { consumeToolResultSpool } from "./tool-result-spool.js";
+import { foregroundProcedureLifecycleEvents } from "./procedure-telemetry.js";
 
 type EventSender = (event: SidecarEventMessage["event"]) => void;
 
@@ -159,6 +161,7 @@ interface CognitionRequest {
 interface CognitiveTelemetry {
   workingMemoryVisibleTokens: number;
   activeContextVisibleTokens: number;
+  procedureVisibleTokens: number;
   capsuleVisibleTokens: number;
   combinedRecallTokens: number;
   foregroundContextSavedTokens: number;
@@ -303,9 +306,11 @@ export class MentisSidecarRuntime {
   readonly #sessions = new Map<string, SidecarSession>();
   readonly #reasonRequests = new Map<string, ReasonRequest>();
   readonly #cognitionRequests = new Map<string, CognitionRequest>();
+  readonly #procedureEvents: ProcedureLifecycleEvent[] = [];
   readonly #cognitiveTelemetry: CognitiveTelemetry = {
     workingMemoryVisibleTokens: 0,
     activeContextVisibleTokens: 0,
+    procedureVisibleTokens: 0,
     capsuleVisibleTokens: 0,
     combinedRecallTokens: 0,
     foregroundContextSavedTokens: 0,
@@ -337,6 +342,11 @@ export class MentisSidecarRuntime {
     cognitionCancellations: 0,
     cognitionDiscards: 0,
   };
+
+  #recordProcedureEvent(event: ProcedureLifecycleEvent): void {
+    this.#procedureEvents.push(event);
+    if (this.#procedureEvents.length > 256) this.#procedureEvents.splice(0, 64);
+  }
   readonly #pendingRelationships = new Map<
     string,
     Array<{
@@ -420,8 +430,17 @@ export class MentisSidecarRuntime {
     if (notification.method === "foreground.tokens") {
       this.#cognitiveTelemetry.activeContextVisibleTokens =
         notification.params.activeContextVisibleTokens;
+      this.#cognitiveTelemetry.procedureVisibleTokens = notification.params.procedureVisibleTokens;
       this.#cognitiveTelemetry.capsuleVisibleTokens = notification.params.capsuleVisibleTokens;
       this.#cognitiveTelemetry.combinedRecallTokens = notification.params.combinedRecallTokens;
+      return;
+    }
+    if (notification.method === "foreground.procedure") {
+      for (const event of foregroundProcedureLifecycleEvents(notification.params)) {
+        this.#recordProcedureEvent(event);
+      }
+      this.#cognitiveTelemetry.procedureRecallCount++;
+      session.recentProcedureMemoryIds.add(notification.params.memoryId);
       return;
     }
     if (notification.method === "session.branch") {
@@ -698,6 +717,7 @@ export class MentisSidecarRuntime {
       memory,
       minimumOutcomes: config.intelligence.consolidation.procedureMinimumOutcomes,
       minimumSuccessEstimate: config.intelligence.consolidation.procedureMinimumSuccessEstimate,
+      onLifecycleEvent: (event) => this.#recordProcedureEvent(event),
     });
     this.#workingMemory = new WorkingMemoryService(
       storeHandle.store,
@@ -804,10 +824,11 @@ export class MentisSidecarRuntime {
       backgroundJobIds: new Set(),
       ...(workingMemory === undefined ? {} : { workingMemory }),
     });
-    if (automaticRecall) void this.#refreshCapsule(input.clientSessionId, "");
+    await this.#refreshCapsule(input.clientSessionId, "").catch(() => undefined);
+    const refreshedCapsule = this.#sessions.get(input.clientSessionId)?.capsule;
     return {
       scopeContext,
-      ...(capsule === undefined ? {} : { capsule }),
+      ...(refreshedCapsule === undefined ? {} : { capsule: refreshedCapsule }),
       ...(activeContext === undefined ? {} : { activeContext }),
     };
   }
@@ -1056,6 +1077,7 @@ export class MentisSidecarRuntime {
             this.#cognitiveTelemetry.consolidationInputTokens +
             this.#cognitiveTelemetry.consolidationOutputTokens),
       },
+      procedureEvents: [...this.#procedureEvents],
       capsule: session?.capsule,
     };
   }
@@ -1199,6 +1221,42 @@ export class MentisSidecarRuntime {
     const retrieval = this.#retrieval;
     if (session === undefined || memory === undefined || retrieval === undefined) return;
     const entries = new Map<string, ReturnType<typeof capsuleEntry>>();
+    const reusable = await this.#experience?.listReusable(session.scopeContext).catch(() => []);
+    for (const candidate of reusable ?? []) {
+      if (candidate.promotedMemoryId === undefined) continue;
+      const record = await memory
+        .get(candidate.promotedMemoryId, { scopeContext: session.scopeContext })
+        .catch(() => undefined);
+      if (
+        record === undefined ||
+        record.status !== "active" ||
+        record.role !== "procedure" ||
+        record.procedure === undefined ||
+        record.confidence <
+          (this.#config?.intelligence.consolidation.procedureMinimumSuccessEstimate ?? 0.7)
+      ) {
+        continue;
+      }
+      entries.set(
+        record.id,
+        capsuleEntry({
+          id: record.id,
+          text: [
+            record.content,
+            ...Object.values(record.procedure.family),
+            record.procedure.trigger,
+            record.procedure.firstCheck,
+          ].join("\n"),
+          kind: "procedure",
+          authority: record.authority,
+          scopeKind: record.scope.kind,
+          scopeId: record.scope.id,
+          updatedAt: record.updatedAt,
+          procedure: record.procedure,
+        }),
+      );
+    }
+    const automaticRecall = this.#config?.retrieval.automaticRecall === true;
     const scopes = [
       ...(session.scopeContext.repositoryId === undefined
         ? []
@@ -1216,15 +1274,18 @@ export class MentisSidecarRuntime {
       (scope): scope is Exclude<(typeof scopes)[number], { kind: "repository" }> =>
         scope.kind !== "repository",
     );
-    const views = await Promise.all(
-      viewScopes.map(({ kind, id }) =>
-        memory.getView?.(kind, id, session.scopeContext).catch(() => undefined),
-      ),
-    );
+    const views = automaticRecall
+      ? await Promise.all(
+          viewScopes.map(({ kind, id }) =>
+            memory.getView?.(kind, id, session.scopeContext).catch(() => undefined),
+          ),
+        )
+      : [];
     for (const view of views) {
       if (view === undefined) continue;
       for (const fact of Object.values(view.facts)) {
         for (const memoryId of fact.currentMemoryIds) {
+          if (entries.get(memoryId)?.kind === "procedure") continue;
           const text = `${fact.recordKey}: ${fact.values?.[memoryId] ?? fact.value}`;
           entries.set(
             memoryId,
@@ -1240,7 +1301,7 @@ export class MentisSidecarRuntime {
         }
       }
     }
-    if (prompt.trim().length >= 2) {
+    if (automaticRecall && prompt.trim().length >= 2) {
       const result = await retrieval
         .search(
           {
@@ -1255,6 +1316,7 @@ export class MentisSidecarRuntime {
         )
         .catch(() => undefined);
       for (const hit of result?.hits ?? []) {
+        if (entries.get(hit.id)?.kind === "procedure") continue;
         entries.set(
           hit.id,
           capsuleEntry({
@@ -1313,9 +1375,7 @@ export class MentisSidecarRuntime {
       this.#relationshipRecoveryPending = false;
       await this.#relationships.recover(this.#remoteReasoner(), 128).catch(() => undefined);
     }
-    if (this.#config?.retrieval.automaticRecall === true) {
-      await this.#refreshCapsule(clientSessionId, prompt).catch(() => undefined);
-    }
+    await this.#refreshCapsule(clientSessionId, prompt).catch(() => undefined);
     this.#scheduleMaintenance();
   }
 

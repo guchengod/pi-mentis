@@ -1,6 +1,7 @@
 import type { MentisContextSnapshot, SearchHit } from "@pi-mentis/pi-mentis-core";
 import type {
   PiScopeContext,
+  ProcedureMemoryMetadata,
   ToolResultEnvelope,
   OffloadedToolResult,
   WorkingMemorySnapshot,
@@ -18,12 +19,14 @@ export type ToolResultEnvelopeMetadata = Omit<ToolResultEnvelope, "text">;
 export interface MemoryCapsuleEntry {
   readonly id: string;
   readonly text: string;
-  readonly kind: SearchHit["kind"] | "profile";
+  readonly kind: SearchHit["kind"] | "profile" | "procedure";
   readonly authority: number;
   readonly estimatedTokens: number;
   readonly scopeKind?: string;
+  readonly scopeId?: string;
   readonly updatedAt?: number;
   readonly terms: readonly string[];
+  readonly procedure?: ProcedureMemoryMetadata;
 }
 
 export interface MemoryCapsule {
@@ -109,8 +112,23 @@ export type SidecarNotification =
       readonly params: {
         readonly clientSessionId: string;
         readonly activeContextVisibleTokens: number;
+        readonly procedureVisibleTokens: number;
         readonly capsuleVisibleTokens: number;
         readonly combinedRecallTokens: number;
+      };
+    }
+  | {
+      readonly method: "foreground.procedure";
+      readonly params: {
+        readonly clientSessionId: string;
+        readonly turnId: string;
+        readonly candidateId: string;
+        readonly familyKey: string;
+        readonly memoryId: string;
+        readonly rank: number;
+        readonly score: number;
+        readonly gateDecision: "allowed";
+        readonly tokenCost: number;
       };
     }
   | {

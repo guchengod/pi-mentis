@@ -21,7 +21,7 @@ import { detectSecrets, safeSummary } from "./secret-detector.js";
 const MAX_PUBLIC_MEMORY_CONTENT_LENGTH = 300;
 
 export type PublicMemoryProjectionRecord = Pick<MemoryRecord, "id" | "content" | "scope"> &
-  Partial<Pick<MemoryRecord, "status" | "scopeContext">>;
+  Partial<Pick<MemoryRecord, "status" | "scopeContext" | "role">>;
 
 export interface PublicMemoryRecallHit {
   readonly id: string;
@@ -121,7 +121,7 @@ export function projectMemoryRecallHit(
     hit: {
       id: record.id,
       content,
-      kind: publicRecallKind(record.scope.kind),
+      kind: record.role === "procedure" ? "procedure" : publicRecallKind(record.scope.kind),
       status: options.status ?? publicRecallStatus(record.status),
       match: options.match,
       resourceType: "memory",

@@ -828,6 +828,8 @@ export class DefaultMemoryService implements MemoryService {
             semanticHints:
               command.semanticHints ?? command.relationshipEvidence?.incomingHints ?? {},
           }),
+      ...(command.role === undefined ? {} : { role: command.role }),
+      ...(command.procedure === undefined ? {} : { procedure: command.procedure }),
       ...(command.temporalKind === undefined ? {} : { temporalKind: command.temporalKind }),
       ...(command.occurredAt === undefined ? {} : { occurredAt: command.occurredAt }),
       relationshipLearningState: relationshipLearningPending ? "pending" : "resolved",

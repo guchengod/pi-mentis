@@ -13,12 +13,15 @@ import {
   detectMemoryCandidateTrigger,
   deriveTaskEpisodeExperienceObservation,
   parseEpisodeConsolidationProposal,
+  procedureFamilyKey,
   validateConsolidationEvidence,
   type MemoryService,
   type OutcomeStatus,
   type PiEpisode,
   type PiEvent,
   type PiScopeContext,
+  type ProcedureFamily,
+  type ProcedureLifecycleEvent,
 } from "../src/index.js";
 
 class TestClock implements Clock {
@@ -1317,6 +1320,218 @@ describe("TaskEpisode consolidation and Experience v2", () => {
       });
     }
     await expect(service.qualify(unreliable.id)).rejects.toThrow(/Beta estimate/u);
+  });
+
+  it("merges three surface-different optional config repairs, dedupes across restart, and promotes a typed procedure", async () => {
+    const store = new ScalarStore();
+    const events: ProcedureLifecycleEvent[] = [];
+    const commit = vi.fn().mockResolvedValue({
+      outcome: "created",
+      record: { id: "memory:optional-config-procedure" },
+      relatedIds: [],
+      relationDecision: "unrelated",
+    });
+    const memory = {
+      commit,
+      tombstone: vi.fn().mockResolvedValue(true),
+    } as unknown as MemoryService;
+    const optionalFamily: ProcedureFamily = {
+      domain: "configuration",
+      failureMode: "initialization_failed",
+      trigger: "missing_value",
+      semanticRole: "optional_value",
+      intendedBehavior: "default_fallback",
+    };
+    const requiredFamily: ProcedureFamily = {
+      domain: "config",
+      failureMode: "initialization_failure",
+      trigger: "value_missing",
+      semanticRole: "required",
+      intendedBehavior: "reject",
+    };
+    expect(
+      new Set([
+        procedureFamilyKey({
+          ...optionalFamily,
+          trigger: "OPTIONAL_PATH_LIST",
+          intendedBehavior: "use_default",
+        }),
+        procedureFamilyKey({
+          ...optionalFamily,
+          trigger: "absent_value",
+          intendedBehavior: "fallback",
+        }),
+        procedureFamilyKey({
+          ...optionalFamily,
+          trigger: "undefined_value",
+          intendedBehavior: "default",
+        }),
+      ]).size,
+    ).toBe(1);
+    expect(procedureFamilyKey(requiredFamily)).not.toBe(procedureFamilyKey(optionalFamily));
+    const candidateInput = (
+      goal: string,
+      cue: string,
+      steps: readonly string[],
+      family: ProcedureFamily,
+      sessionId: string,
+    ) => ({
+      version: 2 as const,
+      goal,
+      scopeContext: scope({ sessionId, taskId: "shared-task-id" }),
+      environment: { os: "darwin", runtime: "node" },
+      prerequisites: [],
+      steps,
+      generalizedSteps: steps,
+      normalizedProblemCues: [cue],
+      family,
+      familyKey: procedureFamilyKey(family),
+      rawEpisodeIds: [`episode:${sessionId}`],
+      successCriteria: ["focused configuration tests pass"],
+      applicabilityContext: { os: "darwin", runtime: "node" },
+      cost: 0,
+      durationMs: 1,
+      appliesWhen: ["configuration initialization fails when an optional value is absent"],
+      excludesWhen: ["the configuration value is required"],
+      capabilityGaps: [],
+      generationContext: [`session=${sessionId}`],
+      validationPlan: ["run focused configuration tests"],
+    });
+    const outcome = (sessionId: string, evidenceId: string) => ({
+      outcomeId: `outcome:${sessionId}`,
+      taskEpisodeId: "shared-task-id",
+      episodeIds: [`episode:${sessionId}`],
+      sessionId,
+      branchId: "root",
+      succeeded: true,
+      evidence: { kind: "event" as const, id: evidenceId, observedAt: 1 },
+      verificationEvidenceIds: [evidenceId],
+      cost: 0,
+      durationMs: 1,
+      environment: { os: "darwin", runtime: "node" },
+    });
+
+    const firstService = createExperienceLearningService({
+      store: store as unknown as ZvecStore,
+      memory,
+      minimumOutcomes: 3,
+      minimumSuccessEstimate: 0.7,
+      clock: new TestClock(),
+      onLifecycleEvent: (event) => events.push(event),
+    });
+    const first = await firstService.observe(
+      candidateInput(
+        "OPTIONAL_PATH_LIST calls split(undefined)",
+        "OPTIONAL_PATH_LIST split TypeError",
+        [
+          "inspect the missing-value path and optional versus required semantics",
+          "use the smallest optional fallback and run focused tests",
+        ],
+        optionalFamily,
+        "session-a",
+      ),
+    );
+    await firstService.recordOutcome(first.id, outcome("session-a", "verify-a"));
+    await expect(firstService.qualify(first.id)).rejects.toThrow(/1 independent outcomes/u);
+
+    // Recreate the service over the same durable store to exercise restart replay behavior.
+    const restarted = createExperienceLearningService({
+      store: store as unknown as ZvecStore,
+      memory,
+      minimumOutcomes: 3,
+      minimumSuccessEstimate: 0.7,
+      clock: new TestClock(),
+      onLifecycleEvent: (event) => events.push(event),
+    });
+    const second = await restarted.observe(
+      candidateInput(
+        "OPTIONAL_FORMATTER enters a strict parser",
+        "custom formatter parser rejects an absent optional value",
+        [
+          "check formatter construction and determine whether the value is optional",
+          "bypass strict parsing only for the absent optional case",
+          "verify formatter initialization",
+        ],
+        optionalFamily,
+        "session-b",
+      ),
+    );
+    const third = await restarted.observe(
+      candidateInput(
+        "RETRY_WINDOW_SECONDS becomes Number(undefined) and NaN",
+        "numeric retry window creates an invalid object",
+        [
+          "trace numeric conversion during startup",
+          "separate absent optional input from malformed supplied input",
+          "run retry configuration tests",
+        ],
+        optionalFamily,
+        "session-c",
+      ),
+    );
+    expect(second.id).toBe(first.id);
+    expect(third.id).toBe(first.id);
+    expect(second.familyKey).toBe(first.familyKey);
+    expect(third.familyKey).toBe(first.familyKey);
+
+    await restarted.recordOutcome(first.id, outcome("session-a", "verify-a"));
+    await restarted.recordOutcome(first.id, outcome("session-b", "verify-b"));
+    await restarted.recordOutcome(first.id, outcome("session-c", "verify-c"));
+    const qualified = await restarted.qualify(first.id);
+    expect(qualified.state).toBe("qualified");
+    expect(qualified.successes).toBe(3);
+    await restarted.promote(first.id);
+
+    const required = await restarted.observe(
+      candidateInput(
+        "REQUIRED_SERVICE_TOKEN produces a deep TypeError",
+        "required service token missing",
+        ["validate the required token at the boundary", "return a clear required-field error"],
+        requiredFamily,
+        "session-required",
+      ),
+    );
+    expect(required.familyKey).not.toBe(first.familyKey);
+    expect(required.id).not.toBe(first.id);
+
+    expect(commit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "procedure",
+        procedure: expect.objectContaining({
+          candidateId: first.id,
+          familyKey: first.familyKey,
+          independentSuccesses: 3,
+          lifecycle: "promoted",
+        }),
+      }),
+      expect.anything(),
+    );
+    expect(events.map((event) => event.name)).toEqual(
+      expect.arrayContaining([
+        "procedure.observed",
+        "procedure.outcome_recorded",
+        "procedure.outcome_deduped",
+        "procedure.qualification_rejected",
+        "procedure.qualified",
+        "procedure.promoted",
+      ]),
+    );
+    const promoted = events.find((event) => event.name === "procedure.promoted");
+    expect(promoted).toEqual(
+      expect.objectContaining({
+        candidateId: first.id,
+        familyKey: first.familyKey,
+        memoryId: "memory:optional-config-procedure",
+      }),
+    );
+    expect(
+      await restarted.listReusable(scope({ sessionId: "new-session", taskId: "new-task" })),
+    ).toEqual([expect.objectContaining({ id: first.id, state: "promoted" })]);
+    expect(
+      await restarted.listReusable(
+        scope({ repositoryId: "wrong-repository", sessionId: "new-session" }),
+      ),
+    ).toEqual([]);
   });
 
   it("counts at most one outcome per TaskEpisode", async () => {

@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  projectMemoryRecallHit,
   projectMemoryForPublicUse,
   shouldExcludeFromAutomaticRecall,
   sanitizeForLog,
@@ -47,6 +48,19 @@ function makeRecord(
 // ─── Public Projection Tests ──────────────────────────────────────
 
 describe("public memory projection", () => {
+  it("preserves explicit procedure identity independently of repository scope", () => {
+    const projected = projectMemoryRecallHit(
+      {
+        id: "procedure-memory",
+        content: "Verified procedure",
+        scope: { kind: "repository", id: "repo-1" },
+        role: "procedure",
+      },
+      { match: "semantic" },
+    );
+    expect(projected?.hit.kind).toBe("procedure");
+  });
+
   it("normal record is projected without sanitization", () => {
     const record = makeRecord({ content: "构建命令是 pnpm build", sensitivity: "public" });
     const result = projectMemoryForPublicUse(record, { currentUserId: "u1", crossScope: false });

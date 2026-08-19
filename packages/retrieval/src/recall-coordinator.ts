@@ -158,6 +158,7 @@ function buildHits(result: SearchResult): readonly PublicRecallHit[] {
           scope: metadata.scope ?? { kind: "user", id: "local" },
           ...(metadata.status === undefined ? {} : { status: metadata.status }),
           ...(metadata.scopeContext === undefined ? {} : { scopeContext: metadata.scopeContext }),
+          ...(metadata.role === undefined ? {} : { role: metadata.role }),
         },
         { match: "semantic" },
       );

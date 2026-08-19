@@ -132,6 +132,29 @@ export interface MemorySemanticHints {
   readonly valueHint?: string;
 }
 
+/** Stable, model-proposed semantic roles used only to identify a procedure family. */
+export interface ProcedureFamily {
+  readonly domain: string;
+  readonly failureMode: string;
+  readonly trigger: string;
+  readonly semanticRole: string;
+  readonly intendedBehavior: string;
+}
+
+/** Typed metadata retained when a qualified Experience is promoted to Memory. */
+export interface ProcedureMemoryMetadata {
+  readonly candidateId: string;
+  readonly familyKey: string;
+  readonly family: ProcedureFamily;
+  readonly independentSuccesses: number;
+  readonly trigger: string;
+  readonly firstCheck: string;
+  readonly validatedSteps: readonly string[];
+  readonly successCriteria: readonly string[];
+  readonly excludesWhen: readonly string[];
+  readonly lifecycle: "promoted";
+}
+
 /**
  * Positive pairwise signals. They describe a relationship between two concrete
  * records; they are not a class assigned to either memory.
@@ -314,6 +337,9 @@ export interface MemoryRecord {
   readonly orderedItems?: readonly OrderedMemoryItem[];
   /** Best-effort pairwise structure. It never controls whether this record is saved. */
   readonly semanticHints?: MemorySemanticHints;
+  /** Explicit role; old records omit this and remain ordinary memories. */
+  readonly role?: "procedure";
+  readonly procedure?: ProcedureMemoryMetadata;
   /**
    * Temporal kind: "current" for ongoing facts, "event" for episodic
    * occurrences that happened at a specific point in time.
@@ -367,6 +393,8 @@ export interface CommitMemoryCommand {
   readonly relationshipEvidence?: MemoryRelationshipEvidence;
   /** Optional structure produced together with relationship evidence. */
   readonly semanticHints?: MemorySemanticHints;
+  readonly role?: "procedure";
+  readonly procedure?: ProcedureMemoryMetadata;
   /** Concrete pair candidates known before raw persistence; never part of the public tool schema. */
   readonly relationshipCandidates?: readonly RelationshipLearningCandidate[];
 }
@@ -902,6 +930,8 @@ export interface ExperienceCandidate {
   readonly validationPlan: readonly string[];
   readonly rawEpisodeIds?: readonly string[];
   readonly normalizedProblemCues?: readonly string[];
+  readonly family?: ProcedureFamily;
+  readonly familyKey?: string;
   readonly generalizedSteps?: readonly string[];
   readonly successCriteria?: readonly string[];
   readonly applicabilityContext?: Readonly<Record<string, string>>;
@@ -909,6 +939,7 @@ export interface ExperienceCandidate {
   readonly outcomes?: readonly ExperienceOutcome[];
   readonly promotedMemoryId?: string;
   readonly knowledgeRevision?: number;
+  readonly revision?: number;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -950,6 +981,10 @@ export interface ExperienceLearningService {
   qualify(id: string, options?: OperationOptions): Promise<ExperienceCandidate>;
   promote(id: string, options?: OperationOptions): Promise<CommitMemoryResult>;
   get(id: string, options?: OperationOptions): Promise<ExperienceCandidate | undefined>;
+  listReusable(
+    scopeContext: PiScopeContext,
+    options?: OperationOptions,
+  ): Promise<readonly ExperienceCandidate[]>;
 }
 
 export function betaSuccessEstimate(

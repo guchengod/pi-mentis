@@ -1,6 +1,54 @@
 import { describe, expect, it } from "vitest";
+import { estimateModelTokens } from "@pi-mentis/pi-mentis-core";
 
-import { capsuleEntry, emptyCapsule, selectCapsuleEntries } from "../src/capsule.js";
+import {
+  capsuleEntry,
+  emptyCapsule,
+  formatProcedureBlock,
+  procedureContextBudget,
+  selectCapsuleEntries,
+  selectProcedureEntry,
+} from "../src/capsule.js";
+
+const optionalProcedure = {
+  candidateId: "candidate:optional-config",
+  familyKey: "procedure-family:optional-config",
+  family: {
+    domain: "config",
+    failureMode: "initialization_failure",
+    trigger: "value_missing",
+    semanticRole: "optional",
+    intendedBehavior: "fallback",
+  },
+  independentSuccesses: 3,
+  trigger: "configuration initialization fails when an optional value is absent",
+  firstCheck: "Inspect the missing-value path and confirm optional versus required semantics.",
+  validatedSteps: [
+    "Inspect the missing-value path and confirm optional versus required semantics.",
+    "Apply the smallest fallback only when the value is optional.",
+    "Run the focused configuration test.",
+  ],
+  successCriteria: ["Focused configuration tests pass"],
+  excludesWhen: ["The configuration value is required"],
+  lifecycle: "promoted" as const,
+};
+
+function procedureCapsule(repositoryId = "repo-a") {
+  return {
+    ...emptyCapsule("session-new"),
+    entries: [
+      capsuleEntry({
+        id: "memory:procedure",
+        text: "optional configuration initialization missing value fallback",
+        kind: "procedure" as const,
+        authority: 40,
+        scopeKind: "repository",
+        scopeId: repositoryId,
+        procedure: optionalProcedure,
+      }),
+    ],
+  };
+}
 
 describe("memory capsule", () => {
   it("selects relevant English facts without I/O", () => {
@@ -101,5 +149,89 @@ describe("memory capsule", () => {
         excludeIds: new Set(["already-active"]),
       }),
     ).toEqual([]);
+  });
+
+  it("retrieves one promoted optional-config procedure for a new session in the same repository", () => {
+    const selected = selectProcedureEntry(
+      procedureCapsule(),
+      "项目现在启动报了一个配置错误，请修好并验证。",
+      {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+        repositoryId: "repo-a",
+        sessionId: "brand-new-session",
+      },
+    );
+    expect(selected).toEqual(
+      expect.objectContaining({
+        rank: 1,
+        gateDecision: "allowed",
+        entry: expect.objectContaining({ id: "memory:procedure", kind: "procedure" }),
+      }),
+    );
+  });
+
+  it("does not apply an optional-config procedure to an explicitly required value", () => {
+    expect(
+      selectProcedureEntry(
+        procedureCapsule(),
+        "REQUIRED_SERVICE_TOKEN is required and startup configuration initialization fails",
+        {
+          tenantId: "local",
+          userId: "local",
+          appId: "pi",
+          agentId: "pi-mentis",
+          repositoryId: "repo-a",
+        },
+      ),
+    ).toBeUndefined();
+  });
+
+  it("rejects a procedure from the wrong repository", () => {
+    expect(
+      selectProcedureEntry(procedureCapsule("repo-a"), "startup config error", {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+        repositoryId: "repo-b",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps the typed procedure block and combined Working Memory budget bounded", () => {
+    const entry = procedureCapsule().entries[0];
+    expect(entry).toBeDefined();
+    const block = formatProcedureBlock(entry!, 200);
+    expect(block).toContain("Verified procedure");
+    expect(block).toContain("First check:");
+    expect(block).toContain("Do not apply when:");
+    expect(block).toContain("configuration value is required");
+    expect(estimateModelTokens(block!)).toBeLessThanOrEqual(200);
+    expect(procedureContextBudget(900, 1_200)).toBe(200);
+    expect(procedureContextBudget(1_100, 1_200)).toBe(100);
+    expect(procedureContextBudget(1_200, 1_200)).toBe(0);
+  });
+
+  it("does not select degraded or retired procedure lifecycle entries", () => {
+    const capsule = procedureCapsule();
+    const stale = {
+      ...capsule,
+      entries: capsule.entries.map((entry) => ({
+        ...entry,
+        procedure: { ...optionalProcedure, lifecycle: "retired" },
+      })),
+    };
+    expect(
+      selectProcedureEntry(stale as typeof capsule, "startup config error", {
+        tenantId: "local",
+        userId: "local",
+        appId: "pi",
+        agentId: "pi-mentis",
+        repositoryId: "repo-a",
+      }),
+    ).toBeUndefined();
   });
 });
