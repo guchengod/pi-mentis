@@ -1,6 +1,6 @@
 {
   "name": "@galvinsan/pi-mentis",
-  "version": "0.1.66",
+  "version": "0.1.67",
   "description": "Integrated Pi Mentis knowledge-first memory extension for Pi >= 0.84.0",
   "license": "MIT",
   "author": "guchengod",
@@ -44,11 +44,12 @@
     "image": "https://raw.githubusercontent.com/guchengod/pi-mentis/main/assets/pi-mentis-gallery.png"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox && tsup src/sidecar.ts --format esm --dts --sourcemap --out-dir dist --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external typebox --external @zvec/zvec --external proper-lockfile --external csv-parse --external fast-xml-parser --external fflate --external pdfjs-dist --external smol-toml --external yaml",
+    "build": "tsup src/index.ts --format esm --dts --sourcemap --clean --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @napi-rs/keyring --external typebox && tsup src/sidecar.ts --format esm --dts --sourcemap --out-dir dist --external @earendil-works/pi-ai --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @napi-rs/keyring --external typebox --external @zvec/zvec --external proper-lockfile --external csv-parse --external fast-xml-parser --external fflate --external pdfjs-dist --external smol-toml --external yaml",
     "clean": "rm -rf dist",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@napi-rs/keyring": "1.3.0",
     "@zvec/zvec": "0.6.0",
     "csv-parse": "6.1.0",
     "fast-xml-parser": "5.10.1",
@@ -74,6 +75,7 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "publishConfig": {

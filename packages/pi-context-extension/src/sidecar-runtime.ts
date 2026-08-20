@@ -17,7 +17,15 @@ import {
   type MentisContextSnapshot,
   type PiMentisConfig,
 } from "@pi-mentis/pi-mentis-core";
-import type { EmbeddingSpaceIdentity } from "@pi-mentis/pi-mentis-inference";
+import type {
+  EmbeddingProvider,
+  EmbeddingSpaceIdentity,
+  RerankProvider,
+} from "@pi-mentis/pi-mentis-inference";
+import {
+  ReloadableEmbeddingProvider,
+  ReloadableRerankProvider,
+} from "@pi-mentis/pi-mentis-inference";
 import { createKnowledgeService, type KnowledgeService } from "@pi-mentis/pi-mentis-knowledge-core";
 import {
   ContextStateService,
@@ -78,6 +86,7 @@ import {
   type RetrievalService,
 } from "@pi-mentis/pi-mentis-retrieval";
 import {
+  SiliconFlowConnectionTester,
   SiliconFlowEmbeddingProvider,
   SiliconFlowRerankProvider,
 } from "@pi-mentis/pi-mentis-siliconflow";
@@ -98,6 +107,15 @@ import {
 } from "./sidecar-protocol.js";
 import { consumeToolResultSpool } from "./tool-result-spool.js";
 import { foregroundProcedureLifecycleEvents } from "./procedure-telemetry.js";
+import {
+  SILICONFLOW_PROVIDER,
+  createPlatformSecretStore,
+  providerEnvironment,
+  resolveCredential,
+  safeProviderError,
+  type CredentialSource,
+  type SecretStore,
+} from "./provider-settings.js";
 
 type EventSender = (event: SidecarEventMessage["event"]) => void;
 
@@ -360,7 +378,12 @@ export class MentisSidecarRuntime {
   #config: PiMentisConfig | undefined;
   #scheduler: BackgroundScheduler | undefined;
   #storeHandle: SharedZvecStoreHandle | undefined;
-  #embedding: SiliconFlowEmbeddingProvider | undefined;
+  #embedding: ReloadableEmbeddingProvider | undefined;
+  #reranker: ReloadableRerankProvider | undefined;
+  #secretStore: SecretStore = createPlatformSecretStore();
+  #providerCredentialSource: CredentialSource = "missing";
+  #providerConfigured = false;
+  #cwd: string | undefined;
   #knowledge: KnowledgeService | undefined;
   #memory: MemoryService | undefined;
   #retrieval: RetrievalService | undefined;
@@ -397,6 +420,9 @@ export class MentisSidecarRuntime {
     if (request.method === "capture.toolResultSpool")
       return this.#captureToolResultSpool(request.params);
     if (request.method === "knowledge.command") return this.#knowledgeCommand(request.params);
+    if (request.method === "provider.status") return this.#providerStatus();
+    if (request.method === "provider.reload") return this.#reloadProvider();
+    if (request.method === "provider.test") return this.#testProvider();
     if (request.method === "status") return this.#status(request.params.clientSessionId);
     if (request.method === "shutdown") {
       await this.close();
@@ -635,8 +661,11 @@ export class MentisSidecarRuntime {
     }
     const scheduler = new BackgroundScheduler(config.performance.queue);
     const telemetry = new InMemoryTelemetry();
-    const embedding = new SiliconFlowEmbeddingProvider(config.inference.siliconflow);
-    const reranker = new SiliconFlowRerankProvider(config.inference.siliconflow);
+    const embedding = new ReloadableEmbeddingProvider("siliconflow");
+    const reranker = new ReloadableRerankProvider("siliconflow");
+    const prepared = await this.#prepareProvider(config);
+    embedding.swap(prepared.embedding);
+    reranker.swap(prepared.reranker);
     const storeHandle = await acquireSharedZvecStore(config.storage, generationSpaces(config));
     const scopePlanner = new ScopeSemanticPlanner({
       embedding,
@@ -702,9 +731,13 @@ export class MentisSidecarRuntime {
     });
     const relationshipQueue = new MentisBackgroundQueue({ maxConcurrency: 1, maxQueueLength: 64 });
     this.#config = config;
+    this.#cwd = cwd;
     this.#scheduler = scheduler;
     this.#storeHandle = storeHandle;
     this.#embedding = embedding;
+    this.#reranker = reranker;
+    this.#providerCredentialSource = prepared.source;
+    this.#providerConfigured = prepared.configured;
     this.#knowledge = knowledge;
     this.#memory = memory;
     this.#retrieval = retrieval;
@@ -757,6 +790,215 @@ export class MentisSidecarRuntime {
     await this.#scheduler?.close();
     await this.#storeHandle?.release();
     await resetSharedStores();
+  }
+
+  async #prepareProvider(config: PiMentisConfig): Promise<{
+    readonly embedding?: EmbeddingProvider;
+    readonly reranker?: RerankProvider;
+    readonly source: CredentialSource;
+    readonly configured: boolean;
+  }> {
+    const credential = await resolveCredential(
+      {
+        ...SILICONFLOW_PROVIDER,
+        credential: {
+          ...SILICONFLOW_PROVIDER.credential,
+          envNames: [config.inference.siliconflow.apiKeyEnv],
+        },
+      },
+      this.#secretStore,
+    );
+    if (!credential.configured) return { source: "missing", configured: false };
+    const environment = providerEnvironment(config.inference.siliconflow, credential);
+    return {
+      embedding: new SiliconFlowEmbeddingProvider(config.inference.siliconflow, environment),
+      reranker: new SiliconFlowRerankProvider(config.inference.siliconflow, environment),
+      source: credential.source,
+      configured: true,
+    };
+  }
+
+  #providerStatus() {
+    const config = this.#config;
+    if (config === undefined) {
+      return {
+        ready: false,
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        credentialSource: "missing" as const,
+        configured: false,
+        endpoint: SILICONFLOW_PROVIDER.defaults.endpoint,
+        embeddingModel: SILICONFLOW_PROVIDER.defaults.embeddingModel,
+        rerankEnabled: false,
+        rerankModel: SILICONFLOW_PROVIDER.defaults.rerankModel,
+      };
+    }
+    return {
+      ready: this.#memory !== undefined && this.#providerConfigured,
+      providerId: "siliconflow",
+      providerName: "SiliconFlow",
+      credentialSource: this.#providerCredentialSource,
+      configured: this.#providerConfigured,
+      endpoint: config.inference.siliconflow.baseUrl,
+      embeddingModel: config.inference.siliconflow.embedding.model,
+      rerankEnabled: config.inference.rerank.enabled,
+      rerankModel: config.inference.siliconflow.rerank.model,
+    };
+  }
+
+  async #reloadProvider() {
+    const cwd = this.#cwd;
+    const current = this.#config;
+    if (
+      cwd === undefined ||
+      current === undefined ||
+      this.#embedding === undefined ||
+      this.#reranker === undefined
+    ) {
+      return {
+        activated: false,
+        error: { category: "configuration", message: "Provider runtime is not initialized" },
+      };
+    }
+    try {
+      const next = await loadConfig(cwd);
+      if (
+        next.inference.siliconflow.embedding.dimensions !==
+        current.inference.siliconflow.embedding.dimensions
+      ) {
+        return {
+          activated: false,
+          error: {
+            category: "configuration",
+            message: "Embedding dimension changes require a storage migration",
+          },
+        };
+      }
+      const prepared = await this.#prepareProvider(next);
+      this.#embedding.swap(prepared.embedding);
+      this.#reranker.swap(prepared.reranker);
+      this.#config = next;
+      this.#providerCredentialSource = prepared.source;
+      this.#providerConfigured = prepared.configured;
+      return { activated: true };
+    } catch (error) {
+      return { activated: false, error: safeProviderError(error) };
+    }
+  }
+
+  async #testProvider() {
+    const config = this.#config;
+    const started = performance.now();
+    if (config === undefined) {
+      return {
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        authentication: "missing",
+        embedding: "not-run",
+        rerank: "not-run",
+        embeddingModel: SILICONFLOW_PROVIDER.defaults.embeddingModel,
+        latencyMs: performance.now() - started,
+        error: { category: "configuration", message: "Provider runtime is not initialized" },
+      };
+    }
+    let prepared: {
+      readonly embedding?: EmbeddingProvider;
+      readonly reranker?: RerankProvider;
+      readonly source: CredentialSource;
+      readonly configured: boolean;
+    };
+    try {
+      prepared = await this.#prepareProvider(config);
+    } catch (error) {
+      const safe = safeProviderError(error);
+      return {
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        authentication: safe.category === "authentication" ? "failed" : "missing",
+        embedding: "not-run",
+        rerank: "not-run",
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        latencyMs: performance.now() - started,
+        error: safe,
+      };
+    }
+    if (prepared.embedding === undefined || prepared.reranker === undefined) {
+      return {
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        authentication: "missing",
+        embedding: "not-run",
+        rerank: config.inference.rerank.enabled ? "not-run" : "disabled",
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        ...(config.inference.rerank.enabled
+          ? { rerankModel: config.inference.siliconflow.rerank.model }
+          : {}),
+        latencyMs: performance.now() - started,
+        error: { category: "authentication", message: "API key is not configured" },
+      };
+    }
+    let tester: SiliconFlowConnectionTester;
+    try {
+      const environment = await resolveCredential(
+        {
+          ...SILICONFLOW_PROVIDER,
+          credential: {
+            ...SILICONFLOW_PROVIDER.credential,
+            envNames: [config.inference.siliconflow.apiKeyEnv],
+          },
+        },
+        this.#secretStore,
+      );
+      tester = new SiliconFlowConnectionTester(
+        config.inference.siliconflow,
+        providerEnvironment(config.inference.siliconflow, environment),
+      );
+      await tester.testEmbedding();
+    } catch (error) {
+      const safe = safeProviderError(error);
+      return {
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        authentication: safe.category === "authentication" ? "failed" : "passed",
+        embedding: "failed",
+        rerank: config.inference.rerank.enabled ? "not-run" : "disabled",
+        embeddingModel: config.inference.siliconflow.embedding.model,
+        ...(config.inference.rerank.enabled
+          ? { rerankModel: config.inference.siliconflow.rerank.model }
+          : {}),
+        latencyMs: performance.now() - started,
+        error: safe,
+      };
+    }
+    if (config.inference.rerank.enabled) {
+      try {
+        await tester.testRerank();
+      } catch (error) {
+        return {
+          providerId: "siliconflow",
+          providerName: "SiliconFlow",
+          authentication: "passed",
+          embedding: "passed",
+          rerank: "failed",
+          embeddingModel: config.inference.siliconflow.embedding.model,
+          rerankModel: config.inference.siliconflow.rerank.model,
+          latencyMs: performance.now() - started,
+          error: safeProviderError(error),
+        };
+      }
+    }
+    return {
+      providerId: "siliconflow",
+      providerName: "SiliconFlow",
+      authentication: "passed",
+      embedding: "passed",
+      rerank: config.inference.rerank.enabled ? "passed" : "disabled",
+      embeddingModel: config.inference.siliconflow.embedding.model,
+      ...(config.inference.rerank.enabled
+        ? { rerankModel: config.inference.siliconflow.rerank.model }
+        : {}),
+      latencyMs: performance.now() - started,
+    };
   }
 
   async #openSession(
@@ -2256,7 +2498,7 @@ export class MentisSidecarRuntime {
     if (this.#memory === undefined) throw new Error("Mentis sidecar is not initialized");
   }
 
-  #embeddingProvider(): SiliconFlowEmbeddingProvider {
+  #embeddingProvider(): ReloadableEmbeddingProvider {
     if (this.#embedding === undefined) throw new Error("Mentis sidecar is not initialized");
     return this.#embedding;
   }

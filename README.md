@@ -42,20 +42,34 @@ pi remove npm:@galvinsan/pi-mentis
 
 ### 3. 配置凭证并验证
 
-API Key 只放在环境变量中，不要写入配置文件。
+启动 Pi 后运行 `/mentis`，即可在本地 TUI 中配置 SiliconFlow。macOS 上 API Key 存入系统
+Keychain，不进入普通配置文件，也不会进入 Pi 对话或 Mentis Memory。
+
+```text
+/mentis
+/mentis config
+/mentis key
+/mentis status
+/mentis test
+/mentis provider
+```
+
+`/mentis` 打开 Provider Settings 主界面；`config` 修改 endpoint、embedding 和 reranker
+等非敏感设置；`key` 设置、删除或改用环境变量中的 API Key；`status` 查看当前解析来源和
+运行状态；`test` 发起最小连接测试；`provider` 查看当前 Provider。`help` 显示完整帮助，
+`doctor` 保留为只读诊断兼容命令。
+
+已有环境变量方式继续兼容：
 
 ```bash
-export SILICONFLOW_API_KEY="your-api-key"
+export SILICONFLOW_API_KEY="YOUR_SILICONFLOW_API_KEY"
 pi
 ```
 
-在 Pi 中执行：
-
-```text
-/mentis doctor
-```
-
-它会只读检查 Pi 版本、凭证变量、存储配置和 Sidecar 状态，不会发起模型请求，也不会显示 API Key。`/mentis help` 会显示当前实际使用的配置文件路径和完整帮助。
+凭证优先级是 macOS Secure settings → `SILICONFLOW_API_KEY` → Missing。`/mentis test`
+会发起最小 embedding 请求，并在启用 rerank 时同时验证 reranker；输出不会显示 Key 或远端响应正文。
+保存配置或凭证后会热加载 Sidecar，通常不需要重启 Pi；如果新配置无法激活，会保留旧的
+可用运行时并提示失败原因。当前 production provider 仍然只有 SiliconFlow。
 
 ## 使用
 
@@ -185,6 +199,8 @@ Pi 进程只保留轻量适配器和可选的内存 Capsule；Zvec、远程推�
 ## 配置、数据与安全
 
 - 默认配置文件：`~/.pi/.pi-mentis/config.json`；可使用 `PI_MENTIS_HOME` 指定独立的绝对路径。
+- macOS Secure settings 使用系统 Keychain；其他不支持系统安全存储的平台继续使用环境变量。
+- API keys are never stored in Mentis memory.
 - 默认数据目录：`~/.pi/.pi-mentis/zvec`；同一目录只允许一个写入进程。
 - 备份前先停止 Pi，再整体复制 `storage.rootDir`。
 - 召回内容会作为不受信任的证据提供给 Agent，不能覆盖当前用户指令。

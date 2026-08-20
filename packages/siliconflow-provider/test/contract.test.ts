@@ -137,6 +137,42 @@ describe("SiliconFlow wire contracts", () => {
     expect(request).toHaveBeenCalledOnce();
   });
 
+  it("does not include an echoed credential from an HTTP error body", async () => {
+    const nonce = "TEST_ONLY_SECRET_http_35b";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ message: nonce }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    let projected = "";
+    try {
+      await postJson(
+        "https://api.siliconflow.cn/v1/embeddings",
+        nonce,
+        {},
+        {
+          providerId: "siliconflow",
+          modelId: "m",
+          operation: "embedding",
+          timeoutMs: 1_000,
+          maxAttempts: 1,
+          baseDelayMs: 1,
+          maxDelayMs: 1,
+          estimatedTokens: 1,
+        },
+      );
+    } catch (error) {
+      projected = JSON.stringify(error);
+    }
+    expect(projected).not.toContain(nonce);
+    expect(projected).toContain("HTTP 401");
+  });
+
   it.each([429, 503, 504])("retries HTTP %i and returns the recovered response", async (status) => {
     let attempts = 0;
     vi.stubGlobal(

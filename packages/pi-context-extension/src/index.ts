@@ -42,6 +42,13 @@ import { shouldAcceptActiveContext } from "./active-context.js";
 import { MentisSidecarClient } from "./sidecar-client.js";
 import type { MemoryCapsule, SessionOpenResult } from "./sidecar-protocol.js";
 import { createToolResultSpool, removeToolResultSpool } from "./tool-result-spool.js";
+import {
+  MentisSettingsController,
+  type ProviderReloadResult,
+  type ProviderRuntimeStatus,
+  type ProviderTestResult,
+} from "./mentis-settings-controller.js";
+import { ProviderConfigStore, createPlatformSecretStore } from "./provider-settings.js";
 
 function unavailableRemember(reason: string): PublicRememberResult {
   return {
@@ -133,27 +140,16 @@ function knowledgeResultMessage(action: string, result: unknown): string {
   return formatPiToolJson(result ?? { found: false });
 }
 
-function isReadyStatus(value: unknown): boolean {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "ready" in value &&
-    (value as { readonly ready: unknown }).ready === true
-  );
-}
-
 export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Promise<void> {
   let config: PiMentisConfig;
   let configPath: string;
   let piPackageRoot: string;
-  let piRuntimeVersion: string;
   try {
     const installedVersion = await detectInstalledPackageVersion(
       "@earendil-works/pi-coding-agent",
       import.meta.url,
     );
     assertPiCompatibility(installedVersion);
-    piRuntimeVersion = installedVersion;
     piPackageRoot = await findInstalledPackageRoot(
       "@earendil-works/pi-coding-agent",
       import.meta.url,
@@ -228,6 +224,17 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
     },
     onScopeContext: (updated) => {
       scopeContext = updated;
+    },
+  });
+  const settings = new MentisSettingsController({
+    configStore: new ProviderConfigStore(configPath),
+    secretStore: createPlatformSecretStore(),
+    runtime: {
+      status: async () =>
+        (await sidecar.call("provider.status", {}, 15_000)) as ProviderRuntimeStatus,
+      reload: async () =>
+        (await sidecar.call("provider.reload", {}, 30_000)) as ProviderReloadResult,
+      test: async () => (await sidecar.call("provider.test", {}, 45_000)) as ProviderTestResult,
     },
   });
   const openConfiguredSession = async (): Promise<void> => {
@@ -316,105 +323,24 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
   });
 
   pi.registerCommand("mentis", {
-    description: "Show Pi Mentis help, status, or local health diagnostics",
+    description: "Open Pi Mentis provider settings or run status, config, key, and test actions",
     handler: async (rawArguments, context) => {
-      const action = rawArguments.trim() || "help";
+      const action = rawArguments.trim();
       if (action === "help") {
         notifyWhenUiAvailable(context, helpText, "info");
         return;
       }
-      if (!["status", "doctor"].includes(action)) {
-        notifyWhenUiAvailable(
-          context,
-          "Usage: /mentis help | /mentis status | /mentis doctor",
-          "error",
-        );
-        return;
-      }
       if (action === "doctor") {
-        const credentialVariable = config.inference.siliconflow.apiKeyEnv;
-        const checks: Array<{
-          readonly name: string;
-          readonly ok: boolean;
-          readonly detail: string;
-        }> = [
-          {
-            name: "pi_runtime",
-            ok: true,
-            detail: `Pi ${piRuntimeVersion} satisfies the configured minimum ${config.runtime.piVersion}.`,
-          },
-          {
-            name: "credential",
-            ok: (process.env[credentialVariable]?.trim().length ?? 0) > 0,
-            detail: `Environment variable ${credentialVariable} is ${
-              (process.env[credentialVariable]?.trim().length ?? 0) > 0 ? "set" : "not set"
-            }.`,
-          },
-          {
-            name: "storage_configuration",
-            ok: config.storage.rootDir.trim() !== "",
-            detail: `Storage root: ${config.storage.rootDir}`,
-          },
-        ];
-        let sidecarStatus: unknown;
-        try {
-          await ensureSidecarSession();
-          if (clientSessionId === undefined) {
-            throw new Error("Pi session is not initialized yet");
-          }
-          sidecarStatus = await sidecar.call("status", { clientSessionId }, 15_000);
-          checks.push({
-            name: "sidecar",
-            ok: isReadyStatus(sidecarStatus),
-            detail: isReadyStatus(sidecarStatus)
-              ? `Ready (pid ${sidecar.pid ?? "unknown"}).`
-              : "Responded without a ready status.",
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          checks.push({ name: "sidecar", ok: false, detail: message });
-        }
-        const healthy = checks.every((check) => check.ok);
-        const result = {
-          healthy,
-          checks,
-          configuration: {
-            path: configPath,
-            storageRoot: config.storage.rootDir,
-            automaticRecall: config.retrieval.automaticRecall,
-            provider: config.inference.provider,
-            embedding: {
-              model: config.inference.siliconflow.embedding.model,
-              dimensions: config.inference.siliconflow.embedding.dimensions,
-            },
-          },
-          nextStep: healthy
-            ? "Pi Mentis is ready. This diagnostic does not call the remote provider."
-            : `Fix the failed checks, then run /mentis doctor again.`,
-        };
-        notifyWhenUiAvailable(context, formatPiToolJson(result), healthy ? "info" : "warning");
+        await settings.handle("status", context);
         return;
       }
       try {
-        await ensureSidecarSession();
-        if (clientSessionId === undefined) {
-          notifyWhenUiAvailable(
-            context,
-            sidecarError ?? "Mentis sidecar session is not ready.",
-            "error",
-          );
-          return;
-        }
-        const result = await sidecar.call(
-          "knowledge.command",
-          { clientSessionId, action: "status", arguments: [], cwd: context.cwd },
-          15_000,
-        );
-        notifyWhenUiAvailable(context, formatPiToolJson(result), "info");
+        const updatedConfig = await settings.handle(action, context);
+        if (updatedConfig !== undefined) config = updatedConfig;
       } catch (error) {
         notifyWhenUiAvailable(
           context,
-          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error.message : "Mentis settings operation failed",
           "error",
         );
       }

@@ -382,3 +382,33 @@ export class SiliconFlowRerankProvider implements RerankProvider {
     return this.#client.health(options);
   }
 }
+
+/** Control-plane health checks kept inside the provider package, outside Pi capture. */
+export class SiliconFlowConnectionTester {
+  readonly #embedding: SiliconFlowEmbeddingProvider;
+  readonly #reranker: SiliconFlowRerankProvider;
+  readonly #config: SiliconFlowConfig;
+
+  constructor(config: SiliconFlowConfig, environment: NodeJS.ProcessEnv = process.env) {
+    this.#config = config;
+    this.#embedding = new SiliconFlowEmbeddingProvider(config, environment);
+    this.#reranker = new SiliconFlowRerankProvider(config, environment);
+  }
+
+  async testEmbedding(): Promise<void> {
+    await this.#embedding.embed({
+      inputs: ["pi-mentis provider health check"],
+      inputKind: "query",
+      dimensions: this.#config.embedding.dimensions,
+      truncate: "reject",
+    });
+  }
+
+  async testRerank(): Promise<void> {
+    await this.#reranker.rerank({
+      query: "health",
+      documents: [{ id: "health", text: "health" }],
+      topN: 1,
+    });
+  }
+}

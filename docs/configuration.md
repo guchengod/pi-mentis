@@ -7,7 +7,15 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
 
 Run `/mentis help` inside Pi to display the effective configuration path and detailed memory,
 knowledge-base, automatic-recall, Sidecar, and performance guidance. `/kb help` displays the same
-help from the knowledge command surface. After editing the file, run `/reload` or restart Pi.
+help from the knowledge command surface. Provider endpoint and model settings can be edited with
+`/mentis config` and are activated without restarting Pi.
+
+SiliconFlow is the only production provider in this release. `/mentis key` stores its credential in
+macOS Keychain under service `pi-mentis` and account `provider:siliconflow:default`. The credential
+resolver uses secure settings first, then the configured environment variable (default:
+`SILICONFLOW_API_KEY`). API keys are never written to this JSON file or stored in Mentis memory.
+Platforms without a secure backend keep the environment-variable fallback and do not write a
+plaintext secret file.
 
 ```json
 {

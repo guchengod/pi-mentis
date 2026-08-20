@@ -283,10 +283,12 @@ export async function postJson(
     }
     const traceId = response.headers.get("x-siliconcloud-trace-id") ?? undefined;
     if (!response.ok) {
-      const payload = await response.text();
+      // Discard the body and never project it into errors. Provider responses may
+      // echo request material and must not become logs, IPC errors, or TUI text.
+      await response.body?.cancel();
       const mapped = httpError(
         response.status,
-        `SiliconFlow ${operation.operation} failed with HTTP ${response.status}: ${payload.slice(0, 512)}`,
+        `SiliconFlow ${operation.operation} failed with HTTP ${response.status}`,
         {
           provider: operation.providerId,
           model: operation.modelId,
