@@ -133,6 +133,13 @@ export interface JsonHttpResult {
   readonly retryCount: number;
 }
 
+export interface JsonGetOperation {
+  readonly providerId: string;
+  readonly operation: "models";
+  readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+}
+
 interface ErrorContext {
   readonly provider: string;
   readonly model: string;
@@ -199,6 +206,97 @@ async function delay(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true },
     );
   });
+}
+
+/** Authenticated control-plane GET. Error response bodies are deliberately discarded. */
+export async function getJson(
+  url: string,
+  apiKey: string,
+  operation: JsonGetOperation,
+): Promise<unknown> {
+  const timeoutSignal = AbortSignal.timeout(operation.timeoutMs);
+  const signal =
+    operation.signal === undefined
+      ? timeoutSignal
+      : AbortSignal.any([operation.signal, timeoutSignal]);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
+      signal,
+    });
+  } catch (error) {
+    if (operation.signal?.aborted === true) {
+      throw new OperationCancelledError(`${operation.operation} request cancelled`, {
+        operation: operation.operation,
+        provider: operation.providerId,
+        retryable: false,
+        cause: error,
+      });
+    }
+    if (timeoutSignal.aborted) {
+      throw new ProviderTimeoutError(
+        `${operation.operation} request exceeded ${operation.timeoutMs}ms`,
+        {
+          operation: operation.operation,
+          provider: operation.providerId,
+          retryable: true,
+          cause: error,
+        },
+      );
+    }
+    throw new ProviderUnavailableError(`${operation.operation} network request failed`, {
+      operation: operation.operation,
+      provider: operation.providerId,
+      retryable: retryableNetworkError(error),
+      cause: error,
+    });
+  }
+  const traceId = response.headers.get("x-siliconcloud-trace-id") ?? undefined;
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw httpError(
+      response.status,
+      `SiliconFlow ${operation.operation} failed with HTTP ${response.status}`,
+      {
+        provider: operation.providerId,
+        model: "catalog",
+        operation: operation.operation,
+        ...(traceId === undefined ? {} : { traceId }),
+        retryable: [429, 503, 504].includes(response.status),
+        details: { statusCode: response.status },
+      },
+    );
+  }
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("application/json")) {
+    await response.body?.cancel();
+    throw new ProviderProtocolError("SiliconFlow models returned a non-JSON response", {
+      operation: operation.operation,
+      provider: operation.providerId,
+      retryable: false,
+    });
+  }
+  const contentLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 2 * 1024 * 1024) {
+    await response.body?.cancel();
+    throw new ProviderProtocolError("SiliconFlow models response exceeded the size limit", {
+      operation: operation.operation,
+      provider: operation.providerId,
+      retryable: false,
+    });
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new ProviderProtocolError("SiliconFlow models returned invalid JSON", {
+      operation: operation.operation,
+      provider: operation.providerId,
+      retryable: false,
+      cause: error,
+    });
+  }
 }
 
 export async function postJson(

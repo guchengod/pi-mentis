@@ -6,6 +6,7 @@ import {
   ProviderConfigStore,
   ProviderRegistry,
   SILICONFLOW_PROVIDER,
+  providerDraft,
   resolveCredential,
   type ProviderConfigDraft,
   type SecretStore,
@@ -45,10 +46,20 @@ export interface ProviderReloadResult {
   readonly error?: { readonly category: string; readonly message: string };
 }
 
+export interface ProviderModelCatalogResult {
+  readonly providerId: string;
+  readonly providerName: string;
+  readonly embeddingModels: readonly string[];
+  readonly rerankModels: readonly string[];
+  readonly source: "remote" | "verified-fallback";
+  readonly error?: { readonly category: string; readonly message: string };
+}
+
 export interface MentisProviderRuntimeControl {
   status(): Promise<ProviderRuntimeStatus>;
   reload(): Promise<ProviderReloadResult>;
   test(): Promise<ProviderTestResult>;
+  models(): Promise<ProviderModelCatalogResult>;
 }
 
 function sourceLabel(source: ProviderRuntimeStatus["credentialSource"]): string {
@@ -68,7 +79,6 @@ function formatStatus(status: ProviderRuntimeStatus, environmentOverridden = fal
     ...(environmentOverridden ? ["Environment key    present, overridden"] : []),
     `Embedding          ${status.embeddingModel}`,
     `Reranker           ${status.rerankEnabled ? status.rerankModel : "disabled"}`,
-    `Endpoint           ${status.endpoint}`,
     `Provider health    ${status.ready && status.configured ? "ready" : "setup required"}`,
   ].join("\n");
 }
@@ -99,15 +109,12 @@ export class MentisSettingsController {
     context: ExtensionCommandContext,
   ): Promise<PiMentisConfig | undefined> {
     const action = rawArguments.trim().toLowerCase();
-    if (action === "" || action === "provider") {
-      await this.#main(context);
-      return undefined;
-    }
+    if (action === "" || action === "provider") return await this.#selectProvider(context);
     if (action === "status") {
       await this.#showStatus(context);
       return undefined;
     }
-    if (action === "config") return await this.#configure(context);
+    if (action === "config") return await this.#providerSettings(context);
     if (action === "key") {
       await this.#credential(context);
       return undefined;
@@ -123,36 +130,16 @@ export class MentisSettingsController {
     return undefined;
   }
 
-  async #main(context: ExtensionCommandContext): Promise<void> {
-    while (true) {
-      const status = await this.#runtime.status();
-      const choice = await context.ui.select("Mentis Settings", [
-        `Status — ${status.ready ? "Ready" : "Setup required"}`,
-        `Provider — ${status.providerName} (current)`,
-        `API Key — ${status.configured ? "Configured" : "Missing"}`,
-        `Endpoint — ${status.endpoint}`,
-        `Embedding Model — ${status.embeddingModel}`,
-        `Rerank Model — ${status.rerankEnabled ? status.rerankModel : "Disabled"}`,
-        "Test Connection",
-        "Close",
-      ]);
-      if (choice === undefined || choice === "Close") return;
-      if (choice.startsWith("Status")) await this.#showStatus(context);
-      else if (choice.startsWith("Provider")) {
-        await context.ui.select(
-          "Provider",
-          this.#registry
-            .list()
-            .map((definition) =>
-              definition.id === status.providerId
-                ? `${definition.displayName} — Current provider`
-                : definition.displayName,
-            ),
-        );
-      } else if (choice.startsWith("API Key")) await this.#credential(context);
-      else if (choice === "Test Connection") await this.#test(context);
-      else await this.#configure(context);
-    }
+  async #selectProvider(context: ExtensionCommandContext): Promise<PiMentisConfig | undefined> {
+    const definitions = this.#registry.list();
+    const choice = await context.ui.select(
+      "Select Provider",
+      definitions.map((definition) => definition.displayName),
+    );
+    if (choice === undefined) return undefined;
+    const definition = definitions.find((candidate) => candidate.displayName === choice);
+    if (definition === undefined) return undefined;
+    return await this.#providerSettings(context);
   }
 
   async #showStatus(context: ExtensionCommandContext): Promise<void> {
@@ -170,144 +157,93 @@ export class MentisSettingsController {
     );
   }
 
-  async #configure(context: ExtensionCommandContext): Promise<PiMentisConfig | undefined> {
-    const current = await this.#configStore.load(context.cwd, this.#environment);
-    const definition = this.#registry.get(current.inference.provider) ?? SILICONFLOW_PROVIDER;
-    let draft: ProviderConfigDraft = {
-      endpoint: current.inference.siliconflow.baseUrl,
-      embeddingModel: current.inference.siliconflow.embedding.model,
-      rerankModel: current.inference.siliconflow.rerank.model,
-    };
+  async #providerSettings(context: ExtensionCommandContext): Promise<PiMentisConfig | undefined> {
+    let latestConfig: PiMentisConfig | undefined;
+    const initialStatus = await this.#runtime.status();
+    if (!initialStatus.configured && !(await this.#credential(context))) return undefined;
     while (true) {
       const status = await this.#runtime.status();
-      const choice = await context.ui.select(`${definition.displayName} Configuration`, [
-        `Provider — ${definition.displayName}`,
-        `Endpoint — ${draft.endpoint}`,
-        `API Key — ${status.configured ? "Configured" : "Missing"}`,
-        `Embedding Model — ${draft.embeddingModel}`,
-        `Rerank Model — ${draft.rerankModel}`,
+      const definition = this.#registry.get(status.providerId) ?? SILICONFLOW_PROVIDER;
+      const resolution = await resolveCredential(
+        definition,
+        this.#secretStore,
+        this.#environment,
+        false,
+      );
+      const choice = await context.ui.select(definition.displayName, [
+        `API Key — ${status.configured ? `Configured (${sourceLabel(status.credentialSource)})` : "Missing"}`,
+        `Embedding Model — ${status.embeddingModel}`,
+        `Rerank Model — ${status.rerankEnabled ? status.rerankModel : "Disabled"}`,
         "Test Connection",
-        "Save",
-        "Cancel",
+        ...(resolution.securePresent ? ["Remove Stored API Key"] : []),
+        "Back",
       ]);
-      if (choice === undefined || choice === "Cancel") return undefined;
-      if (choice.startsWith("Provider")) continue;
+      if (choice === undefined || choice === "Back") return latestConfig;
       if (choice.startsWith("API Key")) {
         await this.#credential(context);
+        continue;
+      }
+      if (choice.startsWith("Embedding Model")) {
+        latestConfig = (await this.#selectModel(context, "embedding")) ?? latestConfig;
+        continue;
+      }
+      if (choice.startsWith("Rerank Model")) {
+        latestConfig = (await this.#selectModel(context, "rerank")) ?? latestConfig;
         continue;
       }
       if (choice === "Test Connection") {
         await this.#test(context);
         continue;
       }
-      if (choice === "Save") {
-        try {
-          const previousDraft: ProviderConfigDraft = {
-            endpoint: current.inference.siliconflow.baseUrl,
-            embeddingModel: current.inference.siliconflow.embedding.model,
-            rerankModel: current.inference.siliconflow.rerank.model,
-          };
-          const saved = await this.#configStore.save(context.cwd, draft, this.#environment);
-          const reload = await this.#runtime.reload();
-          if (!reload.activated) {
-            const restored = await this.#configStore.save(
-              context.cwd,
-              previousDraft,
-              this.#environment,
-            );
-            const restoredRuntime = await this.#runtime.reload();
-            if (!restoredRuntime.activated) {
-              context.ui.notify(
-                "Provider activation failed and the previous runtime could not be confirmed. Mentis is degraded.",
-                "error",
-              );
-              return restored.config;
-            }
-            context.ui.notify(
-              `Settings were not applied; the previous configuration and runtime were restored: ${reload.error?.message ?? "reload failed"}`,
-              "warning",
-            );
-            return restored.config;
-          }
-          context.ui.notify(`${definition.displayName} settings saved and activated.`, "info");
-          return saved.config;
-        } catch (error) {
-          context.ui.notify(
-            error instanceof Error ? error.message : "Unable to save provider settings",
-            "error",
-          );
-          continue;
-        }
+      if (choice === "Remove Stored API Key") {
+        await this.#removeCredential(context, definition);
+        return latestConfig;
       }
-      const field = choice.startsWith("Endpoint")
-        ? "endpoint"
-        : choice.startsWith("Embedding")
-          ? "embeddingModel"
-          : "rerankModel";
-      const value = await context.ui.input(
-        field === "endpoint"
-          ? "SiliconFlow Endpoint"
-          : field === "embeddingModel"
-            ? "Embedding Model"
-            : "Rerank Model",
-        draft[field],
-      );
-      if (value !== undefined && value.trim() !== "") draft = { ...draft, [field]: value.trim() };
     }
   }
 
-  async #credential(context: ExtensionCommandContext): Promise<void> {
+  async #credential(context: ExtensionCommandContext): Promise<boolean> {
     const runtimeStatus = await this.#runtime.status();
     const definition = this.#registry.get(runtimeStatus.providerId) ?? SILICONFLOW_PROVIDER;
+    if (!this.#secretStore.available) {
+      context.ui.notify(
+        "Secure storage is not available on this platform. Configure SILICONFLOW_API_KEY in the environment.",
+        "warning",
+      );
+      return false;
+    }
+    const secret = await context.ui.custom<string | undefined>(
+      (tui, theme, keybindings, done) =>
+        new MaskedSecretInput(tui, theme, keybindings, done, definition.displayName),
+      { overlay: true, overlayOptions: { width: 56, maxHeight: 10, anchor: "center" } },
+    );
+    if (secret === undefined) return false;
+    try {
+      await this.#secretStore.set(definition.credential.secretId, secret);
+    } catch {
+      context.ui.notify("Failed to store credential securely.", "error");
+      return false;
+    }
+    const reload = await this.#runtime.reload();
+    context.ui.notify(
+      reload.activated
+        ? `${definition.displayName} API Key saved and activated.`
+        : "API Key was stored, but provider activation failed.",
+      reload.activated ? "info" : "warning",
+    );
+    return reload.activated;
+  }
+
+  async #removeCredential(
+    context: ExtensionCommandContext,
+    definition: typeof SILICONFLOW_PROVIDER,
+  ): Promise<void> {
     const resolution = await resolveCredential(
       definition,
       this.#secretStore,
       this.#environment,
       false,
     );
-    const options = [
-      "Replace key",
-      ...(resolution.securePresent ? ["Remove stored key"] : []),
-      ...(resolution.securePresent ? ["Use environment fallback"] : []),
-      "Cancel",
-    ];
-    const choice = await context.ui.select(
-      `${definition.displayName} API Key\nStatus: ${resolution.configured ? "Configured" : "Missing"}\nSource: ${sourceLabel(resolution.source)}`,
-      options,
-    );
-    if (choice === undefined || choice === "Cancel") return;
-    if (choice === "Replace key") {
-      if (!this.#secretStore.available) {
-        context.ui.notify(
-          "Secure storage is not available on this platform. Using environment variable fallback.",
-          "warning",
-        );
-        return;
-      }
-      const secret = await context.ui.custom<string | undefined>(
-        (tui, theme, keybindings, done) => new MaskedSecretInput(tui, theme, keybindings, done),
-        { overlay: true, overlayOptions: { width: 56, maxHeight: 10, anchor: "center" } },
-      );
-      if (secret === undefined) return;
-      try {
-        await this.#secretStore.set(definition.credential.secretId, secret);
-      } catch {
-        context.ui.notify("Failed to store credential securely.", "error");
-        return;
-      }
-      const reload = await this.#runtime.reload();
-      context.ui.notify(
-        reload.activated
-          ? "SiliconFlow credential stored securely and activated."
-          : "Credential was stored, but provider activation failed.",
-        reload.activated ? "info" : "warning",
-      );
-      return;
-    }
-    if (choice === "Use environment fallback" && !resolution.environmentPresent) {
-      context.ui.notify("No environment credential is available.", "warning");
-      return;
-    }
     const after = resolution.environmentPresent
       ? "Credential source → Environment variable"
       : "Credential status → Missing";
@@ -322,6 +258,80 @@ export class MentisSettingsController {
       context.ui.notify(`Stored credential removed. ${after}`, "info");
     } catch {
       context.ui.notify("Failed to remove stored credential securely.", "error");
+    }
+  }
+
+  async #selectModel(
+    context: ExtensionCommandContext,
+    kind: "embedding" | "rerank",
+  ): Promise<PiMentisConfig | undefined> {
+    const current = await this.#configStore.load(context.cwd, this.#environment);
+    const currentModel =
+      kind === "embedding"
+        ? current.inference.siliconflow.embedding.model
+        : current.inference.siliconflow.rerank.model;
+    const catalog = await this.#runtime.models();
+    if (catalog.error !== undefined) {
+      context.ui.notify(`Using verified model list: ${catalog.error.message}`, "warning");
+    }
+    const models = kind === "embedding" ? catalog.embeddingModels : catalog.rerankModels;
+    if (models.length === 0) {
+      context.ui.notify(`No compatible ${kind} models are available.`, "warning");
+      return undefined;
+    }
+    const labels = models.map((model) => (model === currentModel ? `${model} — Current` : model));
+    const choice = await context.ui.select(
+      kind === "embedding" ? "Select Embedding Model" : "Select Rerank Model",
+      labels,
+    );
+    if (choice === undefined) return undefined;
+    const selected = models[labels.indexOf(choice)];
+    if (selected === undefined || selected === currentModel) return undefined;
+    const draft = providerDraft(current);
+    return await this.#saveAndActivate(
+      context,
+      {
+        ...draft,
+        ...(kind === "embedding" ? { embeddingModel: selected } : { rerankModel: selected }),
+      },
+      `${kind === "embedding" ? "Embedding" : "Rerank"} model changed to ${selected}.`,
+    );
+  }
+
+  async #saveAndActivate(
+    context: ExtensionCommandContext,
+    draft: ProviderConfigDraft,
+    successMessage: string,
+  ): Promise<PiMentisConfig | undefined> {
+    const previous = await this.#configStore.load(context.cwd, this.#environment);
+    const previousDraft = providerDraft(previous);
+    try {
+      const saved = await this.#configStore.save(context.cwd, draft, this.#environment);
+      const reload = await this.#runtime.reload();
+      if (reload.activated) {
+        context.ui.notify(successMessage, "info");
+        return saved.config;
+      }
+      const restored = await this.#configStore.save(context.cwd, previousDraft, this.#environment);
+      const restoredRuntime = await this.#runtime.reload();
+      if (!restoredRuntime.activated) {
+        context.ui.notify(
+          "Provider activation failed and the previous runtime could not be confirmed. Mentis is degraded.",
+          "error",
+        );
+        return restored.config;
+      }
+      context.ui.notify(
+        `Model was not changed; the previous configuration was restored: ${reload.error?.message ?? "reload failed"}`,
+        "warning",
+      );
+      return restored.config;
+    } catch (error) {
+      context.ui.notify(
+        error instanceof Error ? error.message : "Unable to update provider model",
+        "error",
+      );
+      return undefined;
     }
   }
 

@@ -3,6 +3,7 @@ export interface MentisHelpOptions {
   readonly memory?: boolean;
   readonly knowledge?: boolean;
   readonly doctor?: boolean;
+  readonly providerSettings?: boolean;
 }
 
 export function formatMentisHelp(options: MentisHelpOptions): string {
@@ -12,7 +13,9 @@ export function formatMentisHelp(options: MentisHelpOptions): string {
     "Pi Mentis 使用帮助",
     "",
     `配置文件：${options.configPath}`,
-    "修改配置后，请运行 /reload 或重启 Pi。API Key 应放在环境变量中，不要写进配置文件。",
+    options.providerSettings === true
+      ? "Provider 设置会在选择或输入后立即保存并热加载；API Key 不会写进配置文件。"
+      : "修改配置后，请运行 /reload 或重启 Pi。API Key 应放在环境变量中，不要写进配置文件。",
   ];
 
   if (memory) {
@@ -45,6 +48,14 @@ export function formatMentisHelp(options: MentisHelpOptions): string {
   lines.push(
     "",
     "服务：",
+    ...(options.providerSettings === true
+      ? [
+          "- /mentis：选择 Provider 并配置 API Key、Embedding 和 Rerank 模型。",
+          "- /mentis key：直接输入或更新当前 Provider 的 API Key。",
+          "- /mentis config：打开当前 Provider 的模型设置。",
+          "- /mentis test：验证当前 Provider 的 Embedding 和 Rerank 连接。",
+        ]
+      : []),
     "- /mentis status：查看 Mentis 当前状态。",
     ...(options.doctor === true
       ? ["- /mentis doctor：运行只读的本地配置、凭证和 Sidecar 健康检查。"]

@@ -2,6 +2,7 @@ import {
   ConfigurationError,
   ModelCapabilityMismatchError,
   ProviderAuthenticationError,
+  ProviderProtocolError,
   type SiliconFlowConfig,
 } from "@pi-mentis/pi-mentis-core";
 import {
@@ -20,7 +21,7 @@ import {
   type RerankResponse,
 } from "@pi-mentis/pi-mentis-inference";
 
-import { postJson, ProviderRequestGate } from "./http.js";
+import { getJson, postJson, ProviderRequestGate } from "./http.js";
 import {
   mapEmbeddingVectors,
   mapRerankItems,
@@ -410,5 +411,66 @@ export class SiliconFlowConnectionTester {
       documents: [{ id: "health", text: "health" }],
       topN: 1,
     });
+  }
+}
+
+export type SiliconFlowModelSubtype = "embedding" | "reranker";
+
+/** Fetches the account-visible model catalog without exposing the credential to IPC or TUI code. */
+export class SiliconFlowModelCatalog {
+  readonly #config: SiliconFlowConfig;
+  readonly #apiKey: string;
+
+  constructor(config: SiliconFlowConfig, environment: NodeJS.ProcessEnv = process.env) {
+    this.#config = config;
+    const apiKey = environment[config.apiKeyEnv];
+    if (apiKey === undefined || apiKey.trim() === "") {
+      throw new ProviderAuthenticationError("SiliconFlow credential is not configured", {
+        operation: "models",
+        provider: "siliconflow",
+        retryable: false,
+      });
+    }
+    this.#apiKey = apiKey;
+  }
+
+  async list(subtype: SiliconFlowModelSubtype): Promise<readonly string[]> {
+    const url = new URL(`${this.#config.baseUrl.replace(/\/$/u, "")}/models`);
+    url.searchParams.set("sub_type", subtype);
+    const value = await getJson(url.toString(), this.#apiKey, {
+      providerId: "siliconflow",
+      operation: "models",
+      timeoutMs: Math.max(this.#config.timeout.embeddingMs, this.#config.timeout.rerankMs),
+    });
+    if (typeof value !== "object" || value === null || !("data" in value)) {
+      throw new ProviderProtocolError("SiliconFlow models response is missing data", {
+        operation: "models",
+        provider: "siliconflow",
+        retryable: false,
+      });
+    }
+    const data = (value as { readonly data?: unknown }).data;
+    if (!Array.isArray(data)) {
+      throw new ProviderProtocolError("SiliconFlow models data is not an array", {
+        operation: "models",
+        provider: "siliconflow",
+        retryable: false,
+      });
+    }
+    return [
+      ...new Set(
+        data
+          .slice(0, 2_000)
+          .map((item) =>
+            typeof item === "object" && item !== null && "id" in item
+              ? (item as { readonly id?: unknown }).id
+              : undefined,
+          )
+          .filter(
+            (id): id is string => typeof id === "string" && id.trim() !== "" && id.length <= 512,
+          )
+          .map((id) => id.trim()),
+      ),
+    ].sort((left, right) => left.localeCompare(right));
   }
 }

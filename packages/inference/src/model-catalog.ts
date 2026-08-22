@@ -74,6 +74,14 @@ const rerankModels = new Map<string, RerankModelCapabilities>([
   ],
 ]);
 
+export function listVerifiedEmbeddingModelIds(): readonly string[] {
+  return [...embeddingModels.keys()];
+}
+
+export function listVerifiedRerankModelIds(): readonly string[] {
+  return [...rerankModels.keys()];
+}
+
 export function getVerifiedEmbeddingModel(modelId: string): EmbeddingModelCapabilities {
   const capability = embeddingModels.get(modelId);
   if (capability === undefined) {

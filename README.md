@@ -54,10 +54,15 @@ Keychain，不进入普通配置文件，也不会进入 Pi 对话或 Mentis Mem
 /mentis provider
 ```
 
-`/mentis` 打开 Provider Settings 主界面；`config` 修改 endpoint、embedding 和 reranker
-等非敏感设置；`key` 设置、删除或改用环境变量中的 API Key；`status` 查看当前解析来源和
-运行状态；`test` 发起最小连接测试；`provider` 查看当前 Provider。`help` 显示完整帮助，
-`doctor` 保留为只读诊断兼容命令。
+`/mentis` 先选择 Provider。选择 SiliconFlow 后，如果尚未配置 Key，会直接打开遮罩输入框；
+输入并回车后立即保存和热加载。已有 Key 时，选择 API Key 可直接输入新值并覆盖，不需要
+Replace 或 Save 步骤。Embedding 和 Rerank 模型使用选择器配置，候选来自 SiliconFlow
+`GET /v1/models`，并限制为 Mentis 已验证兼容的模型；接口不可用时回退到本地已验证列表。
+
+`config` 直接打开当前 Provider 的模型设置；`key` 直接输入或更新 API Key；`status` 查看
+当前解析来源和运行状态；`test` 发起最小连接测试；`provider` 重新选择 Provider。`help`
+显示完整帮助，`doctor` 保留为只读诊断兼容命令。Endpoint 沿用配置文件或环境变量中的值，
+不在 TUI 中显示或编辑。
 
 已有环境变量方式继续兼容：
 
@@ -68,7 +73,7 @@ pi
 
 凭证优先级是 macOS Secure settings → `SILICONFLOW_API_KEY` → Missing。`/mentis test`
 会发起最小 embedding 请求，并在启用 rerank 时同时验证 reranker；输出不会显示 Key 或远端响应正文。
-保存配置或凭证后会热加载 Sidecar，通常不需要重启 Pi；如果新配置无法激活，会保留旧的
+每次选择模型或输入凭证后都会立即热加载 Sidecar，不需要重启 Pi；如果新配置无法激活，会保留旧的
 可用运行时并提示失败原因。当前 production provider 仍然只有 SiliconFlow。
 
 ## 使用

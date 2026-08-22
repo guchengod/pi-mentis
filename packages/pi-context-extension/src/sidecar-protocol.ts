@@ -99,6 +99,7 @@ export type SidecarRequest =
   | { readonly method: "provider.status"; readonly params: Record<string, never> }
   | { readonly method: "provider.reload"; readonly params: Record<string, never> }
   | { readonly method: "provider.test"; readonly params: Record<string, never> }
+  | { readonly method: "provider.models"; readonly params: Record<string, never> }
   | { readonly method: "status"; readonly params: { readonly clientSessionId?: string } }
   | { readonly method: "shutdown"; readonly params: Record<string, never> };
 

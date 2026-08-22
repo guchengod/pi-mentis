@@ -14,10 +14,12 @@ interface SecretInputTheme {
 
 /** A deliberately tiny password editor: no history, undo stack, kill ring, or plaintext render. */
 export class MaskedSecretInput {
+  focused = false;
   readonly #tui: TuiRenderTarget;
   readonly #theme: SecretInputTheme;
   readonly #keybindings: KeyMatcher;
   readonly #done: (value: string | undefined) => void;
+  readonly #providerName: string;
   #value = "";
   #paste = "";
   #pasting = false;
@@ -28,21 +30,23 @@ export class MaskedSecretInput {
     theme: SecretInputTheme,
     keybindings: KeyMatcher,
     done: (value: string | undefined) => void,
+    providerName = "SiliconFlow",
   ) {
     this.#tui = tui;
     this.#theme = theme;
     this.#keybindings = keybindings;
     this.#done = done;
+    this.#providerName = providerName;
   }
 
   render(): string[] {
     const masked = "•".repeat(Math.min(32, Math.max(1, this.#value.length)));
     return [
-      this.#theme.fg("accent", "SiliconFlow API Key"),
+      this.#theme.fg("accent", `${this.#providerName} API Key`),
       "",
-      `${this.#theme.fg("text", this.#value.length === 0 ? "" : masked)}${CURSOR_MARKER}`,
+      `${this.#theme.fg("dim", "API Key  [")}${this.#theme.fg("text", this.#value.length === 0 ? "" : masked)}${this.focused ? CURSOR_MARKER : ""}${this.#theme.fg("dim", "]")}`,
       "",
-      this.#theme.fg("muted", "Enter Save   Esc Cancel"),
+      this.#theme.fg("muted", "Enter Apply   Esc Cancel"),
     ];
   }
 
@@ -100,12 +104,13 @@ export class MaskedSecretInput {
   }
 
   #append(value: string): void {
+    const remaining = Math.max(0, 16_384 - [...this.#value].length);
     this.#value += [...value]
       .filter((character) => {
         const code = character.charCodeAt(0);
-        return code >= 32 && code !== 127;
+        return code >= 32 && code !== 127 && (code < 128 || code > 159);
       })
-      .join("")
-      .slice(0, 16_384);
+      .slice(0, remaining)
+      .join("");
   }
 }

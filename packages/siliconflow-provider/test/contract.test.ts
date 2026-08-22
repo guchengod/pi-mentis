@@ -14,12 +14,76 @@ import {
   postJson,
   ProviderRequestGate,
   SiliconFlowEmbeddingProvider,
+  SiliconFlowModelCatalog,
   SiliconFlowRerankProvider,
 } from "../src/index.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("SiliconFlow wire contracts", () => {
+  it("lists account-visible models by the official sub_type query", async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        requests.push({
+          url,
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        const subtype = new URL(url).searchParams.get("sub_type");
+        return Response.json({
+          object: "list",
+          data:
+            subtype === "embedding"
+              ? [{ id: "BAAI/bge-m3" }, { id: "Qwen/Qwen3-Embedding-8B" }]
+              : [{ id: "Qwen/Qwen3-Reranker-8B" }],
+        });
+      }),
+    );
+    const config = createDefaultConfig(process.cwd()).inference.siliconflow;
+    const catalog = new SiliconFlowModelCatalog(config, {
+      SILICONFLOW_API_KEY: "test-catalog-key",
+    });
+
+    await expect(catalog.list("embedding")).resolves.toEqual([
+      "BAAI/bge-m3",
+      "Qwen/Qwen3-Embedding-8B",
+    ]);
+    await expect(catalog.list("reranker")).resolves.toEqual(["Qwen/Qwen3-Reranker-8B"]);
+    expect(requests.map(({ url }) => new URL(url).searchParams.get("sub_type"))).toEqual([
+      "embedding",
+      "reranker",
+    ]);
+    expect(requests.every(({ authorization }) => authorization === "Bearer test-catalog-key")).toBe(
+      true,
+    );
+  });
+
+  it("does not project a models error response body", async () => {
+    const nonce = "TEST_ONLY_SECRET_models_error_61b";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ message: nonce }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+    const config = createDefaultConfig(process.cwd()).inference.siliconflow;
+    const catalog = new SiliconFlowModelCatalog(config, { SILICONFLOW_API_KEY: nonce });
+    let projected = "";
+    try {
+      await catalog.list("embedding");
+    } catch (error) {
+      projected = JSON.stringify(error);
+    }
+    expect(projected).not.toContain(nonce);
+    expect(projected).toContain("HTTP 401");
+  });
+
   it("maps float and base64 Embeddings by index", () => {
     const bytes = Buffer.alloc(8);
     bytes.writeFloatLE(0.25, 0);

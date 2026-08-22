@@ -184,12 +184,12 @@ describe("provider settings secret boundary", () => {
           embeddingModel: status.embeddingModel,
           latencyMs: 0,
         }),
+        models: vi.fn(),
       },
     });
     const context = {
       cwd: "/unused",
       ui: {
-        select: vi.fn(async () => "Replace key"),
         custom: vi.fn(async () => nonce),
         notify: (message: string) => notifications.push(message),
       },
@@ -222,12 +222,12 @@ describe("provider settings secret boundary", () => {
         }),
         reload,
         test: vi.fn(),
+        models: vi.fn(),
       },
     });
     const context = {
       cwd: "/unused",
       ui: {
-        select: vi.fn(async () => "Replace key"),
         custom: vi.fn(async () => undefined),
         notify: vi.fn(),
       },
@@ -237,11 +237,130 @@ describe("provider settings secret boundary", () => {
     expect(reload).not.toHaveBeenCalled();
   });
 
+  it("selects a provider, opens key input immediately, and shows save-free model settings", async () => {
+    const store = new MemorySecretStore();
+    let configured = false;
+    const menus: Array<{ title: string; options: readonly string[] }> = [];
+    const selections = ["SiliconFlow", "Back"];
+    const controller = new MentisSettingsController({
+      configStore: new ProviderConfigStore("/unused/config.json"),
+      secretStore: store,
+      environment: {},
+      runtime: {
+        status: async () => ({
+          ready: configured,
+          providerId: "siliconflow",
+          providerName: "SiliconFlow",
+          credentialSource: configured ? "secure" : "missing",
+          configured,
+          endpoint: "https://api.siliconflow.cn/v1",
+          embeddingModel: "Qwen/Qwen3-Embedding-8B",
+          rerankEnabled: true,
+          rerankModel: "Qwen/Qwen3-Reranker-8B",
+        }),
+        reload: async () => {
+          configured = true;
+          return { activated: true };
+        },
+        test: vi.fn(),
+        models: vi.fn(),
+      },
+    });
+    const context = {
+      cwd: "/unused",
+      ui: {
+        select: vi.fn(async (title: string, options: readonly string[]) => {
+          menus.push({ title, options });
+          return selections.shift();
+        }),
+        custom: vi.fn(async () => "new-secret"),
+        notify: vi.fn(),
+      },
+    } as unknown as ExtensionCommandContext;
+
+    await controller.handle("", context);
+
+    expect(context.ui.custom).toHaveBeenCalledOnce();
+    expect(menus[0]).toEqual({ title: "Select Provider", options: ["SiliconFlow"] });
+    expect(menus[1]?.title).toBe("SiliconFlow");
+    expect(menus[1]?.options.join("\n")).not.toMatch(/Endpoint|Replace|Save/u);
+    expect(menus[1]?.options).toContain("Embedding Model — Qwen/Qwen3-Embedding-8B");
+  });
+
+  it("persists and activates a selected model immediately without a Save action", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mentis-model-select-"));
+    const filename = path.join(root, "config.json");
+    try {
+      await writeFile(filename, "{}\n", { mode: 0o600 });
+      const configStore = new ProviderConfigStore(filename);
+      const current = await configStore.load(root, {});
+      const selections = [
+        `Embedding Model — ${current.inference.siliconflow.embedding.model}`,
+        "BAAI/bge-m3",
+        "Back",
+      ];
+      const reload = vi.fn(async () => ({ activated: true }));
+      const controller = new MentisSettingsController({
+        configStore,
+        secretStore: new MemorySecretStore(),
+        environment: { SILICONFLOW_API_KEY: "environment" },
+        runtime: {
+          status: async () => ({
+            ready: true,
+            providerId: "siliconflow",
+            providerName: "SiliconFlow",
+            credentialSource: "environment",
+            configured: true,
+            endpoint: current.inference.siliconflow.baseUrl,
+            embeddingModel: current.inference.siliconflow.embedding.model,
+            rerankEnabled: true,
+            rerankModel: current.inference.siliconflow.rerank.model,
+          }),
+          reload,
+          test: vi.fn(),
+          models: async () => ({
+            providerId: "siliconflow",
+            providerName: "SiliconFlow",
+            embeddingModels: ["Qwen/Qwen3-Embedding-8B", "BAAI/bge-m3"],
+            rerankModels: ["Qwen/Qwen3-Reranker-8B"],
+            source: "remote",
+          }),
+        },
+      });
+      const context = {
+        cwd: root,
+        ui: {
+          select: vi.fn(async () => selections.shift()),
+          notify: vi.fn(),
+        },
+      } as unknown as ExtensionCommandContext;
+
+      await controller.handle("config", context);
+
+      const updated = await configStore.load(root, {});
+      expect(updated.inference.siliconflow.embedding).toMatchObject({
+        model: "BAAI/bge-m3",
+        dimensions: 1_024,
+      });
+      const persisted = JSON.parse(await readFile(filename, "utf8")) as {
+        inference: { siliconflow: Record<string, unknown> };
+      };
+      expect(persisted.inference.siliconflow).not.toHaveProperty("baseUrl");
+      expect(reload).toHaveBeenCalledOnce();
+      expect(context.ui.select).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.arrayContaining(["Save"]),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("removing secure settings activates the environment fallback", async () => {
     const store = new MemorySecretStore();
     store.values.set(SILICONFLOW_PROVIDER.credential.secretId, "secure");
     const reload = vi.fn(async () => ({ activated: true }));
-    const selections = ["Use environment fallback"];
+    const selections = ["Remove Stored API Key", "Back"];
     const controller = new MentisSettingsController({
       configStore: new ProviderConfigStore("/unused/config.json"),
       secretStore: store,
@@ -260,6 +379,7 @@ describe("provider settings secret boundary", () => {
         }),
         reload,
         test: vi.fn(),
+        models: vi.fn(),
       },
     });
     const context = {
@@ -270,7 +390,7 @@ describe("provider settings secret boundary", () => {
         notify: vi.fn(),
       },
     } as unknown as ExtensionCommandContext;
-    await controller.handle("key", context);
+    await controller.handle("config", context);
     expect(store.values.has(SILICONFLOW_PROVIDER.credential.secretId)).toBe(false);
     await expect(
       resolveCredential(SILICONFLOW_PROVIDER, store, { SILICONFLOW_API_KEY: "environment" }),
@@ -302,7 +422,8 @@ describe("provider settings secret boundary", () => {
       const original = await configStore.load(root, {});
       const selections = [
         `Embedding Model — ${original.inference.siliconflow.embedding.model}`,
-        "Save",
+        "BAAI/bge-m3",
+        "Back",
       ];
       const reload = vi
         .fn()
@@ -329,13 +450,19 @@ describe("provider settings secret boundary", () => {
           }),
           reload,
           test: vi.fn(),
+          models: async () => ({
+            providerId: "siliconflow",
+            providerName: "SiliconFlow",
+            embeddingModels: ["Qwen/Qwen3-Embedding-8B", "BAAI/bge-m3"],
+            rerankModels: ["Qwen/Qwen3-Reranker-8B", "BAAI/bge-reranker-v2-m3"],
+            source: "remote",
+          }),
         },
       });
       const context = {
         cwd: root,
         ui: {
           select: vi.fn(async () => selections.shift()),
-          input: vi.fn(async () => "not/a/verified-model"),
           notify: vi.fn(),
         },
       } as unknown as ExtensionCommandContext;

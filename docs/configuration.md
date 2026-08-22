@@ -7,8 +7,10 @@ intentional isolated absolute root. Omitted fields inherit safe defaults:
 
 Run `/mentis help` inside Pi to display the effective configuration path and detailed memory,
 knowledge-base, automatic-recall, Sidecar, and performance guidance. `/kb help` displays the same
-help from the knowledge command surface. Provider endpoint and model settings can be edited with
-`/mentis config` and are activated without restarting Pi.
+help from the knowledge command surface. `/mentis` selects a provider, opens masked key input when
+needed, and exposes selector-based Embedding and Rerank model settings. A selection is persisted and
+activated immediately without a Save step or Pi restart. The endpoint remains configurable through
+JSON or environment variables but is intentionally not displayed or edited by the TUI.
 
 SiliconFlow is the only production provider in this release. `/mentis key` stores its credential in
 macOS Keychain under service `pi-mentis` and account `provider:siliconflow:default`. The credential
@@ -16,6 +18,10 @@ resolver uses secure settings first, then the configured environment variable (d
 `SILICONFLOW_API_KEY`). API keys are never written to this JSON file or stored in Mentis memory.
 Platforms without a secure backend keep the environment-variable fallback and do not write a
 plaintext secret file.
+
+Model choices come from SiliconFlow `GET /v1/models` with `sub_type=embedding` and
+`sub_type=reranker`, intersected with Mentis' verified capability catalog. If the remote catalog is
+unavailable, the TUI uses the local verified list and reports the fallback.
 
 ```json
 {

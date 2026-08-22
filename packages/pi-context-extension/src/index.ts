@@ -44,6 +44,7 @@ import type { MemoryCapsule, SessionOpenResult } from "./sidecar-protocol.js";
 import { createToolResultSpool, removeToolResultSpool } from "./tool-result-spool.js";
 import {
   MentisSettingsController,
+  type ProviderModelCatalogResult,
   type ProviderReloadResult,
   type ProviderRuntimeStatus,
   type ProviderTestResult,
@@ -197,7 +198,13 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       }
     | undefined;
   const recalledMemoryIds = new Set<string>();
-  const helpText = formatMentisHelp({ configPath, memory: true, knowledge: true, doctor: true });
+  const helpText = formatMentisHelp({
+    configPath,
+    memory: true,
+    knowledge: true,
+    doctor: true,
+    providerSettings: true,
+  });
   const memorySystemPrompt = createMentisMemorySystemPrompt();
   const sidecar = new MentisSidecarClient({
     onCapsule: (updated) => {
@@ -235,6 +242,8 @@ export default async function piMentisIntegratedExtension(pi: ExtensionAPI): Pro
       reload: async () =>
         (await sidecar.call("provider.reload", {}, 30_000)) as ProviderReloadResult,
       test: async () => (await sidecar.call("provider.test", {}, 45_000)) as ProviderTestResult,
+      models: async () =>
+        (await sidecar.call("provider.models", {}, 30_000)) as ProviderModelCatalogResult,
     },
   });
   const openConfiguredSession = async (): Promise<void> => {

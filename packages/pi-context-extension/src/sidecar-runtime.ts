@@ -23,6 +23,8 @@ import type {
   RerankProvider,
 } from "@pi-mentis/pi-mentis-inference";
 import {
+  listVerifiedEmbeddingModelIds,
+  listVerifiedRerankModelIds,
   ReloadableEmbeddingProvider,
   ReloadableRerankProvider,
 } from "@pi-mentis/pi-mentis-inference";
@@ -88,6 +90,7 @@ import {
 import {
   SiliconFlowConnectionTester,
   SiliconFlowEmbeddingProvider,
+  SiliconFlowModelCatalog,
   SiliconFlowRerankProvider,
 } from "@pi-mentis/pi-mentis-siliconflow";
 import {
@@ -423,6 +426,7 @@ export class MentisSidecarRuntime {
     if (request.method === "provider.status") return this.#providerStatus();
     if (request.method === "provider.reload") return this.#reloadProvider();
     if (request.method === "provider.test") return this.#testProvider();
+    if (request.method === "provider.models") return this.#providerModels();
     if (request.method === "status") return this.#status(request.params.clientSessionId);
     if (request.method === "shutdown") {
       await this.close();
@@ -999,6 +1003,75 @@ export class MentisSidecarRuntime {
         : {}),
       latencyMs: performance.now() - started,
     };
+  }
+
+  async #providerModels() {
+    const config = this.#config;
+    const fallback = {
+      providerId: "siliconflow",
+      providerName: "SiliconFlow",
+      embeddingModels: listVerifiedEmbeddingModelIds(),
+      rerankModels: listVerifiedRerankModelIds(),
+      source: "verified-fallback" as const,
+    };
+    if (config === undefined) {
+      return {
+        ...fallback,
+        error: { category: "configuration", message: "Provider runtime is not initialized" },
+      };
+    }
+    const credential = await resolveCredential(
+      {
+        ...SILICONFLOW_PROVIDER,
+        credential: {
+          ...SILICONFLOW_PROVIDER.credential,
+          envNames: [config.inference.siliconflow.apiKeyEnv],
+        },
+      },
+      this.#secretStore,
+    );
+    if (!credential.configured) {
+      return {
+        ...fallback,
+        error: { category: "authentication", message: "API key is not configured" },
+      };
+    }
+    try {
+      const catalog = new SiliconFlowModelCatalog(
+        config.inference.siliconflow,
+        providerEnvironment(config.inference.siliconflow, credential),
+      );
+      const [remoteEmbedding, remoteRerank] = await Promise.all([
+        catalog.list("embedding"),
+        catalog.list("reranker"),
+      ]);
+      const remoteEmbeddingSet = new Set(remoteEmbedding);
+      const remoteRerankSet = new Set(remoteRerank);
+      const embeddingModels = listVerifiedEmbeddingModelIds().filter((model) =>
+        remoteEmbeddingSet.has(model),
+      );
+      const rerankModels = listVerifiedRerankModelIds().filter((model) =>
+        remoteRerankSet.has(model),
+      );
+      if (embeddingModels.length === 0 || rerankModels.length === 0) {
+        return {
+          ...fallback,
+          error: {
+            category: "model",
+            message: "No compatible verified models were returned; using the local catalog",
+          },
+        };
+      }
+      return {
+        providerId: "siliconflow",
+        providerName: "SiliconFlow",
+        embeddingModels,
+        rerankModels,
+        source: "remote" as const,
+      };
+    } catch (error) {
+      return { ...fallback, error: safeProviderError(error) };
+    }
   }
 
   async #openSession(

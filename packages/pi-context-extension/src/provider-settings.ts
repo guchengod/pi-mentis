@@ -8,6 +8,7 @@ import {
   type PiMentisConfig,
   type SiliconFlowConfig,
 } from "@pi-mentis/pi-mentis-core";
+import { getVerifiedEmbeddingModel, getVerifiedRerankModel } from "@pi-mentis/pi-mentis-inference";
 
 export interface MentisProviderDefinition {
   readonly id: string;
@@ -229,6 +230,22 @@ function applyDraft(config: PiMentisConfig, draft: ProviderConfigDraft): PiMenti
   if (endpoint === "" || embeddingModel === "" || rerankModel === "") {
     throw new Error("Endpoint and model identifiers must be non-empty");
   }
+  const embeddingCapability = getVerifiedEmbeddingModel(embeddingModel);
+  const embeddingDimensions = embeddingCapability.supportedDimensions.includes(
+    config.inference.siliconflow.embedding.dimensions,
+  )
+    ? config.inference.siliconflow.embedding.dimensions
+    : embeddingCapability.defaultDimensions;
+  const rerankCapability = getVerifiedRerankModel(rerankModel);
+  const rerankMaxInputTokens = Math.max(
+    8_192,
+    Math.min(config.inference.siliconflow.rerank.maxInputTokens, rerankCapability.maxInputTokens),
+  );
+  const {
+    maxChunksPerDoc: configuredMaxChunksPerDoc,
+    overlapTokens: configuredOverlapTokens,
+    ...rerankBase
+  } = config.inference.siliconflow.rerank;
   return validateConfig({
     ...config,
     inference: {
@@ -236,8 +253,22 @@ function applyDraft(config: PiMentisConfig, draft: ProviderConfigDraft): PiMenti
       siliconflow: {
         ...config.inference.siliconflow,
         baseUrl: endpoint,
-        embedding: { ...config.inference.siliconflow.embedding, model: embeddingModel },
-        rerank: { ...config.inference.siliconflow.rerank, model: rerankModel },
+        embedding: {
+          ...config.inference.siliconflow.embedding,
+          model: embeddingModel,
+          dimensions: embeddingDimensions,
+        },
+        rerank: {
+          ...rerankBase,
+          model: rerankModel,
+          maxInputTokens: rerankMaxInputTokens,
+          ...(rerankCapability.supportsDocumentChunking && configuredMaxChunksPerDoc !== undefined
+            ? { maxChunksPerDoc: configuredMaxChunksPerDoc }
+            : {}),
+          ...(rerankCapability.supportsOverlapTokens && configuredOverlapTokens !== undefined
+            ? { overlapTokens: configuredOverlapTokens }
+            : {}),
+        },
       },
     },
   });
@@ -293,6 +324,13 @@ export class ProviderConfigStore {
     void _legacyCredential;
     const embedding = record(siliconflow["embedding"]);
     const rerank = record(siliconflow["rerank"]);
+    const {
+      maxChunksPerDoc: _rawMaxChunksPerDoc,
+      overlapTokens: _rawOverlapTokens,
+      ...safeRerank
+    } = rerank;
+    void _rawMaxChunksPerDoc;
+    void _rawOverlapTokens;
     const serialized = {
       ...raw,
       mentisSettings: { ...settings, version: 1, revision: previousRevision + 1 },
@@ -301,9 +339,22 @@ export class ProviderConfigStore {
         provider: "siliconflow",
         siliconflow: {
           ...safeSiliconflow,
-          baseUrl: next.inference.siliconflow.baseUrl,
-          embedding: { ...embedding, model: next.inference.siliconflow.embedding.model },
-          rerank: { ...rerank, model: next.inference.siliconflow.rerank.model },
+          embedding: {
+            ...embedding,
+            model: next.inference.siliconflow.embedding.model,
+            dimensions: next.inference.siliconflow.embedding.dimensions,
+          },
+          rerank: {
+            ...safeRerank,
+            model: next.inference.siliconflow.rerank.model,
+            maxInputTokens: next.inference.siliconflow.rerank.maxInputTokens,
+            ...(next.inference.siliconflow.rerank.maxChunksPerDoc === undefined
+              ? {}
+              : { maxChunksPerDoc: next.inference.siliconflow.rerank.maxChunksPerDoc }),
+            ...(next.inference.siliconflow.rerank.overlapTokens === undefined
+              ? {}
+              : { overlapTokens: next.inference.siliconflow.rerank.overlapTokens }),
+          },
         },
       },
     };
